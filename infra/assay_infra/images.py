@@ -28,6 +28,7 @@ WORKSPACE_MANIFESTS = (
     "infra/pyproject.toml",
     "db/pyproject.toml",
     "api/pyproject.toml",
+    "tss/pyproject.toml",
 )
 
 

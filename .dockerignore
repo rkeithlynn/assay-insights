@@ -7,5 +7,9 @@
 !db/assay_db/**
 !api/pyproject.toml
 !api/assay_api/**
+!tss/pyproject.toml
+!tss/assay_tss/**
+!tests/__init__.py
+!tests/isolation/**
 **/__pycache__
 **/*.pyc

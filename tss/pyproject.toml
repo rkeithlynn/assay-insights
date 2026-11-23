@@ -1,0 +1,37 @@
+[project]
+name = "assay-tss"
+version = "0.1.0"
+description = "Tenant Storage Service: storage contexts and object keys, the Lambda, and tenant provisioning"
+requires-python = ">=3.14,<3.15"
+# The base install is the client package: types, object keys, policies and the SigV4 client.
+dependencies = [
+    "boto3>=1.40",
+    "pydantic>=2.14,<2.14.4",
+]
+
+[project.optional-dependencies]
+# The Lambda behind the private API.
+service = ["assay-db"]
+# The provisioning task: Pulumi's Automation API, one stack per tenant.
+provision = [
+    "assay-db",
+    "pulumi>=3.200,<4",
+    "pulumi-aws>=7,<8",
+]
+# The isolation test runner (tests/isolation), a Lambda in the VPC. Never part of the
+# service or the provisioning image.
+isolation-tests = [
+    "assay-db",
+    "pytest>=8.4",
+]
+
+[tool.uv.sources]
+assay-db = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "assay_tss"
+module-root = ""

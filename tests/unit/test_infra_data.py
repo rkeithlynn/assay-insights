@@ -142,6 +142,10 @@ def test_endpoint_list_matches_spec() -> None:
         "logs",
         "secretsmanager",
         "sqs",
+        # Added when a call first needed them (build step 4).
+        "execute-api",
+        "lambda",
+        "guardduty",
     }
 
 

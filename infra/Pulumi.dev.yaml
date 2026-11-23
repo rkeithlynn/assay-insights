@@ -23,3 +23,13 @@ config:
   # Cognito managed login prefix domains (<prefix>.auth.us-east-1.amazoncognito.com).
   assay-platform:tenantAuthDomainPrefix: assay-dev-tenant
   assay-platform:platformAuthDomainPrefix: assay-dev-admin
+  # The only principal that may assume the break-glass role: the owner's IAM Identity Center
+  # AdministratorAccess role. Production needs a separate, approval-gated role instead.
+  assay-platform:breakGlassPrincipalArn: arn:aws:iam::429100266783:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_AdministratorAccess_d20a664f5ea3111b
+  # Amazon Titan Text Embeddings V2. Fixed when a tenant's vector index is created.
+  assay-platform:vectorDimensions: "1024"
+  # Deploys the in-VPC isolation test runner (tests/isolation). Development stacks only.
+  assay-platform:isolationTests: "true"
+  # Alarm notifications (break-glass use, failed tenant provisioning) are emailed here.
+  # SNS sends a confirmation link first; nothing is delivered until it is followed.
+  assay-platform:alarmEmail: keith.lynn@pilartech.com

@@ -51,6 +51,9 @@ NAMING_CONVENTION = {
 # Enumerated values from the spec. The API and workers import these.
 TENANT_KINDS = ("platform", "business")
 TENANT_STATUSES = ("provisioning", "active", "suspended", "failed")
+# assay_tss.models.IsolationMode and StorageStatus.
+STORAGE_MODES = ("dedicated",)
+STORAGE_STATUSES = ("active", "offboarded")
 JOBS = ("ingest", "query")
 USER_ROLES = ("master-admin", "master-user", "tenant-admin", "tenant-user")
 USER_STATUSES = ("invited", "active", "disabled")
@@ -192,12 +195,12 @@ class TenantStorage(Base):
     """Where a tenant's data lives. Readable only by the `tss` database role."""
 
     __tablename__ = "tenant_storage"
+    __table_args__ = (one_of("mode", STORAGE_MODES), one_of("status", STORAGE_STATUSES))
 
     id: Mapped[uuid_pk]
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey(f"{SCHEMA}.tenants.id"), unique=True, nullable=False
     )
-    # IsolationMode and the storage status values are defined with the TSS (build step 4).
     mode: Mapped[str]
     bucket: Mapped[str]
     prefix: Mapped[str | None]

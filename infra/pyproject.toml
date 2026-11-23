@@ -7,7 +7,12 @@ dependencies = [
     "pulumi>=3.200,<4",
     "pulumi-aws>=7,<8",
     "pulumi-command>=1.1,<2",
+    # Policy documents and names shared with the Tenant Storage Service.
+    "assay-tss",
 ]
+
+[tool.uv.sources]
+assay-tss = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.9,<0.14"]

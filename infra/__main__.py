@@ -1,7 +1,8 @@
 """assay-platform Pulumi program.
 
 Build order follows BUILD_SPEC.md section 4. Implemented so far: 1 (DNS and certificate),
-2 (network), 3 (database, with the migration Lambda), 4 (Cognito) and 6 (the API).
+2 (network), 3 (database, with the migration Lambda), 4 (Cognito), 5 (the Tenant Storage
+Service, with tenant provisioning) and 6 (the API).
 """
 
 from pathlib import Path
@@ -9,13 +10,18 @@ from pathlib import Path
 import pulumi
 import pulumi_aws as aws
 
+from assay_infra.alerts import Alerts
 from assay_infra.api import ApiService
 from assay_infra.auth import Auth
 from assay_infra.config import load_config
 from assay_infra.database import Database
 from assay_infra.dns import DnsAndCertificate
+from assay_infra.isolation import SERVICE_NAME as ISOLATION_SERVICE
+from assay_infra.isolation import IsolationRunner, runner_role
 from assay_infra.migrations import MigrationRunner
 from assay_infra.network import Network
+from assay_infra.provisioning import Provisioning
+from assay_infra.tss import TenantStorage
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -66,6 +72,70 @@ api = ApiService(
     aws_profile=aws_profile,
 )
 
+alerts = Alerts(
+    f"{config.name_prefix}-alarms",
+    email=config.alerts.email,
+    region=config.region,
+    account_id=account_id,
+)
+
+# The isolation test runner (development stacks only) is a TSS caller, so its role exists
+# before the TSS does.
+isolation_name = f"{config.name_prefix}-isolation-tests"
+tss_callers: dict[str, aws.iam.Role] = {}
+if config.tenancy.isolation_tests:
+    tss_callers[ISOLATION_SERVICE] = runner_role(isolation_name, account_id)
+
+storage = TenantStorage(
+    f"{config.name_prefix}-tss",
+    repo_root=REPO_ROOT,
+    region=config.region,
+    account_id=account_id,
+    name_prefix=config.name_prefix,
+    network=network,
+    database=database,
+    database_name=config.database.database_name,
+    break_glass_principal_arn=config.tenancy.break_glass_principal_arn,
+    alarm_topic_arn=alerts.topic.arn,
+    callers=tss_callers,
+    aws_profile=aws_profile,
+)
+
+provisioning = Provisioning(
+    f"{config.name_prefix}-provision",
+    repo_root=REPO_ROOT,
+    region=config.region,
+    account_id=account_id,
+    name_prefix=config.name_prefix,
+    network=network,
+    database=database,
+    database_name=config.database.database_name,
+    auth=auth,
+    storage=storage,
+    vector_dimensions=config.tenancy.vector_dimensions,
+    default_tags=config.tenancy.default_tags,
+    alarm_topic_arn=alerts.topic.arn,
+    aws_profile=aws_profile,
+)
+
+if config.tenancy.isolation_tests:
+    isolation = IsolationRunner(
+        isolation_name,
+        role=tss_callers[ISOLATION_SERVICE],
+        repo_root=REPO_ROOT,
+        region=config.region,
+        account_id=account_id,
+        name_prefix=config.name_prefix,
+        network=network,
+        database=database,
+        database_name=config.database.database_name,
+        tss_endpoint_url=storage.endpoint_url,
+        tenant_role_arn=storage.tenant_role.arn,
+        invite_function_arn=provisioning.invite_function.arn,
+        aws_profile=aws_profile,
+    )
+    pulumi.export("isolation_function_name", isolation.function.name)
+
 pulumi.export("hosted_zone_id", edge_dns.zone.zone_id)
 pulumi.export("name_servers", edge_dns.zone.name_servers)
 pulumi.export("certificate_arn", edge_dns.certificate.arn)
@@ -86,3 +156,12 @@ pulumi.export("api_load_balancer_dns_name", api.load_balancer.dns_name)
 pulumi.export("api_target_group_arn", api.target_group.arn)
 pulumi.export("api_cluster_name", api.cluster.name)
 pulumi.export("api_service_name", api.service.name)
+pulumi.export("alarm_topic_arn", alerts.topic.arn)
+pulumi.export("tss_endpoint_url", storage.endpoint_url)
+pulumi.export("tss_function_name", storage.function.name)
+pulumi.export("tenant_role_arn", storage.tenant_role.arn)
+pulumi.export("break_glass_role_arn", storage.break_glass.role.arn)
+pulumi.export("provisioning_state_machine_arn", provisioning.state_machine.arn)
+pulumi.export("provisioning_role_arn", provisioning.task_role.arn)
+pulumi.export("tenant_state_bucket", provisioning.state_bucket.bucket)
+pulumi.export("cognito_admin_function_name", provisioning.invite_function.name)

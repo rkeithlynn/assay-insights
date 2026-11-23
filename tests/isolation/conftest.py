@@ -1,0 +1,182 @@
+"""Fixtures for the isolation tests, which run inside the VPC against the real account.
+
+The two tenants come from the runner's event (`ISOLATION_TENANT_A`, `ISOLATION_TENANT_B`).
+Every storage context is issued by the real TSS. "The runner" is this Lambda's own role: a
+probe whose IAM policy allows what the tenant resources' own policies must refuse.
+
+The tests write nothing: every write they attempt must be refused, and every database
+transaction is rolled back.
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+
+import boto3
+import pytest
+from botocore.config import Config
+from botocore.exceptions import ClientError
+from sqlalchemy import Connection, Engine, text
+
+from assay_db.connect import DbTarget, iam_engine
+from assay_tss.client import TssClient
+from assay_tss.models import StorageAccess, StorageContext, source_identity
+
+DB_USER = "app_tenant"  # assay_db.roles.APP_TENANT
+# Fail fast: an unreachable endpoint must not look like a refusal.
+CLIENT_CONFIG = Config(connect_timeout=5, read_timeout=20, retries={"max_attempts": 2})
+DENIED_CODES = frozenset({"AccessDenied", "AccessDeniedException", "403", "Forbidden"})
+# A tag no policy looks at. If a tagging probe ever got through, it would change nothing
+# that isolation depends on.
+PROBE_TAG = "isolation-probe"
+
+
+@dataclass(frozen=True)
+class Env:
+    region: str
+    name_prefix: str
+    tss_endpoint: str
+    service: str
+    tenant_role_arn: str
+    invite_function: str
+    tenant_a: uuid.UUID
+    tenant_b: uuid.UUID
+
+    @property
+    def account_id(self) -> str:
+        return self.tenant_role_arn.split(":")[4]
+
+    @property
+    def tenant_role_name(self) -> str:
+        return self.tenant_role_arn.rsplit("/", 1)[1]
+
+
+@dataclass(frozen=True)
+class Pair:
+    """One direction of the test: `own` credentials against `other`'s resources."""
+
+    own: StorageContext
+    other: StorageContext
+
+
+def assert_denied(call: Callable[[], object]) -> None:
+    """The call must fail with an access-denied error, not succeed and not fail otherwise."""
+    with pytest.raises(ClientError) as raised:
+        call()
+    code = raised.value.response.get("Error", {}).get("Code", "")
+    assert code in DENIED_CODES, f"expected access denied, got {code!r}"
+
+
+def client(session: boto3.Session, service: str, region: str) -> object:
+    if service == "sts":
+        # The regional endpoint: the only one the VPC's STS endpoint serves.
+        return session.client(
+            "sts",
+            region_name=region,
+            endpoint_url=f"https://sts.{region}.amazonaws.com",
+            config=CLIENT_CONFIG,
+        )
+    return session.client(service, region_name=region, config=CLIENT_CONFIG)  # type: ignore[call-overload]
+
+
+@pytest.fixture(scope="session")
+def env() -> Env:
+    tenant_a = uuid.UUID(os.environ["ISOLATION_TENANT_A"])
+    tenant_b = uuid.UUID(os.environ["ISOLATION_TENANT_B"])
+    assert tenant_a != tenant_b, "the two test tenants must differ"
+    return Env(
+        region=os.environ["AWS_REGION"],
+        name_prefix=os.environ["NAME_PREFIX"],
+        tss_endpoint=os.environ["TSS_ENDPOINT"],
+        service=os.environ["TSS_SERVICE"],
+        tenant_role_arn=os.environ["TENANT_ROLE_ARN"],
+        invite_function=os.environ["INVITE_FUNCTION"],
+        tenant_a=tenant_a,
+        tenant_b=tenant_b,
+    )
+
+
+@pytest.fixture(scope="session")
+def tss(env: Env) -> TssClient:
+    return TssClient(env.tss_endpoint, region=env.region)
+
+
+@pytest.fixture(scope="session")
+def resolve(env: Env, tss: TssClient) -> Callable[[uuid.UUID, StorageAccess], StorageContext]:
+    def _resolve(tenant_id: uuid.UUID, access: StorageAccess) -> StorageContext:
+        return tss.resolve(tenant_id, access, source_identity(env.service, "isolation-tests"))
+
+    return _resolve
+
+
+@pytest.fixture(scope="session")
+def context_a(
+    env: Env, resolve: Callable[[uuid.UUID, StorageAccess], StorageContext]
+) -> StorageContext:
+    return resolve(env.tenant_a, StorageAccess.PIPELINE)
+
+
+@pytest.fixture(scope="session")
+def context_b(
+    env: Env, resolve: Callable[[uuid.UUID, StorageAccess], StorageContext]
+) -> StorageContext:
+    return resolve(env.tenant_b, StorageAccess.PIPELINE)
+
+
+@pytest.fixture(params=["a-against-b", "b-against-a"])
+def pair(
+    request: pytest.FixtureRequest, context_a: StorageContext, context_b: StorageContext
+) -> Pair:
+    """Every cross-tenant test runs in both directions."""
+    if request.param == "a-against-b":
+        return Pair(own=context_a, other=context_b)
+    return Pair(own=context_b, other=context_a)
+
+
+@pytest.fixture(params=["tenant-a", "tenant-b"])
+def tenant(
+    request: pytest.FixtureRequest, context_a: StorageContext, context_b: StorageContext
+) -> StorageContext:
+    """Each tenant in turn, with its full (pipeline) access."""
+    return context_a if request.param == "tenant-a" else context_b
+
+
+@pytest.fixture(scope="session")
+def runner(env: Env) -> boto3.Session:
+    """This Lambda's own role: allowed by IAM, to be refused by the resources."""
+    return boto3.Session(region_name=env.region)
+
+
+@pytest.fixture(scope="session")
+def engine() -> Iterator[Engine]:
+    db = iam_engine(DbTarget.from_env(), DB_USER, application_name="assay-isolation-tests")
+    try:
+        yield db
+    finally:
+        db.dispose()
+
+
+@pytest.fixture
+def as_tenant(engine: Engine) -> Iterator[Callable[[uuid.UUID | None], Connection]]:
+    """A transaction as `app_tenant` scoped to a tenant (or to none). Always rolled back."""
+    connections: list[Connection] = []
+
+    def _connect(tenant_id: uuid.UUID | None) -> Connection:
+        conn = engine.connect()
+        connections.append(conn)
+        if tenant_id is not None:
+            conn.execute(
+                text("SELECT pg_catalog.set_config('app.tenant_id', :tid, true)"),
+                {"tid": str(tenant_id)},
+            )
+        return conn
+
+    try:
+        yield _connect
+    finally:
+        for conn in connections:
+            conn.rollback()
+            conn.close()

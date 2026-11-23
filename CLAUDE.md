@@ -32,7 +32,7 @@ change. Where this file and the spec differ, the spec wins.
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
-| 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | Next. Not started |
+| 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Built, not yet deployed** (2026-11-23, branch `build-step-4`) |
 | 5–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -76,6 +76,19 @@ Step 3 was verified on 2026-11-23:
 - Not yet tested in AWS: `GET /me` end to end, which needs CloudFront and seeded users
   (step 5), and whether a real access token's `amr` shows MFA.
 - CI on the `build-step-3` pull request must pass before `main` is fast-forwarded.
+
+Step 4 was built on 2026-11-23 and passes its unit tests. It is complete only when the owner
+has done all of this, in order, and each has succeeded:
+
+1. `pulumi up`, then `uv run scripts/migrate.py` (revision `0003`). The owner follows the
+   confirmation link SNS emails to `alarmEmail`, or no alarm is delivered.
+2. `uv run scripts/add_tenant.py` twice, for the fixture tenants "Isolation Test A" and
+   "Isolation Test B". Each must end `SUCCEEDED`, and each admin must get an invitation.
+3. `uv run scripts/run_isolation.py` with the two tenant IDs: every test passes.
+4. `pulumi preview` shows no changes.
+
+The first real provisioning run is also the first test of several things no unit test can
+reach; they are listed under "Step 4" in the notes below.
 
 ## Fixed facts (BUILD_SPEC.md section 2)
 
@@ -145,6 +158,27 @@ These rules are not negotiable. A change that weakens one must be rejected.
 6. Model invocation logging stays off. Apply the AI services opt-out policy if the
    organization hasn't already applied it.
 
+Owner decisions on these rules (2026-11-23):
+
+- **Rule 1, bucket policy.** Two more principals are named besides the tenant role and the
+  break-glass role, each for one job: the GuardDuty scan role (read and tag objects) and
+  the provisioning role (bucket settings, never object data). Without them malware
+  scanning and bucket management could not work.
+- **Tags are part of the lock.** Only the provisioning role may tag or untag a tenant KMS
+  key, or any other resource whose tags or name the tenant role's policy matches on.
+- **No S3 key may contain a file name.** Every part of a key is an ID or fixed text. An
+  upload is stored under an opaque `file_id` and its `file_name` is kept only in the
+  database, so a role that can list keys (the provisioning role can) learns nothing about
+  what a tenant uploaded. `assay_tss.keys` builds keys from UUIDs only.
+- **Break glass.** `assay-dev-break-glass` is assumable only by the owner's IAM Identity
+  Center `AdministratorAccess` role (`breakGlassPrincipalArn`), and every AssumeRole of it
+  raises an alarm. **Production needs a separate, approval-gated role instead.**
+- **Rule 6.** On 2026-11-23 the organization had not enabled the AI services opt-out policy
+  type, and Bedrock model invocation logging was off. The owner applies the opt-out policy
+  from the management account before build step 6. Check it before any content goes to
+  Bedrock, Textract or Rekognition:
+  `aws organizations describe-effective-policy --policy-type AISERVICES_OPT_OUT_POLICY --profile pilar-dev`.
+
 Related rules elsewhere in the spec that protect isolation:
 
 - Master roles never see tenant content: no file names, no page text, no answers, no
@@ -172,7 +206,10 @@ assets/     Logo and favicon SVGs
 ```
 
 - The Python projects form one `uv` workspace (root `pyproject.toml`). Add new packages
-  as workspace members.
+  as workspace members. Every Dockerfile that runs `uv export --locked` must then copy the
+  new member's `pyproject.toml`, and `WORKSPACE_MANIFESTS` (`assay_infra.images`) must list
+  it; `test_tenancy_images.py` fails otherwise. A new member changes every image's tag, so
+  every image rebuilds on the next `pulumi up`.
 - CI (`.github/workflows/ci.yml`) runs ruff (lint and format), mypy (strict), pytest,
   pip-audit and Bandit. It never deploys.
 - **GitHub Actions pinning (SOC 2).** Pin every action to a full 40-character commit
@@ -388,3 +425,126 @@ assets/     Logo and favicon SVGs
   `httpx2` (github.com/pydantic/httpx2, PyPI owner Kludex) is not published by the httpx
   maintainers (encode), so the owner decided on 2026-11-23 not to use it. Starlette's
   deprecation warning is filtered in pytest config. Neither package is in any image.
+
+### Step 4 (Tenant Storage Service, tenant provisioning, `tests/isolation`)
+
+- **Where things are.** `tss/assay_tss` holds the types, the only object-key builders, every
+  isolation policy (`policies.py`), the Lambda (`service.py`, `handler.py`) and the
+  provisioning task (`provision/`). `db/assay_db/tenants.py` is the add-tenant path.
+  `infra/assay_infra/tss.py`, `provisioning.py` and `isolation.py` deploy them. See
+  `tss/README.md` for who may do what to a tenant's storage.
+- **Tenant stacks keep their state in S3, not Pulumi Cloud** (owner decision): the
+  provisioning task has no internet route. Stack `assay-tenant/<tenant_id>` lives in the
+  state bucket (`pulumi stack output tenant_state_bucket`), with secrets under its KMS key.
+  Only the provisioning role can read state objects or use that key, so a tenant stack can
+  be inspected only by running the task. Bucket settings stay with the account's IAM, and
+  an administrator can list stack names (tenant IDs).
+- **The Pulumi CLI and AWS provider plugin are baked into the task image**
+  (`tss/provision.Dockerfile`), each checked against a pinned SHA-256. Their versions must
+  equal `pulumi` and `pulumi-aws` in `uv.lock`; `test_tenancy_images.py` fails otherwise.
+  To upgrade, change `uv.lock`, both version strings and both checksums together. The CLI's
+  SHA-256 is in the release's `pulumi-<version>-checksums.txt`. The plugin's release
+  publishes a SHA-1 only: download it, check the SHA-1, and pin the SHA-256 you compute.
+- **The task's root filesystem is read-only.** `/work` is a task volume and the only
+  writable path (`HOME`, `TMPDIR`, `PULUMI_HOME`). `TMPDIR` must already exist when Python
+  starts, because importing `pulumi` reads it, so it is `/work` itself and not a
+  subdirectory. The image test previews the real tenant program with no network, which is
+  also what checks that every resource in it is valid for the provider.
+- **One add-tenant path.** `assay_db.tenants.add_tenant` inserts the tenant
+  (`provisioning`) and its audit row; the provisioning state machine does the rest. Its
+  input is `{"request": ...}` (`assay_tss.provision.task.ProvisionRequest`). The request
+  carries the first admin's name and email, because no table holds them until the admin's
+  user row is written at the end; the state machine never logs execution data. In step 4
+  the task inserts the row itself (`scripts/add_tenant.py`); step 5's `POST /admin/tenants`
+  inserts it first, then starts the same execution. A retry starts a new execution with
+  the last execution's request and `retry: true`.
+- **Every provisioning step can be repeated.** The failed step is recorded in `audit_log`
+  (`provisioning_failed`, `detail.step`: `tenant`, `storage`, `storage_row`, `invite_admin`,
+  `activate`, or `task` when the task itself died and the state machine's catch recorded
+  it). A tenant that is not `provisioning` is never overwritten with `failed`.
+- **The TSS trusts the database row only as far as it matches.** `resolve` refuses a
+  `tenant_storage` row whose role, region or names differ from the configured tenant role
+  and the names derived from the tenant ID. Names are `<prefix>-t-<first 8 hex of the
+  tenant ID>`; the Rekognition collection has the bucket's name and the vector bucket
+  adds `-vectors`.
+- **A TSS caller needs an entry in `callers`** (`TenantStorage` in `infra/__main__.py`),
+  which grants `execute-api:Invoke` and fixes the service name its source identity must
+  start with. The only caller so far is the isolation runner. The API and workers are
+  added in step 6, when they first use storage.
+- **The Cognito admin Lambda serves `invite` only, and only the provisioning role may
+  invoke it** (owner decision). Three things enforce that: no other role's policy allows
+  it, the function has no resource-based permission, and the `lambda` endpoint's policy
+  names one function and one role. `custom:tenant_id` comes from the tenant row the task
+  reads back in the `invite_admin` step. Step 5 adds the API's operations, and must then
+  extend the endpoint policy as well as the API's role.
+- **The provisioning role** is scoped to resources named `<prefix>-t-*` and the state
+  bucket, and its own policy denies tenant object data and decrypt on tenant keys. Two
+  things it keeps, both accepted by the owner on 2026-11-23:
+  - `s3:ListBucket`. The AWS provider reads a bucket with `HeadBucket`, which needs it, so
+    the role can list key names but read nothing. This is why no key may contain a file
+    name (see the owner decisions under "Tenant isolation").
+  - `kms:GenerateDataKey` on tenant keys, **only through S3 Vectors**
+    (`kms:ViaService`). S3 Vectors requires it of whoever creates a vector bucket with a
+    customer-managed key. Never widen that condition; `test_tss_policies.py` checks it.
+  For the same `HeadBucket` reason an administrator can list the state bucket's object
+  names (tenant IDs), which the owner also accepted.
+- **Each tenant's vector bucket has its own policy** (`tenant_vector_bucket_policy`),
+  admitting only the tenant role tagged for that tenant and the provisioning role, which
+  is denied the vectors themselves. The break-glass role is not admitted: vectors can be
+  rebuilt from the documents. AWS documents vector bucket policies as "the standard AWS
+  policy format" with Deny statements, but shows no example with `Principal: "*"` or a
+  `Condition`, and this policy uses both.
+- **A tenant key's policy has no `kms:*` for the account root**, so no IAM policy can
+  grant decrypt on it; the account gets metadata actions only. Adding a new principal that
+  must use tenant keys means changing `tenant_key_policy` and re-running every tenant's
+  stack.
+- **A vector index cannot be changed after creation**: 1024 dimensions (`vectorDimensions`),
+  cosine, `float32`, and `text` as the one non-filterable metadata key. Step 6 must store
+  chunk text under `text`, or the index has to be recreated.
+- **A change to the tenant stack program reaches existing tenants only when their stack is
+  run again.** There is no "update every tenant" command yet; step 6 needs one for bucket
+  CORS.
+- **API Gateway's account-level CloudWatch Logs role** was unset; this stack now sets it
+  (one per Region, shared by every API in the account).
+- **`tests/isolation` runs in a Lambda in the VPC** (`isolationTests: true`), because the
+  TSS and the database are private. Its role is a probe: IAM allows it to assume the
+  tenant role and to read, write and tag tenant buckets and keys, and the tests show the
+  resources refusing it. It has no Rekognition permission, because a face collection has
+  no resource policy to refuse it. The fixture tenants "Isolation Test A" and
+  "Isolation Test B" are permanent (tenant deletion is out of scope) and show in the
+  Tenants list.
+- **Alarms notify one SNS topic** (`assay_infra.alerts`, `pulumi stack output
+  alarm_topic_arn`), which emails `alarmEmail` from stack config. Every new alarm passes
+  the topic as its `alarm_actions`; `test_infra_tenancy.py` fails if one in the stack does
+  not. The topic is encrypted with its own customer-managed key, because CloudWatch cannot
+  publish to a topic that uses the AWS-managed SNS key. An email subscription delivers
+  nothing until the owner follows the confirmation link SNS sends at `pulumi up`; an
+  unconfirmed one lapses after 48 hours and must be created again.
+- **Not in step 4:** `POST /admin/tenants` and the retry route (step 5), default models
+  for a new tenant (step 5, with the catalog seed), bucket CORS for browser uploads and
+  `DetectFaces`/`CompareFaces` in the tenant role (steps 6 and 8), the cross-tenant face
+  search test (step 8).
+- **For step 6 (uploads): no S3 key may contain a file name.** Register each uploaded file
+  with a `file_id`, store it at `inbox/{batch_id}/{file_id}`
+  (`StorageContext.inbox_key(batch_id, file_id)`) and keep `file_name` only in the
+  database. Pair companion files and stipulations with their PDF by the names in the
+  database, not by listing keys. BUILD_SPEC.md section 6 has the layout.
+- **Unverified until the first real provisioning run.** Each of these is an assumption the
+  first `add_tenant.py` run tests. If one is wrong, provisioning fails at the `storage`
+  step with the reason in `audit_log`:
+  1. GuardDuty accepts the scan role's trust policy with the `aws:SourceAccount` condition
+     (AWS's documented trust policy has no condition).
+  2. S3 Vectors needs only `kms:GenerateDataKey` of the provisioning role to create the
+     vector bucket and index (documented for the bucket, not stated for the index).
+  3. `s3:CreateBucket` passes the S3 gateway endpoint's `aws:ResourceAccount` condition.
+  4. `kms:CreateKey` with tags passes the `CreateTenantKeys` conditions
+     (`aws:RequestTag/tenant_id` present, `aws:ResourceTag/app` absent).
+  5. `guardduty:CreateMalwareProtectionPlan` needs nothing beyond that action and
+     `iam:PassRole`.
+  6. The task definition's container definition round-trips unchanged, so the next
+     `pulumi preview` shows no diff.
+  7. S3 Vectors accepts the vector bucket policy's `Principal: "*"` and `Condition`
+     elements. If it rejects them, tell the owner before changing the policy: admitting
+     only two roles cannot be written without one of them.
+  `run_isolation.py` then checks the result: a principal whose IAM policy allows it is
+  still refused when it lists a tenant's vectors.

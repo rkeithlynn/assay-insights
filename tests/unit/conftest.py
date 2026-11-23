@@ -63,6 +63,27 @@ class Mocks(pulumi.runtime.Mocks):
                 outputs["registryId"] = ACCOUNT_ID
             case "command:local:Command":
                 outputs["stdout"] = "sha256:" + "0" * 64
+            case "aws:iam/role:Role":
+                # An auto-named role: AWS adds a random suffix to the logical name.
+                outputs.setdefault("name", f"{args.name}-a1b2c3d")
+                arn = f"arn:aws:iam::{ACCOUNT_ID}:role/{outputs['name']}"
+            case "aws:s3/bucket:Bucket":
+                outputs.setdefault("bucket", f"{args.name}-a1b2c3d")
+                arn = f"arn:aws:s3:::{outputs['bucket']}"
+            case "aws:kms/key:Key":
+                outputs["keyId"] = f"{args.name}-key-id"
+                arn = f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/{args.name}-key-id"
+            case "aws:lambda/function:Function":
+                outputs["invokeArn"] = f"arn:aws:apigateway:{REGION}:lambda:path/{arn}/invocations"
+            case "aws:apigateway/restApi:RestApi":
+                outputs["rootResourceId"] = "root"
+                outputs["executionArn"] = (
+                    f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:{args.name}-id"
+                )
+            case "aws:ecs/cluster:Cluster":
+                arn = f"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:cluster/{args.inputs['name']}"
+            case "aws:ecs/taskDefinition:TaskDefinition":
+                arn = f"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task-definition/{args.inputs['family']}:1"
         outputs.setdefault("arn", arn)
         return f"{args.name}-id", outputs
 

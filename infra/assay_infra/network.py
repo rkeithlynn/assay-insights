@@ -31,6 +31,11 @@ INTERFACE_ENDPOINT_SERVICES: tuple[str, ...] = (
     "logs",
     "secretsmanager",
     "sqs",
+    # Build step 4: the private TSS API, the Cognito admin Lambda (invoked by the
+    # provisioning task) and GuardDuty malware protection plans (created by that task).
+    "execute-api",
+    "lambda",
+    "guardduty",
 )
 
 FLOW_LOG_RETENTION_DAYS = 30

@@ -8,6 +8,7 @@ members = [
     "assay-db",
     "assay-infra",
     "assay-insights",
+    "assay-tss",
 ]
 
 [[package]]
@@ -100,6 +101,7 @@ name = "assay-infra"
 version = "0.1.0"
 source = { editable = "infra" }
 dependencies = [
+    { name = "assay-tss" },
     { name = "pulumi" },
     { name = "pulumi-aws" },
     { name = "pulumi-command" },
@@ -107,6 +109,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "assay-tss", editable = "tss" },
     { name = "pulumi", specifier = ">=3.200,<4" },
     { name = "pulumi-aws", specifier = ">=7,<8" },
     { name = "pulumi-command", specifier = ">=1.1,<2" },
@@ -120,12 +123,13 @@ dependencies = [
     { name = "assay-api" },
     { name = "assay-db" },
     { name = "assay-infra" },
+    { name = "assay-tss", extra = ["isolation-tests", "provision", "service"] },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "bandit" },
-    { name = "boto3-stubs", extra = ["cognito-idp", "ecr", "lambda", "rds", "secretsmanager"] },
+    { name = "boto3-stubs", extra = ["cognito-idp", "ecr", "kms", "lambda", "rds", "rekognition", "s3", "s3vectors", "secretsmanager", "stepfunctions", "sts"] },
     { name = "httpx" },
     { name = "mypy" },
     { name = "pip-audit" },
@@ -138,18 +142,55 @@ requires-dist = [
     { name = "assay-api", editable = "api" },
     { name = "assay-db", editable = "db" },
     { name = "assay-infra", editable = "infra" },
+    { name = "assay-tss", extras = ["service", "provision", "isolation-tests"], editable = "tss" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "bandit", specifier = ">=1.8" },
-    { name = "boto3-stubs", extras = ["cognito-idp", "ecr", "lambda", "rds", "secretsmanager"], specifier = ">=1.40" },
+    { name = "boto3-stubs", extras = ["cognito-idp", "ecr", "kms", "lambda", "rds", "rekognition", "s3", "s3vectors", "secretsmanager", "stepfunctions", "sts"], specifier = ">=1.40" },
     { name = "httpx", specifier = ">=0.27,<0.29" },
     { name = "mypy", specifier = ">=1.18" },
     { name = "pip-audit", specifier = ">=2.9" },
     { name = "pytest", specifier = ">=8.4" },
     { name = "ruff", specifier = ">=0.14" },
 ]
+
+[[package]]
+name = "assay-tss"
+version = "0.1.0"
+source = { editable = "tss" }
+dependencies = [
+    { name = "boto3" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+isolation-tests = [
+    { name = "assay-db" },
+    { name = "pytest" },
+]
+provision = [
+    { name = "assay-db" },
+    { name = "pulumi" },
+    { name = "pulumi-aws" },
+]
+service = [
+    { name = "assay-db" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "assay-db", marker = "extra == 'isolation-tests'", editable = "db" },
+    { name = "assay-db", marker = "extra == 'provision'", editable = "db" },
+    { name = "assay-db", marker = "extra == 'service'", editable = "db" },
+    { name = "boto3", specifier = ">=1.40" },
+    { name = "pulumi", marker = "extra == 'provision'", specifier = ">=3.200,<4" },
+    { name = "pulumi-aws", marker = "extra == 'provision'", specifier = ">=7,<8" },
+    { name = "pydantic", specifier = ">=2.14,<2.14.4" },
+    { name = "pytest", marker = "extra == 'isolation-tests'", specifier = ">=8.4" },
+]
+provides-extras = ["service", "provision", "isolation-tests"]
 
 [[package]]
 name = "ast-serialize"
@@ -272,14 +313,32 @@ cognito-idp = [
 ecr = [
     { name = "mypy-boto3-ecr" },
 ]
+kms = [
+    { name = "mypy-boto3-kms" },
+]
 lambda = [
     { name = "mypy-boto3-lambda" },
 ]
 rds = [
     { name = "mypy-boto3-rds" },
 ]
+rekognition = [
+    { name = "mypy-boto3-rekognition" },
+]
+s3 = [
+    { name = "mypy-boto3-s3" },
+]
+s3vectors = [
+    { name = "mypy-boto3-s3vectors" },
+]
 secretsmanager = [
     { name = "mypy-boto3-secretsmanager" },
+]
+stepfunctions = [
+    { name = "mypy-boto3-stepfunctions" },
+]
+sts = [
+    { name = "mypy-boto3-sts" },
 ]
 
 [[package]]
@@ -911,6 +970,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mypy-boto3-kms"
+version = "1.44.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/ad/937f7f7fd870ae9d765e959973a15b8f0baad40aa88c8d27fd158661247d/mypy_boto3_kms-1.44.4.tar.gz", hash = "sha256:abe8644f6fc6683ec97730da54173aef3a9e30260f0b4ec0cf75f805c2fc4bc7", size = 31426, upload-time = "2026-11-17T02:43:17.176Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/8e/5159dc8be2ec980ac0bfd1d81ff9122a2535bd8c3e2b3fbd07a10c1f6445/mypy_boto3_kms-1.44.4-py3-none-any.whl", hash = "sha256:e8636bb34c3bd50f80de1976cf5844e640600dce3dab2a1238f0fdbcfbedbc84", size = 39882, upload-time = "2026-11-17T02:43:14.871Z" },
+]
+
+[[package]]
 name = "mypy-boto3-lambda"
 version = "1.44.7"
 source = { registry = "https://pypi.org/simple" }
@@ -929,12 +997,57 @@ wheels = [
 ]
 
 [[package]]
+name = "mypy-boto3-rekognition"
+version = "1.44.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c0/3c/013e772ead59138cfccaf5f6084783115a37a2baf7a658603c82728dac75/mypy_boto3_rekognition-1.44.0.tar.gz", hash = "sha256:1a1775cee3eb1b3f66d00d440949742fc3660ac9fcce59dc0fef7feb39ef5eb5", size = 46107, upload-time = "2026-11-10T21:57:05.435Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/3f/23db945b1ac7285cda3aed7cb70663c76c8e25c43716e7d8b4c5f00e0fa1/mypy_boto3_rekognition-1.44.0-py3-none-any.whl", hash = "sha256:31f4f407900d956ca7d1d52d76ee709a7a04c31a33f105e7ae392edb5acb00d7", size = 53450, upload-time = "2026-11-10T21:57:02.455Z" },
+]
+
+[[package]]
+name = "mypy-boto3-s3"
+version = "1.44.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/34/2cfc7c13650830a2d6ab593218a09dbb7fed9bdcfca229f8206c3f1a52a8/mypy_boto3_s3-1.44.6.tar.gz", hash = "sha256:82149e61a10ba7e1cab3a2d2c6333370d81143bb93ee2ae2348c355e7df2b7ef", size = 79839, upload-time = "2026-11-19T00:42:58.138Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/ac/cf28701919efa40816ed4ea429a85b4877862a45db9b1d36089eeb0e03e5/mypy_boto3_s3-1.44.6-py3-none-any.whl", hash = "sha256:d36c7214d8f030d078176dc608666e4cdde0c9b9577ca99d723a7e3bc10e7428", size = 87230, upload-time = "2026-11-19T00:42:55.968Z" },
+]
+
+[[package]]
+name = "mypy-boto3-s3vectors"
+version = "1.44.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/8c/7572207d906a0f05270546a8c697d95bc24496cb11cb8b05ca52d94dde47/mypy_boto3_s3vectors-1.44.4.tar.gz", hash = "sha256:214ea5760289a0dade42694f334a96a68f4f2a5b21266a79a846b58ae9be4046", size = 19617, upload-time = "2026-11-17T02:43:26.762Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/4e/66597d203a4f2df35c68efeae4d4b9d10d54870f7d0a47c78300e3fe52a8/mypy_boto3_s3vectors-1.44.4-py3-none-any.whl", hash = "sha256:0eda6dde73083b2fc0ef60f793f0447e870c7b6dc08d83da3dbaa304a8960480", size = 26425, upload-time = "2026-11-17T02:43:24.947Z" },
+]
+
+[[package]]
 name = "mypy-boto3-secretsmanager"
 version = "1.44.2"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a7/a1/dd89735f1d78c49f22df2b3c44861d09aae1cf66d8e7ecc2da18b8881e87/mypy_boto3_secretsmanager-1.44.2.tar.gz", hash = "sha256:298bcffdbff85bf5dbe02ff7b444f2aff46110e0d7ffe5729ce8a2f33c56cfa5", size = 20905, upload-time = "2026-11-13T00:33:11.064Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/4c/9239424d9cd8377bb965727aaf4372c1462651aff025e802cd039e49a425/mypy_boto3_secretsmanager-1.44.2-py3-none-any.whl", hash = "sha256:a75e82a888171020ccc6c9011cb5b4c0212788d6b29fbe57d0f7af3c0614113e", size = 28995, upload-time = "2026-11-13T00:33:08.031Z" },
+]
+
+[[package]]
+name = "mypy-boto3-stepfunctions"
+version = "1.44.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7c/83/424c7d35ae9e3daa1a0098c22ae704a196c9a91eae970dcf3998c92ec60a/mypy_boto3_stepfunctions-1.44.0.tar.gz", hash = "sha256:347ba2b2806bf7b6e01cfa5d728e00e4ceaf1f44708bc27f2232768d13a1a402", size = 31548, upload-time = "2026-11-10T21:58:52.585Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/1b/6c25649987f4312a0b33cf48101fc22c5af90faa742cc8fbdcea262e511d/mypy_boto3_stepfunctions-1.44.0-py3-none-any.whl", hash = "sha256:679658b62059cdffa86c1bf79675c20ec6145f017d2b550884ec28e3de6eee9b", size = 36506, upload-time = "2026-11-10T21:58:49.562Z" },
+]
+
+[[package]]
+name = "mypy-boto3-sts"
+version = "1.44.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/98/6d4675b428757b0b161829944fcd1f424e5f59a39c7af31241910b87e380/mypy_boto3_sts-1.44.7.tar.gz", hash = "sha256:f509aa03f558698f8eec9c629f928c1ce5ec4dd7459668932bbdaa3eb30765a4", size = 17532, upload-time = "2026-11-19T23:47:49.214Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/22/93e426465beabe939ac8623007736bcd8ecd96129ff94849c6dbd7a39c9c/mypy_boto3_sts-1.44.7-py3-none-any.whl", hash = "sha256:b5083a5b625b3dd0e66328556094393eb767aa82cd172c64e9dcb65441347239", size = 22061, upload-time = "2026-11-19T23:47:47.079Z" },
 ]
 
 [[package]]

@@ -55,6 +55,24 @@ class AuthConfig:
 
 
 @dataclass(frozen=True)
+class AlertsConfig:
+    # Where alarm notifications are emailed. The owner confirms the subscription.
+    email: str
+
+
+@dataclass(frozen=True)
+class TenancyConfig:
+    # The only principal that may assume the break-glass role (an IAM role ARN).
+    break_glass_principal_arn: str
+    # Dimensions of the embedding model's vectors; fixed when a tenant's index is created.
+    vector_dimensions: int
+    # Deploy the in-VPC isolation test runner (tests/isolation). Development stacks only.
+    isolation_tests: bool
+    # The provider's default tags, repeated on every tenant resource.
+    default_tags: dict[str, str]
+
+
+@dataclass(frozen=True)
 class PlatformConfig:
     region: str
     # Prefix for physical resource names, for example "assay-dev".
@@ -63,6 +81,8 @@ class PlatformConfig:
     network: NetworkConfig
     database: DatabaseConfig
     auth: AuthConfig
+    tenancy: TenancyConfig
+    alerts: AlertsConfig
 
 
 def _within_zone(host: str, zone: str) -> bool:
@@ -119,8 +139,35 @@ def validate_auth(cfg: AuthConfig) -> AuthConfig:
     return cfg
 
 
+_ROLE_ARN = re.compile(r"^arn:aws:iam::\d{12}:role/[\w+=,.@/-]+$")
+# Amazon Titan Text Embeddings V2 produces 256, 512 or 1024 dimensions.
+VECTOR_DIMENSIONS = (256, 512, 1024)
+
+
+_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
+
+
+def validate_alerts(cfg: AlertsConfig) -> AlertsConfig:
+    if not _EMAIL.match(cfg.email):
+        raise ValueError("alarmEmail must be an email address")
+    return cfg
+
+
+def validate_tenancy(cfg: TenancyConfig) -> TenancyConfig:
+    if not _ROLE_ARN.match(cfg.break_glass_principal_arn):
+        raise ValueError("breakGlassPrincipalArn must be an IAM role ARN")
+    if cfg.vector_dimensions not in VECTOR_DIMENSIONS:
+        raise ValueError(f"vectorDimensions must be one of {VECTOR_DIMENSIONS}")
+    if not cfg.default_tags:
+        # The provisioning role's policy tells platform resources from new ones by a tag
+        # that every platform resource carries.
+        raise ValueError("aws:defaultTags must set at least one tag")
+    return cfg
+
+
 def load_config() -> PlatformConfig:
     conf = pulumi.Config()
+    default_tags = (pulumi.Config("aws").get_object("defaultTags") or {}).get("tags") or {}
     return PlatformConfig(
         region=pulumi.Config("aws").require("region"),
         name_prefix=f"assay-{pulumi.get_stack()}",
@@ -151,4 +198,13 @@ def load_config() -> PlatformConfig:
                 platform_domain_prefix=conf.require("platformAuthDomainPrefix"),
             )
         ),
+        tenancy=validate_tenancy(
+            TenancyConfig(
+                break_glass_principal_arn=conf.require("breakGlassPrincipalArn"),
+                vector_dimensions=conf.require_int("vectorDimensions"),
+                isolation_tests=conf.get_bool("isolationTests") or False,
+                default_tags={str(k): str(v) for k, v in default_tags.items()},
+            )
+        ),
+        alerts=validate_alerts(AlertsConfig(email=conf.require("alarmEmail"))),
     )

@@ -228,7 +228,7 @@ class TenantStorageService(Protocol):
 Object layout inside a tenant bucket:
 
 ```
-inbox/{batch_id}/{file_name}            uploads, before scanning
+inbox/{batch_id}/{file_id}              uploads, before scanning
 originals/{doc_id}.pdf                  clean PDFs, under Object Lock
 originals/{doc_id}.companion.json       the companion file, if any
 originals/{doc_id}/attachments/{attachment_id}.{ext}   stipulations, under Object Lock
@@ -238,6 +238,9 @@ derived/text/{doc_id}.json              per-page text, source, quality score, wo
 derived/fields/{doc_id}.json            extracted fields
 chat/{conversation_id}/{message_id}.json  question, retrieved passages, answer
 ```
+
+No object key contains a file name. An upload is stored under an opaque `file_id`, and its
+`file_name` is kept only in the database.
 
 Tenant provisioning: `POST /admin/tenants` inserts the tenant with status `provisioning`
 and starts a Step Functions execution that runs a Fargate task. The task uses Pulumi's
