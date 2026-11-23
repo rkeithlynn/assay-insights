@@ -3,6 +3,7 @@
 Usage (PowerShell, from the repository root, after `pulumi up`):
 
     uv run scripts/migrate.py                 # create roles, alembic upgrade head
+    uv run scripts/migrate.py --command verify    # read-only: RLS and role checks
     uv run scripts/migrate.py --command current
     uv run scripts/migrate.py --command maintain
 
@@ -25,7 +26,7 @@ from botocore.config import Config
 
 INFRA_DIR = Path(__file__).resolve().parent.parent / "infra"
 DEFAULT_STACK = "pilartech/assay-platform/dev"
-COMMANDS = ("upgrade", "current", "maintain")
+COMMANDS = ("upgrade", "verify", "current", "maintain")
 
 
 def pulumi(*args: str, stack: str) -> str:

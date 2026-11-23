@@ -10,6 +10,10 @@ change. Where this file and the spec differ, the spec wins.
   (`pilartech/assay-platform/dev`). The program lives in `infra/`.
 - **One build step at a time.** Work on exactly one step from BUILD_SPEC.md section 12.
   Stop when it is done and report back. Do not start the next step unasked.
+- **One branch per build step.** Each step's work goes on its own branch, `build-step-N`,
+  cut from an up-to-date `main`. Fixes for that step go on the same branch. Push it, wait
+  for CI to pass, then the owner fast-forwards `main` to it. Never commit build work
+  straight to `main`.
 - **Never run `pulumi up` or `pulumi destroy`** (or `pulumi refresh`, `pulumi state ...`,
   or anything else that changes stack state or AWS resources). Run `pulumi preview`, show
   the owner the result, and wait for the owner to run `pulumi up`.
@@ -26,7 +30,7 @@ change. Where this file and the spec differ, the spec wins.
 | Step | Status |
 | --- | --- |
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
-| 2. Network, database, migrations, database roles and RLS | **Built, awaiting `pulumi up`** (2026-11-23). Then `uv run scripts/migrate.py` and verification |
+| 2. Network, database, migrations, database roles and RLS | **Deployed and migrated** (2026-11-23). Awaiting `uv run scripts/migrate.py --command verify` |
 | 3–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -195,6 +199,11 @@ assets/     Logo and favicon SVGs
   `use1-az6`; S3 Vectors is not offered in `use1-az3`. Check both before changing it.
 - **Migrations run only in the migration Lambda**, started by `uv run scripts/migrate.py`
   after `pulumi up` (and monthly by EventBridge Scheduler for `audit_log` partitions).
+  `--command verify` is read-only. It checks in Aurora that every table except
+  `ai_models` has `tenant_id` and forced RLS with a policy (`assay_db.checks.verify_rls`),
+  and that no role has SUPERUSER, BYPASSRLS or an unexpected membership
+  (`roles.verify_roles`). Every `upgrade` runs the same checks before committing. Aurora
+  is private, so this command is the way to inspect it.
   Never run them from `pulumi up`. The Lambda bootstraps the roles as the RDS master user,
   then runs Alembic as `migrator`.
 - **Database sign-in.** Every login role uses IAM database authentication (`rds_iam`); only
@@ -209,6 +218,14 @@ assets/     Logo and favicon SVGs
   than importing it, so history doesn't change. `test_db_security.py` checks that every
   table except `ai_models` has `tenant_id` and forced RLS, and checks the exact privilege
   matrix, so update `EXPECTED_PRIVILEGES` there in the same change.
+- **Aurora's master user is not a superuser** (CREATEROLE, CREATEDB, `rds_superuser`).
+  Under PostgreSQL 16+ it may not mention `SUPERUSER`, `BYPASSRLS` or `REPLICATION` in
+  `CREATE ROLE` or `ALTER ROLE`, even to switch them off. It may alter or grant only roles
+  it holds ADMIN OPTION on (those it created, plus `rds_iam`). So the bootstrap relies on
+  the defaults when it creates a role, and `verify_roles()` checks attributes and
+  memberships in the same transaction instead of forcing them. The database tests run the
+  bootstrap as `rds_master_test`, a non-superuser stand-in, and sign in directly as each
+  role. Never test database code only as a superuser.
 - `platform_writer` cannot read `tenant_storage`, so provisioning retries use
   `INSERT ... ON CONFLICT DO NOTHING` with no conflict target (a target needs `SELECT`).
 - **Lambda container images** are built by `scripts/build_image.py` (run by a Pulumi

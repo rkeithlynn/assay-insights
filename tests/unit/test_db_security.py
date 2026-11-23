@@ -6,12 +6,17 @@ Needs `ASSAY_TEST_DATABASE_URL`: a superuser URL for a throwaway server, for exa
         -p 127.0.0.1:55432:5432 postgres:17
     $env:ASSAY_TEST_DATABASE_URL = "postgresql://postgres@127.0.0.1:55432/postgres"
 
-Each run creates and drops its own databases. CI sets `ASSAY_REQUIRE_DB_TESTS=1` so that
-a missing database fails the run instead of skipping these tests.
+The server must be throwaway and must trust local sign-ins: at the start of a run these
+tests drop leftover `assay_test_*` databases and the application roles (roles are
+cluster-wide), so that the bootstrap creates them from scratch. CI sets
+`ASSAY_REQUIRE_DB_TESTS=1` so that a missing database fails the run instead of skipping it.
 
-The bootstrap runs as the superuser (standing in for the RDS master user) and the migrations
-run under `SET ROLE migrator`, as the migration Lambda does. `rds_iam` exists only on RDS, so
-a stand-in role is created.
+Aurora's master user is not a superuser, so neither is the role the bootstrap runs as here.
+`rds_master_test` mimics it: CREATEROLE, CREATEDB, owner of the database, ADMIN OPTION on a
+stand-in `rds_iam`, and no SUPERUSER, BYPASSRLS or REPLICATION. Migrations and the role
+checks sign in directly as `migrator`, `app_tenant` and the rest (on Aurora they use IAM
+tokens). The superuser only sets up the server, seeds rows and reads catalogs that a
+non-superuser cannot see.
 """
 
 from __future__ import annotations
@@ -22,15 +27,18 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from unittest import mock
 
 import psycopg
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from psycopg import errors, sql
-from sqlalchemy import create_engine, text
+from psycopg.conninfo import make_conninfo
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.pool import NullPool
 
-from assay_db import runner
+from assay_db import checks, handler, roles, runner
 from assay_db.models import SCHEMA, TENANT_TABLES, Base
 from assay_db.roles import (
     ALL_ROLES,
@@ -43,6 +51,8 @@ from assay_db.roles import (
     PLATFORM_WRITER,
     RDS_IAM,
     TSS,
+    BootstrapResult,
+    RoleVerificationError,
     bootstrap,
 )
 
@@ -52,6 +62,9 @@ REQUIRED = os.environ.get("ASSAY_REQUIRE_DB_TESTS") == "1"
 pytestmark = pytest.mark.skipif(
     not ADMIN_URL and not REQUIRED, reason="ASSAY_TEST_DATABASE_URL is not set"
 )
+
+# Stands in for the Aurora master user (rds_superuser member, not a superuser).
+MASTER = "rds_master_test"
 
 # Roles the application uses. None may change or remove an audit row.
 APPLICATION_ROLES = (APP_TENANT, PLATFORM_READER, PLATFORM_WRITER, AUDIT_WRITER, TSS)
@@ -121,44 +134,74 @@ class Seed:
 
 @dataclass(frozen=True)
 class TestDb:
-    url: str
+    name: str
+    url: str  # superuser, for seeding and catalog checks only
     seed: Seed
+    # The forced failure of the very first bootstrap (see `db`) and the first real one.
+    roles_after_failed_attempt: list[str]
+    first_bootstrap: BootstrapResult
 
 
-def _db_url(name: str) -> str:
-    assert ADMIN_URL
-    return ADMIN_URL.rsplit("/", 1)[0] + f"/{name}"
-
-
-def _sqlalchemy_url(url: str) -> str:
-    return url.replace("postgresql://", "postgresql+psycopg://", 1)
-
-
-def _create_database(name: str) -> str:
+def _conninfo(dbname: str, user: str | None = None) -> str:
     if not ADMIN_URL:
         pytest.fail("ASSAY_REQUIRE_DB_TESTS=1 but ASSAY_TEST_DATABASE_URL is not set")
-    with psycopg.connect(ADMIN_URL, autocommit=True) as conn:
-        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-        if not conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (RDS_IAM,)).fetchone():
-            conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(RDS_IAM)))
-    url = _db_url(name)
-    with psycopg.connect(url) as conn:
-        bootstrap(conn, name)
-    return url
+    if user is None:
+        return make_conninfo(ADMIN_URL, dbname=dbname)
+    return make_conninfo(ADMIN_URL, dbname=dbname, user=user)
+
+
+def _admin() -> psycopg.Connection:
+    return psycopg.connect(_conninfo("postgres"), autocommit=True)
+
+
+def _existing_app_roles(conn: psycopg.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s) ORDER BY rolname",
+        (list(ALL_ROLES),),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _create_database(name: str) -> None:
+    """A database owned by the master stand-in, as RDS creates the cluster's database."""
+    with _admin() as conn:
+        conn.execute(
+            sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                sql.Identifier(name), sql.Identifier(MASTER)
+            )
+        )
+
+
+def _bootstrap_as_master(name: str) -> BootstrapResult:
+    with psycopg.connect(_conninfo(name, MASTER)) as conn:
+        row = conn.execute(
+            "SELECT current_user::text, rolsuper, rolbypassrls "
+            "FROM pg_roles WHERE rolname = current_user"
+        ).fetchone()
+        assert row == (MASTER, False, False), row
+        return bootstrap(conn, name)
 
 
 def _drop_database(name: str) -> None:
-    assert ADMIN_URL
-    with psycopg.connect(ADMIN_URL, autocommit=True) as conn:
+    with _admin() as conn:
         drop = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
         conn.execute(drop.format(sql.Identifier(name)))
 
 
-def _migrate(url: str, revision: str = "head", *, down: bool = False) -> None:
-    engine = create_engine(_sqlalchemy_url(url))
+def migrator_engine(name: str) -> Engine:
+    """Signs in as migrator itself, as the Lambda does (no superuser session, no SET ROLE)."""
+    return create_engine(
+        "postgresql+psycopg://",
+        creator=lambda: psycopg.connect(_conninfo(name, MIGRATOR)),
+        poolclass=NullPool,
+    )
+
+
+def _migrate(name: str, revision: str = "head", *, down: bool = False) -> None:
+    engine = migrator_engine(name)
     try:
         with engine.begin() as conn:
-            conn.execute(text(f"SET ROLE {MIGRATOR}"))
+            assert conn.execute(text("SELECT session_user::text")).scalar_one() == MIGRATOR
             if down:
                 runner.downgrade(conn, revision)
             else:
@@ -218,13 +261,64 @@ def _seed(url: str) -> Seed:
     return s
 
 
-@pytest.fixture(scope="module")
+def _reset_server() -> None:
+    """Drop leftovers from earlier runs and set up the master stand-in."""
+    with _admin() as conn:
+        leftovers = conn.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'assay\\_test\\_%'"
+        ).fetchall()
+        for (name,) in leftovers:
+            conn.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        for role in ALL_ROLES:
+            try:
+                conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+            except errors.DependentObjectsStillExist as exc:
+                pytest.fail(f"role {role} owns objects outside the test databases: {exc}")
+        for role, attributes in (
+            (RDS_IAM, "NOLOGIN"),
+            (MASTER, "LOGIN CREATEROLE CREATEDB"),
+        ):
+            if not conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
+                conn.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(role)))
+            conn.execute(
+                sql.SQL("ALTER ROLE {} WITH {} NOSUPERUSER NOBYPASSRLS NOREPLICATION").format(
+                    sql.Identifier(role), sql.SQL(attributes)
+                )
+            )
+        # As on RDS: the master user may grant rds_iam.
+        conn.execute(
+            sql.SQL("GRANT {} TO {} WITH ADMIN OPTION").format(
+                sql.Identifier(RDS_IAM), sql.Identifier(MASTER)
+            )
+        )
+
+
+@pytest.fixture(scope="session")
 def db() -> Iterator[TestDb]:
+    _reset_server()
     name = f"assay_test_{uuid.uuid4().hex[:12]}"
-    url = _create_database(name)
+    _create_database(name)
     try:
-        _migrate(url)
-        yield TestDb(url=url, seed=_seed(url))
+        # The failed production run, reproduced: the very first bootstrap fails part-way,
+        # after its CREATE ROLE statements. Nothing may survive the rollback.
+        with (
+            mock.patch.object(roles, "verify_roles", side_effect=RoleVerificationError("boom")),
+            pytest.raises(RoleVerificationError),
+        ):
+            _bootstrap_as_master(name)
+        with _admin() as conn:
+            left_behind = _existing_app_roles(conn)
+
+        first = _bootstrap_as_master(name)
+        _migrate(name)
+        url = _conninfo(name)
+        yield TestDb(
+            name=name,
+            url=url,
+            seed=_seed(url),
+            roles_after_failed_attempt=left_behind,
+            first_bootstrap=first,
+        )
     finally:
         _drop_database(name)
 
@@ -233,9 +327,8 @@ def db() -> Iterator[TestDb]:
 def as_role(
     db: TestDb, role: str, tenant: uuid.UUID | str | None = None
 ) -> Iterator[psycopg.Connection]:
-    """A transaction as `role`, with `SET LOCAL app.tenant_id` when a tenant is given."""
-    with psycopg.connect(db.url) as conn:
-        conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+    """A transaction signed in as `role`, with `SET LOCAL app.tenant_id` when given a tenant."""
+    with psycopg.connect(_conninfo(db.name, role)) as conn:
         if tenant is not None:
             conn.execute("SELECT set_config('app.tenant_id', %s, true)", (str(tenant),))
         try:
@@ -342,10 +435,9 @@ def test_tenant_admin_may_update_only_model_selection_columns(db: TestDb) -> Non
 
 
 def test_alembic_matches_models(db: TestDb) -> None:
-    engine = create_engine(_sqlalchemy_url(db.url))
+    engine = migrator_engine(db.name)
     try:
         with engine.connect() as conn:
-            conn.execute(text(f"SET ROLE {MIGRATOR}"))
             context = MigrationContext.configure(
                 conn,
                 opts={
@@ -519,10 +611,9 @@ def test_audit_partitions_cover_this_month_and_the_next_twelve(db: TestDb) -> No
     assert parts == expected | {"audit_log_default"}
     assert landed == [(f"assay.audit_log_{today:%Y_%m}",)]
 
-    engine = create_engine(_sqlalchemy_url(db.url))
+    engine = migrator_engine(db.name)
     try:
         with engine.begin() as conn:
-            conn.execute(text(f"SET ROLE {MIGRATOR}"))
             assert runner.ensure_audit_partitions(conn) == []
     finally:
         engine.dispose()
@@ -618,22 +709,128 @@ def test_platform_writer_provisions_a_tenant(db: TestDb) -> None:
 # --- Lifecycle ------------------------------------------------------------------------
 
 
-def test_bootstrap_is_idempotent(db: TestDb) -> None:
-    name = db.url.rsplit("/", 1)[1]
-    with psycopg.connect(db.url) as conn:
-        result = bootstrap(conn, name)
+def test_failed_first_bootstrap_leaves_no_role_behind(db: TestDb) -> None:
+    """The production failure: bootstrap raised after CREATE ROLE. Nothing was committed."""
+    assert db.roles_after_failed_attempt == []
+
+
+def test_first_bootstrap_as_master_created_every_role(db: TestDb) -> None:
+    assert db.first_bootstrap.created == list(ALL_ROLES)
+    assert db.first_bootstrap.existing == []
+
+
+def test_rerunning_bootstrap_as_master_is_safe(db: TestDb) -> None:
+    result = _bootstrap_as_master(db.name)
     assert result.created == []
-    assert sorted(result.existing) == sorted(ALL_ROLES)
+    assert result.existing == list(ALL_ROLES)
+    with psycopg.connect(db.url) as conn:
+        roles.verify_roles(conn)
 
 
-def test_downgrade_to_base_and_upgrade_again() -> None:
+def test_bootstrap_on_a_second_database_with_existing_roles(db: TestDb) -> None:
+    """The ALTER path for existing roles, as the master stand-in, on a fresh database."""
     name = f"assay_test_{uuid.uuid4().hex[:12]}"
-    url = _create_database(name)
+    _create_database(name)
     try:
-        _migrate(url)
-        _migrate(url, "base", down=True)
-        _migrate(url)
-        engine = create_engine(_sqlalchemy_url(url))
+        result = _bootstrap_as_master(name)
+        assert result.created == []
+        with psycopg.connect(_conninfo(name)) as conn:
+            row = conn.execute(
+                "SELECT has_database_privilege(%s, current_database(), 'CREATE'), "
+                "has_database_privilege('public', current_database(), 'CONNECT')",
+                (MIGRATOR,),
+            ).fetchone()
+        assert row == (True, False)
+    finally:
+        _drop_database(name)
+
+
+@pytest.mark.parametrize(
+    ("tamper", "undo", "expected"),
+    [
+        (
+            "ALTER ROLE app_tenant BYPASSRLS",
+            "ALTER ROLE app_tenant NOBYPASSRLS",
+            "app_tenant: has BYPASSRLS",
+        ),
+        (
+            "ALTER ROLE platform_writer CREATEROLE",
+            "ALTER ROLE platform_writer NOCREATEROLE",
+            "platform_writer: has CREATEROLE",
+        ),
+        (
+            "ALTER ROLE tss REPLICATION",
+            "ALTER ROLE tss NOREPLICATION",
+            "tss: has REPLICATION",
+        ),
+        (
+            "GRANT pg_read_all_data TO platform_reader",
+            "REVOKE pg_read_all_data FROM platform_reader",
+            "platform_reader: unexpected membership of pg_read_all_data",
+        ),
+        (
+            "ALTER ROLE migrator NOLOGIN",
+            "ALTER ROLE migrator LOGIN",
+            None,  # the bootstrap may and does fix LOGIN itself
+        ),
+    ],
+)
+def test_bootstrap_verifies_instead_of_forcing(
+    db: TestDb, tamper: str, undo: str, expected: str | None
+) -> None:
+    """Attributes the master user cannot change stop the bootstrap, and it rolls back."""
+    name = f"assay_test_{uuid.uuid4().hex[:12]}"
+    _create_database(name)
+    with _admin() as conn:
+        conn.execute(tamper)
+    try:
+        if expected is None:
+            _bootstrap_as_master(name)
+            granted = True
+        else:
+            with pytest.raises(RoleVerificationError, match=expected):
+                _bootstrap_as_master(name)
+            granted = False
+        # On failure the run's database-level grants were rolled back with everything else.
+        with psycopg.connect(_conninfo(name)) as conn:
+            row = conn.execute(
+                "SELECT has_database_privilege(%s, current_database(), 'CREATE')", (MIGRATOR,)
+            ).fetchone()
+        assert row == (granted,)
+    finally:
+        with _admin() as conn:
+            conn.execute(undo)
+        _drop_database(name)
+    with psycopg.connect(db.url) as conn:
+        roles.verify_roles(conn)
+
+
+def test_bootstrap_stops_at_a_role_made_superuser(db: TestDb) -> None:
+    """The master user may not even alter a superuser role, so the bootstrap stops there."""
+    name = f"assay_test_{uuid.uuid4().hex[:12]}"
+    _create_database(name)
+    with _admin() as conn:
+        conn.execute("ALTER ROLE tss SUPERUSER")
+    try:
+        with pytest.raises((RoleVerificationError, errors.InsufficientPrivilege)):
+            _bootstrap_as_master(name)
+    finally:
+        with _admin() as conn:
+            conn.execute("ALTER ROLE tss NOSUPERUSER")
+        _drop_database(name)
+    with psycopg.connect(db.url) as conn:
+        roles.verify_roles(conn)
+
+
+def test_downgrade_to_base_and_upgrade_again(db: TestDb) -> None:
+    name = f"assay_test_{uuid.uuid4().hex[:12]}"
+    _create_database(name)
+    try:
+        _bootstrap_as_master(name)
+        _migrate(name)
+        _migrate(name, "base", down=True)
+        _migrate(name)
+        engine = migrator_engine(name)
         try:
             with engine.connect() as conn:
                 assert runner.current_revision(conn) == "0001"
@@ -641,3 +838,104 @@ def test_downgrade_to_base_and_upgrade_again() -> None:
             engine.dispose()
     finally:
         _drop_database(name)
+
+
+# --- Read-only verification (the Lambda's `verify` command) ----------------------------
+
+
+def test_verify_rls_passes_on_the_migrated_schema(db: TestDb) -> None:
+    with psycopg.connect(_conninfo(db.name, MIGRATOR)) as conn:
+        report = checks.verify_rls(conn)
+    assert report.tenant_tables == sorted(TENANT_TABLES)
+    assert report.platform_tables == ["ai_models"]
+
+
+@pytest.mark.parametrize(
+    ("tamper", "undo", "expected"),
+    [
+        (
+            "ALTER TABLE assay.documents NO FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE assay.documents FORCE ROW LEVEL SECURITY",
+            "documents: row-level security not forced",
+        ),
+        (
+            "ALTER TABLE assay.pages DISABLE ROW LEVEL SECURITY",
+            "ALTER TABLE assay.pages ENABLE ROW LEVEL SECURITY",
+            "pages: row-level security not enabled",
+        ),
+        (
+            "CREATE TABLE assay.rogue (id int)",
+            "DROP TABLE assay.rogue",
+            "rogue: table not in the models",
+        ),
+    ],
+)
+def test_verify_rls_catches_a_broken_table(
+    db: TestDb, tamper: str, undo: str, expected: str
+) -> None:
+    with psycopg.connect(db.url, autocommit=True) as admin:
+        admin.execute(tamper)
+        try:
+            with (
+                psycopg.connect(_conninfo(db.name, MIGRATOR)) as conn,
+                pytest.raises(checks.RlsVerificationError, match=expected),
+            ):
+                checks.verify_rls(conn)
+        finally:
+            admin.execute(undo)
+
+
+@pytest.fixture
+def lambda_env(db: TestDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Runs the Lambda handler against the test server instead of Aurora."""
+    for key, value in {
+        "DB_HOST": "unused",
+        "DB_PORT": "5432",
+        "DB_NAME": db.name,
+        "AWS_REGION": "us-east-1",
+        "DB_CA_BUNDLE": "unused",
+        "DB_MASTER_SECRET_ARN": "unused",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(handler, "iam_engine", lambda _target, _user: migrator_engine(db.name))
+    monkeypatch.setattr(
+        handler,
+        "master_connection",
+        lambda _target, _arn: psycopg.connect(_conninfo(db.name, MASTER)),
+    )
+
+
+@pytest.mark.usefixtures("lambda_env")
+def test_handler_verify_command() -> None:
+    result = handler.handler({"command": "verify"}, None)
+    assert result["rls_verified"] is True
+    assert result["roles_verified"] is True
+    assert result["rls_tenant_tables"] == sorted(TENANT_TABLES)
+    assert result["revision_after"] == "0001"
+    assert "roles_created" not in result  # verify never runs the bootstrap
+
+
+@pytest.mark.usefixtures("lambda_env")
+def test_handler_upgrade_is_idempotent_and_verifies() -> None:
+    result = handler.handler({"command": "upgrade"}, None)
+    assert result["roles_created"] == []
+    assert result["roles_existing"] == list(ALL_ROLES)
+    assert result["rls_verified"] is True
+    assert result["partitions_created"] == []
+    assert result["revision_before"] == result["revision_after"] == "0001"
+
+
+@pytest.mark.usefixtures("lambda_env")
+def test_handler_upgrade_rolls_back_when_rls_is_broken(db: TestDb) -> None:
+    with psycopg.connect(db.url, autocommit=True) as admin:
+        admin.execute("ALTER TABLE assay.documents NO FORCE ROW LEVEL SECURITY")
+        try:
+            with pytest.raises(checks.RlsVerificationError, match="documents"):
+                handler.handler({"command": "upgrade"}, None)
+        finally:
+            admin.execute("ALTER TABLE assay.documents FORCE ROW LEVEL SECURITY")
+
+
+def test_handler_rejects_unknown_commands() -> None:
+    with pytest.raises(ValueError, match="unknown command"):
+        handler.handler({"command": "drop-everything"}, None)
