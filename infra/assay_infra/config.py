@@ -7,6 +7,7 @@ Every account ID, hostname, email address and model ID comes from stack config
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass
 
 import pulumi
@@ -45,6 +46,15 @@ class DatabaseConfig:
 
 
 @dataclass(frozen=True)
+class AuthConfig:
+    # Cognito prefix domains (<prefix>.auth.<region>.amazoncognito.com) for managed login.
+    # A custom domain under the hosted zone needs an A record on its parent, which exists
+    # only once CloudFront serves the portal hosts.
+    tenant_domain_prefix: str
+    platform_domain_prefix: str
+
+
+@dataclass(frozen=True)
 class PlatformConfig:
     region: str
     # Prefix for physical resource names, for example "assay-dev".
@@ -52,6 +62,7 @@ class PlatformConfig:
     dns: DnsConfig
     network: NetworkConfig
     database: DatabaseConfig
+    auth: AuthConfig
 
 
 def _within_zone(host: str, zone: str) -> bool:
@@ -93,6 +104,21 @@ def validate_database(cfg: DatabaseConfig) -> DatabaseConfig:
     return cfg
 
 
+_DOMAIN_PREFIX = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def validate_auth(cfg: AuthConfig) -> AuthConfig:
+    for prefix in (cfg.tenant_domain_prefix, cfg.platform_domain_prefix):
+        if not _DOMAIN_PREFIX.match(prefix):
+            raise ValueError(f"Cognito domain prefix {prefix!r} must be lower-case DNS label")
+        # Cognito rejects prefixes containing these words.
+        if any(word in prefix for word in ("aws", "amazon", "cognito")):
+            raise ValueError(f"Cognito domain prefix {prefix!r} may not contain aws/amazon/cognito")
+    if cfg.tenant_domain_prefix == cfg.platform_domain_prefix:
+        raise ValueError("tenantAuthDomainPrefix and platformAuthDomainPrefix must differ")
+    return cfg
+
+
 def load_config() -> PlatformConfig:
     conf = pulumi.Config()
     return PlatformConfig(
@@ -117,6 +143,12 @@ def load_config() -> PlatformConfig:
                 min_acu=conf.require_float("dbMinAcu"),
                 max_acu=conf.require_float("dbMaxAcu"),
                 auto_pause_seconds=conf.require_int("dbAutoPauseSeconds"),
+            )
+        ),
+        auth=validate_auth(
+            AuthConfig(
+                tenant_domain_prefix=conf.require("tenantAuthDomainPrefix"),
+                platform_domain_prefix=conf.require("platformAuthDomainPrefix"),
             )
         ),
     )

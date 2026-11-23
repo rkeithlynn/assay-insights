@@ -74,3 +74,7 @@ class Mocks(pulumi.runtime.Mocks):
 
 
 pulumi.runtime.set_mocks(Mocks(), preview=False)
+
+
+# The one throwaway database for every module that needs PostgreSQL (see pgtest.py).
+from tests.unit.pgtest import db  # noqa: E402, F401

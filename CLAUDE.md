@@ -31,7 +31,7 @@ change. Where this file and the spec differ, the spec wins.
 | --- | --- |
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
-| 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | Next. Not started |
+| 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Built** on `build-step-3`; waiting for the owner's `pulumi up` and post-deploy checks |
 | 4–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -210,8 +210,8 @@ assets/     Logo and favicon SVGs
 - **The default VPC** (`172.31.0.0/16`) exists in the account despite section 2. The owner
   decided on 2026-11-23 to leave it alone. Pulumi does not manage it.
 - **Workload zone.** Workloads and interface endpoints run in `workloadAzId` (`use1-az2`).
-  The `cognito-idp` endpoint service is offered only in `use1-az2`, `use1-az4` and
-  `use1-az6`; S3 Vectors is not offered in `use1-az3`. Check both before changing it.
+  S3 Vectors is not offered in `use1-az3`; check every endpoint service before changing it.
+  (There is no `cognito-idp` endpoint; see step 3.)
 - **Migrations run only in the migration Lambda**, started by `uv run scripts/migrate.py`
   after `pulumi up` (and monthly by EventBridge Scheduler for `audit_log` partitions).
   `--command verify` is read-only. It checks in Aurora that every table except
@@ -265,3 +265,73 @@ assets/     Logo and favicon SVGs
 - **Aurora engine version** is in `ignore_changes`, because minor versions upgrade
   automatically. To upgrade on purpose, change `dbEngineVersion` and lift the ignore for
   that `pulumi up`.
+
+### Step 3 (Cognito, managed login, API skeleton, `GET /me`)
+
+- **No Cognito VPC endpoint.** `com.amazonaws.us-east-1.cognito-idp` exists (use1-az2, az4,
+  az6), but AWS documents that "user pools with domains assigned are incompatible with AWS
+  PrivateLink", and managed login needs a domain. So section 4's fallback applies:
+  - **The JWKS is read at `pulumi up`** (`assay_infra.auth.fetch_jwks`, on the machine
+    running Pulumi) and passed to the API task in `COGNITO_*_JWKS`. A Cognito signing-key
+    rotation therefore needs a redeploy (`pulumi up`, which re-reads it and rolls the task).
+  - **Cognito admin calls** (invite, disable, resets, global sign-out) will run in a Lambda
+    outside the VPC that the API invokes, built in step 5 with the first route that needs
+    one. That step also adds the `lambda` interface endpoint.
+- **The ALB-to-CloudFront hop must use HTTPS** when the edge is built in step 5. Until
+  then the internal ALB has a plain HTTP:80 listener and its security group has no inbound
+  rule, so nothing can reach it. ALB access logs go in with the edge's logging bucket.
+- **Tenant ID and MFA in the access token.** Cognito puts `custom:tenant_id` in the ID token
+  only. The tenant pool's pre-token-generation trigger (event V2_0, Essentials plan,
+  `api/assay_api/cognito_pre_token.py`) copies it into the access token as `tenant_id`, and
+  adds `mfa` (true when `AdminGetUser` shows TOTP). It runs outside the VPC with no database,
+  and refuses to issue a token without a valid tenant ID. If `AdminGetUser` fails, `mfa` is
+  false and the sign-in still goes ahead. `custom:tenant_id` is immutable (set once, at
+  user creation) and is never in an app client's write attributes.
+  - **Check later:** whether Cognito's `amr` claim in a real access token shows MFA. If it
+    does, it can replace the `AdminGetUser` call.
+- **Every tenant and admin route takes its caller from `assay_api.security`**
+  (`TenantMember`, `TenantAdmin`, `PlatformMember`, `MasterAdmin`, or `AnySignedIn` for
+  `GET /me` and `POST /auth/signed-out`). They verify the token, the pool, the role and MFA,
+  then run the account check (`assay_api.accounts.load_account`) in the request's
+  transaction: user row exists, not disabled, tenant `active`, token group equals
+  `users.role`. Access tokens live 60 minutes, so this is what refuses a disabled user or a
+  suspended tenant on the next request. `test_api_routes.py` fails if a route skips it.
+  A tenant-admin without `mfa` gets only `GET /me` (with `mfa_required: true`).
+- **Tenant routes run as `app_tenant`** with `set_config('app.tenant_id', ..., true)` from
+  the token; **admin routes run as `platform_reader`** in read-only transactions. Platform
+  users are read through `platform.platform_users_v` (migration `0002`), whose owner's RLS
+  policy on `users` shows only the platform tenant's users.
+- **Managed login branding.** Prefix domains (`tenantAuthDomainPrefix`,
+  `platformAuthDomainPrefix`), because a custom domain needs an A record on
+  `dev.assayinsights.ai`, which arrives with CloudFront. Managed login rejects SVG
+  attributes outside its allow-list (`role` and `aria-label` among them), so
+  `brandable_svg()` strips them before upload. Gold on white fails WCAG AA, so links are
+  navy and focus rings `#B07D12`. `ManagedLoginBranding` is validated only by Cognito at
+  `pulumi up`, not by `pulumi preview`.
+- **User pools are `protect=True`** with Cognito deletion protection on: replacing a pool
+  deletes its users. Custom attributes cannot change after creation.
+- **Section 7a's Cognito audit triggers belong to build step 5** (portal shell, sign-in,
+  `seed.py`), not step 3, for three reasons:
+  1. Cognito waits at most 5 seconds for a trigger and fails the sign-in on a timeout,
+     while Aurora at 0 ACU takes about 15 seconds to resume. A synchronous `audit_writer`
+     insert from the trigger cannot meet "never block a sign-in". Step 5 needs a design
+     decision from the owner, for example a trigger that only queues the event on SQS (the
+     endpoint exists) and a consumer Lambda that writes `audit_log`.
+  2. A platform-pool `sign_in` row needs the platform tenant's ID, which `audit_writer`
+     cannot read and which exists only after `seed.py`.
+  3. `password_changed` comes from the change-password path and `sign_out` from
+     `POST /auth/signed-out`. Both are first used by the portal's user menu in step 5.
+- **The API image** (`api/Dockerfile`) is python:3.14-slim pinned by digest. It runs as uid
+  10001 with a read-only root filesystem and all capabilities dropped.
+  `tests/unit/test_api_image.py` checks that, plus the health check, a 401 from `GET /me`,
+  JSON logs and the RDS CA bundle. The trigger image (`api/pre-token.Dockerfile`) is the
+  Lambda base plus two files and uses the base image's boto3.
+- **FastAPI 0.16x keeps included routers lazily** (`_IncludedRouter`), so `app.routes`
+  does not list their endpoints. Walk them with `fastapi.routing.iter_route_contexts`.
+- **Young releases.** `api/pyproject.toml` caps `fastapi` and `pydantic` below releases
+  younger than two weeks (on 2026-11-23). Raise the caps deliberately.
+- **Test client: `httpx`, not `httpx2`.** Starlette 1.10 builds `TestClient` on `httpx2`
+  and deprecates plain `httpx`, but still supports `httpx>=0.27,<0.29` (its `full` extra).
+  `httpx2` (github.com/pydantic/httpx2, PyPI owner Kludex) is not published by the httpx
+  maintainers (encode), so the owner decided on 2026-11-23 not to use it. Starlette's
+  deprecation warning is filtered in pytest config. Neither package is in any image.

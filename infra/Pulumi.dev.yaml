@@ -12,7 +12,7 @@ config:
   assay-platform:adminHost: admin.dev.assayinsights.ai
   assay-platform:vpcCidr: 10.40.0.0/16
   # Zone IDs, not names. Workloads and the interface endpoints run in workloadAzId, which
-  # must offer every endpoint service (cognito-idp is only in use1-az2, use1-az4, use1-az6).
+  # must offer every endpoint service in use (S3 Vectors is not offered in use1-az3).
   assay-platform:workloadAzId: use1-az2
   assay-platform:secondAzId: use1-az4
   assay-platform:dbEngineVersion: "17.11"
@@ -20,3 +20,6 @@ config:
   assay-platform:dbMinAcu: "0"
   assay-platform:dbMaxAcu: "4"
   assay-platform:dbAutoPauseSeconds: "300"
+  # Cognito managed login prefix domains (<prefix>.auth.us-east-1.amazoncognito.com).
+  assay-platform:tenantAuthDomainPrefix: assay-dev-tenant
+  assay-platform:platformAuthDomainPrefix: assay-dev-admin

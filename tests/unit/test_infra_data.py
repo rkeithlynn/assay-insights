@@ -16,6 +16,7 @@ from assay_infra.config import (
     validate_network,
 )
 from assay_infra.database import Database
+from assay_infra.images import WORKSPACE_MANIFESTS
 from assay_infra.migrations import MigrationRunner, image_tag, parse_digest
 from assay_infra.network import INTERFACE_ENDPOINT_SERVICES, Network, plan_subnets
 from tests.unit.conftest import ACCOUNT_ID, REGION, registered
@@ -322,7 +323,7 @@ def test_migration_role_connects_only_as_migrator() -> Any:
 
 
 def test_image_tag_changes_with_source(tmp_path: Path) -> None:
-    for rel in ("pyproject.toml", "uv.lock", "infra/pyproject.toml", "db/pyproject.toml"):
+    for rel in WORKSPACE_MANIFESTS:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text("x")
     (tmp_path / "db/Dockerfile").write_text("FROM scratch")

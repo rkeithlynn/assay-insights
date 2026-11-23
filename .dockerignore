@@ -5,5 +5,7 @@
 !infra/pyproject.toml
 !db/pyproject.toml
 !db/assay_db/**
+!api/pyproject.toml
+!api/assay_api/**
 **/__pycache__
 **/*.pyc

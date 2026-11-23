@@ -26,6 +26,10 @@ log = logging.getLogger(__name__)
 # around 15 seconds. Keep trying for a little over a minute.
 CONNECT_TIMEOUT_SECONDS = 20
 CONNECT_ATTEMPTS = 4
+MIGRATE_APPLICATION = "assay-db-migrate"
+# An IAM token authenticates only the sign-in, so a pooled connection may outlive it. Pooled
+# connections are still replaced every 10 minutes.
+POOL_RECYCLE_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,9 @@ class DbTarget:
         )
 
 
-def _connect_once(target: DbTarget, user: str, password: str) -> psycopg.Connection:
+def _connect_once(
+    target: DbTarget, user: str, password: str, application_name: str
+) -> psycopg.Connection:
     return psycopg.connect(
         host=target.host,
         port=target.port,
@@ -57,21 +63,23 @@ def _connect_once(target: DbTarget, user: str, password: str) -> psycopg.Connect
         sslmode="verify-full",
         sslrootcert=target.ca_bundle,
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
-        application_name="assay-db-migrate",
+        application_name=application_name,
     )
 
 
-def _connect(target: DbTarget, user: str, password: str) -> psycopg.Connection:
+def _connect(
+    target: DbTarget, user: str, password: str, application_name: str = MIGRATE_APPLICATION
+) -> psycopg.Connection:
     for attempt in range(1, CONNECT_ATTEMPTS):
         try:
-            return _connect_once(target, user, password)
+            return _connect_once(target, user, password, application_name)
         except psycopg.OperationalError as exc:
             log.warning(
                 "database connection failed, retrying",
                 extra={"attempt": attempt, "user": user, "error": type(exc).__name__},
             )
             time.sleep(5)
-    return _connect_once(target, user, password)
+    return _connect_once(target, user, password, application_name)
 
 
 def master_connection(target: DbTarget, secret_arn: str) -> psycopg.Connection:
@@ -87,10 +95,29 @@ def iam_token(target: DbTarget, user: str) -> str:
     )
 
 
-def iam_engine(target: DbTarget, user: str) -> Engine:
-    """An engine whose every new connection uses a fresh IAM token (they last 15 minutes)."""
+def iam_engine(
+    target: DbTarget,
+    user: str,
+    *,
+    application_name: str = MIGRATE_APPLICATION,
+    pool_size: int = 0,
+) -> Engine:
+    """An engine whose every new connection uses a fresh IAM token (they last 15 minutes).
+
+    `pool_size=0` (the migration Lambda) opens a connection per use. A long-running service
+    passes a pool size; pooled connections are checked before use and recycled.
+    """
 
     def creator() -> psycopg.Connection:
-        return _connect(target, user, iam_token(target, user))
+        return _connect(target, user, iam_token(target, user), application_name)
 
-    return create_engine("postgresql+psycopg://", creator=creator, poolclass=NullPool)
+    if pool_size == 0:
+        return create_engine("postgresql+psycopg://", creator=creator, poolclass=NullPool)
+    return create_engine(
+        "postgresql+psycopg://",
+        creator=creator,
+        pool_size=pool_size,
+        max_overflow=pool_size,
+        pool_recycle=POOL_RECYCLE_SECONDS,
+        pool_pre_ping=True,
+    )

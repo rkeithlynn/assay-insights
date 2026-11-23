@@ -9,6 +9,7 @@ WORKDIR /src
 COPY pyproject.toml uv.lock ./
 COPY infra/pyproject.toml infra/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
+COPY api/pyproject.toml api/pyproject.toml
 # Locked, hash-checked, wheels only: nothing is compiled and nothing comes from the host.
 RUN uv export --locked --package assay-db --no-dev --no-emit-workspace --no-header \
         --format requirements-txt -o /tmp/requirements.txt \

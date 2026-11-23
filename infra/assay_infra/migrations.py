@@ -9,9 +9,7 @@ create the next audit_log partitions.
 
 from __future__ import annotations
 
-import hashlib
 import json
-from collections.abc import Iterable
 from pathlib import Path
 
 import pulumi
@@ -19,53 +17,32 @@ import pulumi_aws as aws
 import pulumi_command as command
 
 from assay_infra.database import Database, db_user_arn
+from assay_infra.images import (
+    BUILD_SCRIPT,
+    WORKSPACE_MANIFESTS,
+    lambda_pull_policy,
+    lifecycle_policy,
+    parse_digest,
+    source_tag,
+)
 from assay_infra.network import Network
 
 MIGRATOR_DB_USER = "migrator"  # assay_db.roles.MIGRATOR
 LOG_RETENTION_DAYS = 30
-IMAGES_KEPT = 10
 # 06:00 UTC on the first of every month.
 PARTITION_SCHEDULE = "cron(0 6 1 * ? *)"
 
-# The files `.dockerignore` lets into the build context. Their hash tags the image, so the
+# The files `.dockerignore` lets into this image's build. Their hash tags the image, so the
 # tag changes exactly when the image content can change (the repository is tag-immutable).
-IMAGE_INPUTS = ("pyproject.toml", "uv.lock", "infra/pyproject.toml", "db/pyproject.toml")
+IMAGE_INPUTS = WORKSPACE_MANIFESTS
 IMAGE_TREES = ("db/assay_db",)
 DOCKERFILE = "db/Dockerfile"
-BUILD_SCRIPT = "scripts/build_image.py"
 
-
-def _image_files(repo_root: Path) -> Iterable[Path]:
-    for rel in (*IMAGE_INPUTS, DOCKERFILE):
-        yield repo_root / rel
-    for tree in IMAGE_TREES:
-        for path in sorted((repo_root / tree).rglob("*")):
-            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
-                yield path
+__all__ = ["MigrationRunner", "image_tag", "parse_digest"]
 
 
 def image_tag(repo_root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in _image_files(repo_root):
-        digest.update(path.relative_to(repo_root).as_posix().encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return f"src-{digest.hexdigest()[:16]}"
-
-
-def parse_digest(stdout: str) -> str:
-    """The build script prints only the pushed image's digest on stdout."""
-    lines = stdout.strip().splitlines()
-    digest = lines[-1].strip() if lines else ""
-    algorithm, _, value = digest.partition(":")
-    if algorithm != "sha256" or len(value) != 64:
-        raise ValueError(f"image build printed no digest: {stdout!r}")
-    return digest
-
-
-def lambda_arns(region: str, account_id: str) -> str:
-    return f"arn:aws:lambda:{region}:{account_id}:function:*"
+    return source_tag(repo_root, [*IMAGE_INPUTS, DOCKERFILE], IMAGE_TREES)
 
 
 def _json(document: object) -> str:
@@ -107,45 +84,13 @@ class MigrationRunner(pulumi.ComponentResource):
         aws.ecr.LifecyclePolicy(
             f"{name}-repo-lifecycle",
             repository=self.repository.name,
-            policy=_json(
-                {
-                    "rules": [
-                        {
-                            "rulePriority": 1,
-                            "description": f"Keep the last {IMAGES_KEPT} images",
-                            "selection": {
-                                "tagStatus": "any",
-                                "countType": "imageCountMoreThan",
-                                "countNumber": IMAGES_KEPT,
-                            },
-                            "action": {"type": "expire"},
-                        }
-                    ]
-                }
-            ),
+            policy=lifecycle_policy(),
             opts=child,
         )
         aws.ecr.RepositoryPolicy(
             f"{name}-repo-policy",
             repository=self.repository.name,
-            policy=account.apply(
-                lambda acct: _json(
-                    {
-                        "Version": "2012-10-17",
-                        "Statement": [
-                            {
-                                "Sid": "LambdaPull",
-                                "Effect": "Allow",
-                                "Principal": {"Service": "lambda.amazonaws.com"},
-                                "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-                                "Condition": {
-                                    "StringLike": {"aws:sourceArn": lambda_arns(region, acct)}
-                                },
-                            }
-                        ],
-                    }
-                )
-            ),
+            policy=account.apply(lambda acct: lambda_pull_policy(region, acct)),
             opts=child,
         )
 

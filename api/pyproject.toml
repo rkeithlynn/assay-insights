@@ -1,0 +1,24 @@
+[project]
+name = "assay-api"
+version = "0.1.0"
+description = "Assay Insights API (FastAPI on ECS Fargate) and its Cognito pre-token trigger"
+requires-python = ">=3.14,<3.15"
+# Upper bounds keep releases younger than two weeks out; raise them deliberately.
+dependencies = [
+    "assay-db",
+    "fastapi>=0.162,<0.162.3",
+    "pydantic>=2.14,<2.14.4",
+    "pyjwt[crypto]>=2.15",
+    "uvicorn>=0.54",
+]
+
+[tool.uv.sources]
+assay-db = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "assay_api"
+module-root = ""
