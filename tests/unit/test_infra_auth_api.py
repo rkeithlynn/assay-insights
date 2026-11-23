@@ -10,7 +10,14 @@ from typing import Any
 import pulumi
 import pytest
 
-from assay_infra.api import ApiService, task_role_policy
+from assay_infra.api import (
+    TASK_VARIABLES,
+    ApiService,
+    TaskEnvironmentError,
+    check_environment,
+    container_definitions,
+    task_role_policy,
+)
 from assay_infra.auth import Auth, canonical_jwks, jwks_url
 from assay_infra.branding import Asset, asset_problems
 from assay_infra.config import AuthConfig, build_dns, validate_auth
@@ -22,7 +29,9 @@ from tests.unit.test_infra_data import DB, NET
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DNS = build_dns("example.test", "example.test", "admin.example.test")
 AUTH = AuthConfig(tenant_domain_prefix="t-login", platform_domain_prefix="p-login")
-FAKE_JWKS = json.dumps({"keys": [{"kid": "k1", "kty": "RSA", "alg": "RS256"}]})
+FAKE_JWKS = json.dumps(
+    {"keys": [{"alg": "RS256", "e": "AQAB", "kid": "k1", "kty": "RSA", "n": "n1", "use": "sig"}]}
+)
 
 
 def _stack(prefix: str) -> tuple[Auth, ApiService, list[tuple[str, str]]]:
@@ -281,7 +290,7 @@ def test_api_task_is_x86_fargate_non_root_and_read_only() -> Any:
         assert container["user"] == "10001:10001"
         assert container["readonlyRootFilesystem"] is True
         assert container["privileged"] is False
-        assert container["linuxParameters"] == {"capabilities": {"drop": ["ALL"]}}
+        assert container["linuxParameters"] == {"capabilities": {"add": [], "drop": ["ALL"]}}
         assert container["image"].endswith("@sha256:" + "0" * 64)
         assert container["logConfiguration"]["logDriver"] == "awslogs"
         service = _one("aws:ecs/service:Service", "a1-api-service")
@@ -337,6 +346,70 @@ def test_task_role_may_only_sign_in_as_the_two_api_roles() -> Any:
         assert statement["Resource"] == [f"{prefix}app_tenant", f"{prefix}platform_reader"]
 
     return _after_everything(auth, api).apply(check)
+
+
+# The container definition exactly as ECS stored it after the first deploy (revision 1):
+# the fields it adds to what was sent. Sending them too keeps the preview clean.
+ECS_STORED_FIELDS = {
+    "cpu": 0,
+    "portMappings": [{"containerPort": 8000, "hostPort": 8000, "protocol": "tcp"}],
+    "mountPoints": [],
+    "volumesFrom": [],
+    "systemControls": [],
+    "linuxParameters": {"capabilities": {"add": [], "drop": ["ALL"]}},
+}
+
+
+def _task_environment(**overrides: str) -> dict[str, str]:
+    env = {name: f"value-of-{name}" for name in TASK_VARIABLES}
+    env["COGNITO_TENANT_JWKS"] = FAKE_JWKS
+    env["COGNITO_PLATFORM_JWKS"] = FAKE_JWKS
+    env.update(overrides)
+    return env
+
+
+def test_container_definition_is_written_as_ecs_stores_it() -> None:
+    [container] = json.loads(
+        container_definitions(
+            image="repo@sha256:x", log_group="g", region=REGION, environment=_task_environment()
+        )
+    )
+    for field, stored in ECS_STORED_FIELDS.items():
+        assert container[field] == stored, field
+
+
+@pytest.mark.parametrize(
+    "jwks",
+    [
+        "",
+        "not json",
+        "{}",
+        '{"keys": []}',
+        '{"keys": [{"kid": "k", "kty": "RSA", "alg": "RS256"}]}',  # no use, n or e
+        '{"keys": [{"kid": "k", "kty": "EC", "alg": "ES256", "use": "sig"}]}',
+        "[]",
+    ],
+)
+@pytest.mark.parametrize("name", ["COGNITO_TENANT_JWKS", "COGNITO_PLATFORM_JWKS"])
+def test_task_definition_is_never_built_without_signing_keys(name: str, jwks: str) -> None:
+    with pytest.raises(TaskEnvironmentError):
+        check_environment(_task_environment(**{name: jwks}))
+    with pytest.raises(TaskEnvironmentError):
+        container_definitions(
+            image="i", log_group="g", region=REGION, environment=_task_environment(**{name: jwks})
+        )
+
+
+@pytest.mark.parametrize("name", TASK_VARIABLES)
+def test_task_definition_needs_every_variable(name: str) -> None:
+    env = _task_environment()
+    del env[name]
+    with pytest.raises(TaskEnvironmentError, match=name):
+        check_environment(env)
+
+
+def test_a_complete_environment_passes() -> None:
+    check_environment(_task_environment())
 
 
 def test_task_role_policy_sorts_resources() -> None:

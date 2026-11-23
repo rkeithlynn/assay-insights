@@ -19,6 +19,22 @@ PoolKind = Literal["tenant", "platform"]
 POOL_KINDS: tuple[PoolKind, ...] = ("tenant", "platform")
 
 
+class SettingsError(ValueError):
+    """The API cannot start. Raised at startup, so the task never becomes healthy."""
+
+
+def _jwks(env: Mapping[str, str], name: str) -> Mapping[str, Any]:
+    """A JWKS with at least one key. An empty or missing one stops the API at startup."""
+    raw = env.get(name, "")
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        raise SettingsError(f"{name} is empty or not JSON") from None
+    if not isinstance(document, dict) or not document.get("keys"):
+        raise SettingsError(f"{name} holds no keys")
+    return document
+
+
 @dataclass(frozen=True)
 class PoolSettings:
     kind: PoolKind
@@ -47,7 +63,7 @@ class Settings:
                 region=region,
                 pool_id=env[f"COGNITO_{kind.upper()}_POOL_ID"],
                 client_id=env[f"COGNITO_{kind.upper()}_CLIENT_ID"],
-                jwks=json.loads(env[f"COGNITO_{kind.upper()}_JWKS"]),
+                jwks=_jwks(env, f"COGNITO_{kind.upper()}_JWKS"),
             )
             for kind in POOL_KINDS
         )

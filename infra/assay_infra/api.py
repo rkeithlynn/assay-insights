@@ -21,7 +21,7 @@ from pathlib import Path
 import pulumi
 import pulumi_aws as aws
 
-from assay_infra.auth import Auth
+from assay_infra.auth import Auth, canonical_jwks
 from assay_infra.database import Database, db_user_arn
 from assay_infra.images import WORKSPACE_MANIFESTS, ContainerImage
 from assay_infra.network import Network
@@ -39,6 +39,20 @@ CONTAINER_USER = "10001:10001"  # api/Dockerfile
 TASK_CPU = "512"
 TASK_MEMORY = "1024"
 HEALTH_PATH = "/api/health"
+
+# The variables assay_api.settings.Settings.from_env reads (DB_CA_BUNDLE is in the image).
+JWKS_VARIABLES = ("COGNITO_TENANT_JWKS", "COGNITO_PLATFORM_JWKS")
+TASK_VARIABLES = (
+    "AWS_REGION",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "COGNITO_TENANT_POOL_ID",
+    "COGNITO_TENANT_CLIENT_ID",
+    "COGNITO_PLATFORM_POOL_ID",
+    "COGNITO_PLATFORM_CLIENT_ID",
+    *JWKS_VARIABLES,
+)
 LOG_RETENTION_DAYS = 30
 
 
@@ -114,21 +128,57 @@ def task_role_policy(db_users: list[str]) -> str:
     )
 
 
+class TaskEnvironmentError(ValueError):
+    """The API task would start without what it needs. Fails the preview or the update."""
+
+
+def check_environment(environment: Mapping[str, str]) -> None:
+    """Every variable the API reads is set, and both JWKS hold an RS256 signing key.
+
+    The JWKS is read from Cognito at `pulumi up`. A task given an empty one could verify no
+    token, so the task definition is never built with one.
+    """
+    missing = [name for name in TASK_VARIABLES if not environment.get(name)]
+    if missing:
+        raise TaskEnvironmentError(f"API task environment lacks {', '.join(missing)}")
+    for name in JWKS_VARIABLES:
+        try:
+            canonical_jwks(json.loads(environment[name]))
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise TaskEnvironmentError(f"{name} holds no usable signing key: {exc}") from None
+
+
 def container_definitions(
     *, image: str, log_group: str, region: str, environment: Mapping[str, str]
 ) -> str:
+    check_environment(environment)
+    # Written exactly as ECS stores a container definition: under awsvpc it sets hostPort
+    # to containerPort, and it adds cpu 0 and empty mountPoints, volumesFrom,
+    # systemControls and capabilities.add. Leaving them out made every preview replace the
+    # task definition (after the first deploy of step 3). The task's CPU is set on the
+    # task definition; 0 here means the container has no reservation of its own.
     return json.dumps(
         [
             {
                 "name": CONTAINER_NAME,
                 "image": image,
+                "cpu": 0,
                 "essential": True,
                 "user": CONTAINER_USER,
                 "readonlyRootFilesystem": True,
                 "privileged": False,
-                "portMappings": [{"containerPort": CONTAINER_PORT, "protocol": "tcp"}],
+                "portMappings": [
+                    {
+                        "containerPort": CONTAINER_PORT,
+                        "hostPort": CONTAINER_PORT,
+                        "protocol": "tcp",
+                    }
+                ],
                 "environment": [{"name": k, "value": v} for k, v in sorted(environment.items())],
-                "linuxParameters": {"capabilities": {"drop": ["ALL"]}},
+                "linuxParameters": {"capabilities": {"add": [], "drop": ["ALL"]}},
+                "mountPoints": [],
+                "volumesFrom": [],
+                "systemControls": [],
                 "logConfiguration": {
                     "logDriver": "awslogs",
                     "options": {

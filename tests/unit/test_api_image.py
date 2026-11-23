@@ -158,6 +158,19 @@ def test_api_can_read_the_rds_ca_bundle(api_container: str) -> None:
     assert out.stdout.split() == ["0o444", "loaded"]
 
 
+@pytest.mark.parametrize("jwks", ["", '{"keys": []}'])
+def test_api_exits_without_signing_keys(api_image: str, jwks: str) -> None:
+    """A task given an empty JWKS stops at once and never answers the health check."""
+    args = ["run", "--rm", "--read-only", "--cap-drop", "ALL"]
+    for key, value in {**_environment(), "COGNITO_TENANT_JWKS": jwks}.items():
+        args += ["-e", f"{key}={value}"]
+    result = docker(*args, api_image, check=False, timeout=120)
+    assert result.returncode == 1, result.stdout + result.stderr
+    [entry] = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    assert entry["message"] == "API settings unusable; not starting"
+    assert "COGNITO_TENANT_JWKS" in entry["error"]
+
+
 def test_trigger_imports_as_lambdas_user_without_api_dependencies(trigger_image: str) -> None:
     script = (
         "import importlib.util, assay_api.cognito_pre_token as t\n"

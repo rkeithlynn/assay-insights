@@ -277,6 +277,18 @@ assets/     Logo and favicon SVGs
   - **Cognito admin calls** (invite, disable, resets, global sign-out) will run in a Lambda
     outside the VPC that the API invokes, built in step 5 with the first route that needs
     one. That step also adds the `lambda` interface endpoint.
+- **ECS container definitions are written as ECS stores them**
+  (`assay_infra.api.container_definitions`): `hostPort` equal to `containerPort`
+  (awsvpc), `cpu` 0, and empty `mountPoints`, `volumesFrom`, `systemControls` and
+  `capabilities.add`. After the first deploy of step 3, leaving them out made every preview
+  replace the task definition. Any new container field must match what
+  `aws ecs describe-task-definition` returns, or the diff comes back.
+- **A task can never start with an empty JWKS.** `check_environment()` refuses to build the
+  task definition unless every variable the API reads is set and both JWKS hold an RS256
+  signing key, so `pulumi preview` and `pulumi up` fail first. If one still arrives, the
+  API logs "API settings unusable; not starting" and exits with status 1 before serving
+  (`assay_api.__main__`), so the target never turns healthy and ECS's circuit breaker
+  keeps the previous task. `test_api_settings.py` and `test_api_image.py` cover both.
 - **The ALB-to-CloudFront hop must use HTTPS** when the edge is built in step 5. Until
   then the internal ALB has a plain HTTP:80 listener and its security group has no inbound
   rule, so nothing can reach it. ALB access logs go in with the edge's logging bucket.
