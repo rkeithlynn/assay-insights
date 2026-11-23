@@ -21,6 +21,23 @@ change. Where this file and the spec differ, the spec wins.
 - Give the developer commands in PowerShell, one line each. Scripts the developer runs
   are Python (`uv run ...`), not shell scripts.
 
+## Build progress (BUILD_SPEC.md section 12)
+
+| Step | Status |
+| --- | --- |
+| 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
+| 2. Network, database, migrations, database roles and RLS | Next. Not started |
+| 3–9 | Not started |
+
+Step 1 was verified on 2026-11-23:
+
+- The hosted zone `dev.assayinsights.ai` is delegated from Squarespace to its four
+  Route 53 name servers (`pulumi stack output name_servers`).
+- The ACM certificate for `dev.assayinsights.ai` and `admin.dev.assayinsights.ai` is
+  `ISSUED`. It replaced the first certificate, which failed with `CAA_ERROR`.
+- `pulumi preview` on the `dev` stack shows 6 unchanged.
+- CI passes on `main`.
+
 ## Fixed facts (BUILD_SPEC.md section 2)
 
 | Item | Value |
