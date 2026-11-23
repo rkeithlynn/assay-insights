@@ -30,8 +30,9 @@ change. Where this file and the spec differ, the spec wins.
 | Step | Status |
 | --- | --- |
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
-| 2. Network, database, migrations, database roles and RLS | **Deployed and migrated** (2026-11-23). Awaiting `uv run scripts/migrate.py --command verify` |
-| 3–9 | Not started |
+| 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
+| 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | Next. Not started |
+| 4–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
 
@@ -41,6 +42,20 @@ Step 1 was verified on 2026-11-23:
   `ISSUED`. It replaced the first certificate, which failed with `CAA_ERROR`.
 - `pulumi preview` on the `dev` stack shows 6 unchanged.
 - CI passes on `main`.
+
+Step 2 was verified on 2026-11-23:
+
+- `uv run scripts/migrate.py` created all 7 database roles as the Aurora master user, with
+  `roles_verified: true`, and migrated to revision `0001`.
+- `uv run scripts/migrate.py --command verify`, run in Aurora as `migrator`, reported
+  `rls_verified: true` for all 23 tenant tables (`tenant_id`, RLS enabled and forced, a
+  policy on each) and `roles_verified: true` (no role has SUPERUSER, BYPASSRLS,
+  REPLICATION, CREATEDB, CREATEROLE or an unexpected membership).
+- `pulumi preview` on the `dev` stack shows 65 unchanged.
+- Fixes found during deployment, all on `build-step-2`: the ECR login kept out of the
+  Windows Credential Manager, the RDS CA bundle made readable by Lambda's non-root user,
+  and a bootstrap that works under Aurora's non-superuser master user.
+- CI on the `build-step-2` pull request must pass before `main` is fast-forwarded.
 
 ## Fixed facts (BUILD_SPEC.md section 2)
 
