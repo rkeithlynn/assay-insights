@@ -128,7 +128,10 @@ assets/     Logo and favicon SVGs
     tag's commit SHA.
   - `gh api repos/<owner>/<repo>/commits/<sha>` confirms that the commit exists.
   - Check that every `with:` input the workflow passes is still in the action's
-    `action.yml` at that SHA.
+    `action.yml` at that SHA. Fetch it raw:
+    `gh api -H "Accept: application/vnd.github.raw" "repos/<owner>/<repo>/contents/action.yml?ref=<sha>"`.
+  - Prefer a release that has been out for at least a couple of weeks over one that is
+    only days old. setup-uv is on v10.3.3 rather than v10.4.0 for this reason.
 - Run the checks locally with `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy` and `uv run pytest`.
 - Every AWS resource is tagged `app=assay-insights`, `env=dev` through `aws:defaultTags`
