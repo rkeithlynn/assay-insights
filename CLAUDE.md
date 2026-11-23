@@ -216,6 +216,13 @@ assets/     Logo and favicon SVGs
   provenance attestations by default, which pushes an OCI image index that Lambda
   rejects. The `pulumi-docker-build` provider cannot turn attestations off, so don't use it
   for Lambda images. Base images in Dockerfiles are pinned by digest.
+- **ECR login on Windows.** An ECR token (about 3,100 characters) is too long for the
+  Windows Credential Manager ("The stub received bad data"). `scripts/build_image.py`
+  logs in, builds and pushes with `DOCKER_CONFIG` pointing at a temporary directory that
+  has no `credsStore`. It also removes every `docker-credential-*` helper directory from
+  `PATH` for those subprocesses, because without a `credsStore` the CLI otherwise falls
+  back to `wincred`. It checks the token stayed in the file, then deletes the directory.
+  The user's Docker config and credential store are never touched.
 - **Aurora engine version** is in `ignore_changes`, because minor versions upgrade
   automatically. To upgrade on purpose, change `dbEngineVersion` and lift the ignore for
   that `pulumi up`.
