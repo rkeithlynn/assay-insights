@@ -109,6 +109,12 @@ MALWARE_PLAN_ACTIONS = (
     "guardduty:UntagResource",
     "guardduty:ListTagsForResource",
 )
+# S3 blocks SSE-C on every new bucket and reports it in the bucket's encryption rule, so the
+# rule must say so too or every preview shows a difference. The encryption rule is also the
+# last bucket setting applied: the provider reads a setting back right after writing it, and
+# on a bucket only seconds old S3 can still answer with the default (AES256), which Pulumi
+# then records. If a preview ever shows AES256 becoming aws:kms, check the bucket itself.
+BLOCKED_ENCRYPTION_TYPES = ("SSE-C",)  # assay_tss.provision.program.BLOCKED_ENCRYPTION_TYPES
 STATE_OBJECT_ACTIONS = ("s3:GetObject", "s3:PutObject", "s3:DeleteObject")
 STATE_KEY_USE_ACTIONS = ("kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey")
 # Administration of the state key through IAM. No cryptographic operation and no grants.
@@ -808,9 +814,13 @@ class Provisioning(pulumi.ComponentResource):
                         sse_algorithm="aws:kms", kms_master_key_id=self.state_key.arn
                     ),
                     bucket_key_enabled=True,
+                    blocked_encryption_types=list(BLOCKED_ENCRYPTION_TYPES),
                 )
             ],
-            opts=child,
+            # Last of the bucket's settings: see BLOCKED_ENCRYPTION_TYPES.
+            opts=pulumi.ResourceOptions(
+                parent=self, depends_on=[state_ownership, state_public_access, state_versioning]
+            ),
         )
         aws.s3.BucketPolicy(
             f"{name}-state-policy",

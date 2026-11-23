@@ -32,7 +32,7 @@ change. Where this file and the spec differ, the spec wins.
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
-| 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Built, not yet deployed** (2026-11-23, branch `build-step-4`) |
+| 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Deployed 2026-11-23; fixture tenants and isolation run still to do** (branch `build-step-4`) |
 | 5–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -82,6 +82,11 @@ has done all of this, in order, and each has succeeded:
 
 1. `pulumi up`, then `uv run scripts/migrate.py` (revision `0003`). The owner follows the
    confirmation link SNS emails to `alarmEmail`, or no alarm is delivered.
+   **Done 2026-11-23:** 88 created, 2 updated, 3 replaced; migration at `0003` with RLS and
+   roles verified; subscription confirmed. The next preview then showed two differences
+   (the TSS API's policy and the state bucket's encryption rule). Both were correct in AWS;
+   the fix is in the code and needs **one more `pulumi up`** before tenants are added, so
+   that the provisioning image carries the corrected tenant program.
 2. `uv run scripts/add_tenant.py` twice, for the fixture tenants "Isolation Test A" and
    "Isolation Test B". Each must end `SUCCEEDED`, and each admin must get an invitation.
 3. `uv run scripts/run_isolation.py` with the two tenant IDs: every test passes.
@@ -506,6 +511,26 @@ assets/     Logo and favicon SVGs
   CORS.
 - **API Gateway's account-level CloudWatch Logs role** was unset; this stack now sets it
   (one per Region, shared by every API in the account).
+- **Write a resource the way AWS stores it, or every preview shows a difference.** Two
+  cases found after the first `pulumi up` of step 4 (2026-11-23), both with tests:
+  - **A REST API's resource policy.** API Gateway replaces the `execute-api:/...` shorthand
+    with the API's own ARN and turns a one-item principal list into a string. So the policy
+    is an `aws.apigateway.RestApiPolicy` resource built from the API's `execution_arn`
+    (`assay_infra.tss.api_resource_policy`), never the API's `policy` argument, which
+    cannot name its own ARN. The deployment's redeploy fingerprint uses the policy's
+    portable form, so it does not depend on the API's ARN.
+  - **A bucket's encryption rule.** S3 blocks SSE-C on every new bucket and reports
+    `BlockedEncryptionTypes: ["SSE-C"]` in the rule, so every rule declares it
+    (`BLOCKED_ENCRYPTION_TYPES`, in the platform stack and the tenant program).
+- **A preview that shows a new bucket's encryption as `AES256` becoming `aws:kms` is
+  usually Pulumi's state, not the bucket.** The provider reads a setting back right after
+  writing it, and S3 can still answer with the default on a bucket a few seconds old; the
+  state then records `AES256` although the bucket has the KMS rule. It happened to the
+  state bucket. Check the bucket first
+  (`aws s3api get-bucket-encryption --bucket <name> --profile pilar-dev`). If the bucket is
+  right, the owner's next `pulumi up` (or a refresh) corrects the state. The encryption
+  rule is now applied after the bucket's other settings, which narrows the window but
+  cannot close it.
 - **`tests/isolation` runs in a Lambda in the VPC** (`isolationTests: true`), because the
   TSS and the database are private. Its role is a probe: IAM allows it to assume the
   tenant role and to read, write and tag tenant buckets and keys, and the tests show the
@@ -541,9 +566,7 @@ assets/     Logo and favicon SVGs
      (`aws:RequestTag/tenant_id` present, `aws:ResourceTag/app` absent).
   5. `guardduty:CreateMalwareProtectionPlan` needs nothing beyond that action and
      `iam:PassRole`.
-  6. The task definition's container definition round-trips unchanged, so the next
-     `pulumi preview` shows no diff.
-  7. S3 Vectors accepts the vector bucket policy's `Principal: "*"` and `Condition`
+  6. S3 Vectors accepts the vector bucket policy's `Principal: "*"` and `Condition`
      elements. If it rejects them, tell the owner before changing the policy: admitting
      only two roles cannot be written without one of them.
   `run_isolation.py` then checks the result: a principal whose IAM policy allows it is

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -486,13 +487,43 @@ def test_tss_api_is_private_with_iam_authorization() -> Any:
             "types": "PRIVATE",
             "vpcEndpointIds": ["t3-execute-api-id"],
         }
-        policy = json.loads(api["policy"])
+        # The policy is its own resource, written as API Gateway stores it. Given as the
+        # API's `policy` argument in shorthand, it differed on every preview.
+        assert "policy" not in api
+        api_arn = f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:t3-tss-api-id"
+        attached = _one("aws:apigateway/restApiPolicy:RestApiPolicy", "t3-tss-api-policy")
+        assert attached["restApiId"] == "t3-tss-api-id"
+        assert tss.THIS_API + "/" not in attached["policy"]
+        policy = json.loads(attached["policy"])
         deny = by_sid(policy, "OnlyThroughTheVpcEndpoint")
         assert deny["Effect"] == "Deny" and deny["Principal"] == "*"
+        assert deny["Action"] == "execute-api:Invoke"
+        assert deny["Resource"] == f"{api_arn}/*"
         assert deny["Condition"] == {"StringNotEquals": {"aws:SourceVpce": "t3-execute-api-id"}}
         allow = by_sid(policy, "KnownCallers")
-        assert allow["Principal"] == {"AWS": [f"{ROLE}/t3-isolation-role-a1b2c3d"]}
-        assert allow["Resource"] == "execute-api:/v1/POST/resolve"
+        # One caller: a string, as AWS stores it, not a one-item list.
+        assert allow["Principal"] == {"AWS": f"{ROLE}/t3-isolation-role-a1b2c3d"}
+        assert allow["Resource"] == f"{api_arn}/v1/POST/resolve"
+        assert [s["Sid"] for s in policy["Statement"]] == [
+            "OnlyThroughTheVpcEndpoint",
+            "KnownCallers",
+        ]
+
+        # The redeploy fingerprint is taken from the portable form, so it does not depend
+        # on the API's own ARN.
+        portable = tss.api_resource_policy(
+            vpc_endpoint_id="t3-execute-api-id", callers=[f"{ROLE}/t3-isolation-role-a1b2c3d"]
+        )
+        deployment = _one("aws:apigateway/deployment:Deployment", "t3-tss-api-deployment")
+        parts = [
+            "t3-tss-api-resolve-id",
+            "t3-tss-api-resolve-post-id",
+            "t3-tss-api-resolve-lambda-id",
+            _one("aws:apigateway/integration:Integration", "t3-tss-api-resolve-lambda")["uri"],
+            portable,
+        ]
+        expected = hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
+        assert deployment["triggers"] == {"redeploy": expected}
 
         method = _one("aws:apigateway/method:Method", "t3-tss-api-resolve-post")
         assert (method["httpMethod"], method["authorization"]) == ("POST", "AWS_IAM")
@@ -526,7 +557,8 @@ def test_without_the_isolation_runner_the_tss_has_no_caller() -> Any:
     def check(_: list[Any]) -> None:
         function = _one("aws:lambda/function:Function", "t4-tss-fn")
         assert function["environment"]["variables"]["TSS_CALLERS"] == "{}"
-        policy = json.loads(_one("aws:apigateway/restApi:RestApi", "t4-tss-api")["policy"])
+        attached = _one("aws:apigateway/restApiPolicy:RestApiPolicy", "t4-tss-api-policy")
+        policy = json.loads(attached["policy"])
         assert [s["Effect"] for s in policy["Statement"]] == ["Deny"]
         assert registered("aws:lambda/function:Function", "t4-isolation") == []
         assert "t4-isolation-policy" not in stack.role_policies()
@@ -735,6 +767,8 @@ def test_state_bucket_is_private_versioned_and_encrypted_with_its_own_key() -> A
         default = rule["applyServerSideEncryptionByDefault"]
         assert default["sseAlgorithm"] == "aws:kms"
         assert default["kmsMasterKeyId"].endswith("key/p3-provision-state-key-key-id")
+        # As S3 stores the rule. Left out, it differed on every preview.
+        assert rule["blockedEncryptionTypes"] == ["SSE-C"]
         key = _one("aws:kms/key:Key", "p3-provision-state-key")
         assert key["enableKeyRotation"] is True
         use = by_sid(key["policy"], "OnlyProvisioningUses")
@@ -802,6 +836,83 @@ def test_new_endpoints_exist_for_the_tss_and_provisioning() -> Any:
         }
         for service in ("execute-api", "lambda", "guardduty"):
             assert f"com.amazonaws.{REGION}.{service}" in services
+
+    return stack.ready().apply(check)
+
+
+CALLER_A = f"{ROLE}/api-task"
+CALLER_B = f"{ROLE}/worker"
+API_ARN = f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:abc123"
+
+
+def test_api_policy_sent_to_aws_is_in_the_form_api_gateway_stores() -> None:
+    """Regression: API Gateway rewrites `execute-api:/...` to the API's ARN, and a one-item
+    principal list to a string. Anything else shows a difference on every preview."""
+    stored = tss.api_resource_policy(
+        vpc_endpoint_id="vpce-1", callers=[CALLER_A], execution_arn=API_ARN
+    )
+    assert json.loads(stored) == {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "OnlyThroughTheVpcEndpoint",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "execute-api:Invoke",
+                "Resource": f"{API_ARN}/*",
+                "Condition": {"StringNotEquals": {"aws:SourceVpce": "vpce-1"}},
+            },
+            {
+                "Sid": "KnownCallers",
+                "Effect": "Allow",
+                "Principal": {"AWS": CALLER_A},
+                "Action": "execute-api:Invoke",
+                "Resource": f"{API_ARN}/v1/POST/resolve",
+            },
+        ],
+    }
+    assert "execute-api:/" not in stored
+
+
+def test_api_policy_with_several_callers_lists_them_in_order() -> None:
+    stored = json.loads(
+        tss.api_resource_policy(
+            vpc_endpoint_id="vpce-1", callers=[CALLER_B, CALLER_A], execution_arn=API_ARN
+        )
+    )
+    assert by_sid(stored, "KnownCallers")["Principal"] == {"AWS": [CALLER_A, CALLER_B]}
+
+
+def test_api_policy_without_callers_only_denies() -> None:
+    stored = json.loads(
+        tss.api_resource_policy(vpc_endpoint_id="vpce-1", callers=[], execution_arn=API_ARN)
+    )
+    assert [s["Effect"] for s in stored["Statement"]] == ["Deny"]
+
+
+def test_portable_api_policy_names_no_api() -> None:
+    """Used only for the redeploy fingerprint, which must not depend on the API's ARN."""
+    portable = json.loads(tss.api_resource_policy(vpc_endpoint_id="vpce-1", callers=[CALLER_A]))
+    resources = [s["Resource"] for s in portable["Statement"]]
+    assert resources == ["execute-api:/*", "execute-api:/v1/POST/resolve"]
+    assert by_sid(portable, "KnownCallers")["Principal"] == {"AWS": [CALLER_A]}
+
+
+@pulumi.runtime.test
+def test_no_bucket_encryption_rule_leaves_out_what_s3_adds() -> Any:
+    """Every encryption rule in the stack is customer-managed KMS and declares the SSE-C
+    block S3 puts on new buckets."""
+    stack = Stack("s1")
+    token = "aws:s3/bucketServerSideEncryptionConfiguration:BucketServerSideEncryptionConfiguration"
+
+    def check(_: list[Any]) -> None:
+        rules = [rule for name, inputs in registered(token, "s1-") for rule in inputs["rules"]]
+        assert rules, "no bucket encryption registered"
+        for rule in rules:
+            assert rule["applyServerSideEncryptionByDefault"]["sseAlgorithm"] == "aws:kms"
+            assert rule["applyServerSideEncryptionByDefault"]["kmsMasterKeyId"]
+            assert rule["bucketKeyEnabled"] is True
+            assert rule["blockedEncryptionTypes"] == list(provisioning.BLOCKED_ENCRYPTION_TYPES)
 
     return stack.ready().apply(check)
 

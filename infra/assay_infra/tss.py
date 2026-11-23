@@ -211,15 +211,33 @@ def events_to_logs_policy(log_group_arn: str) -> str:
     )
 
 
-def api_resource_policy(*, vpc_endpoint_id: str, callers: list[str]) -> str:
-    """Only through the VPC's endpoint, and only the caller roles named here."""
+# API Gateway's shorthand for "this API", which it replaces with the API's ARN on save.
+THIS_API = "execute-api:"
+
+
+def api_resource_policy(
+    *, vpc_endpoint_id: str, callers: list[str], execution_arn: str | None = None
+) -> str:
+    """Only through the VPC's endpoint, and only the caller roles named here.
+
+    With `execution_arn`, the policy is written exactly as API Gateway stores it: every
+    resource is a full ARN under the API's own, and a single principal is a string, not a
+    one-item list. That is the form sent to AWS, so the next preview finds no difference.
+
+    Without it, the result is the portable form, which names no API. It is never sent to
+    AWS; it is what the redeploy fingerprint is taken from.
+    """
+    api = execution_arn if execution_arn is not None else THIS_API
+    principals: str | list[str] = sorted(callers)
+    if execution_arn is not None and len(callers) == 1:
+        principals = callers[0]
     statements: list[dict[str, object]] = [
         {
             "Sid": "OnlyThroughTheVpcEndpoint",
             "Effect": "Deny",
             "Principal": "*",
             "Action": "execute-api:Invoke",
-            "Resource": "execute-api:/*",
+            "Resource": f"{api}/*",
             "Condition": {"StringNotEquals": {"aws:SourceVpce": vpc_endpoint_id}},
         }
     ]
@@ -228,9 +246,9 @@ def api_resource_policy(*, vpc_endpoint_id: str, callers: list[str]) -> str:
             {
                 "Sid": "KnownCallers",
                 "Effect": "Allow",
-                "Principal": {"AWS": sorted(callers)},
+                "Principal": {"AWS": principals},
                 "Action": "execute-api:Invoke",
-                "Resource": f"execute-api:/{STAGE}/POST/{RESOLVE_PATH}",
+                "Resource": f"{api}/{STAGE}/POST/{RESOLVE_PATH}",
             }
         )
     return _json({"Version": "2012-10-17", "Statement": statements})
@@ -467,9 +485,7 @@ class TenantStorage(pulumi.ComponentResource):
 
         # --- Private API -----------------------------------------------------------------
         endpoint = network.interface_endpoints["execute-api"]
-        resource_policy = pulumi.Output.all(
-            endpoint.id, *[role.arn for role in callers.values()]
-        ).apply(lambda v: api_resource_policy(vpc_endpoint_id=v[0], callers=list(v[1:])))
+        caller_arns = [role.arn for role in callers.values()]
         self.api = aws.apigateway.RestApi(
             f"{name}-api",
             name=name,
@@ -477,7 +493,19 @@ class TenantStorage(pulumi.ComponentResource):
             endpoint_configuration=aws.apigateway.RestApiEndpointConfigurationArgs(
                 types="PRIVATE", vpc_endpoint_ids=[endpoint.id]
             ),
-            policy=resource_policy,
+            opts=child,
+        )
+        # The policy is its own resource, not the API's `policy` argument, because API
+        # Gateway stores it with the API's own ARN in every resource. Only a separate
+        # resource can name that ARN; the shorthand form shows a difference on every preview.
+        self.api_policy = aws.apigateway.RestApiPolicy(
+            f"{name}-api-policy",
+            rest_api_id=self.api.id,
+            policy=pulumi.Output.all(self.api.execution_arn, endpoint.id, *caller_arns).apply(
+                lambda v: api_resource_policy(
+                    execution_arn=v[0], vpc_endpoint_id=v[1], callers=list(v[2:])
+                )
+            ),
             opts=child,
         )
         resource = aws.apigateway.Resource(
@@ -543,14 +571,21 @@ class TenantStorage(pulumi.ComponentResource):
             opts=child,
         )
         # A new deployment whenever the route, its integration or the resource policy changes.
+        # The policy enters the fingerprint in its portable form (endpoint and callers).
+        portable_policy = pulumi.Output.all(endpoint.id, *caller_arns).apply(
+            lambda v: api_resource_policy(vpc_endpoint_id=v[0], callers=list(v[1:]))
+        )
         redeploy = pulumi.Output.all(
-            resource.id, method.id, integration.id, integration.uri, resource_policy
+            resource.id, method.id, integration.id, integration.uri, portable_policy
         ).apply(lambda parts: hashlib.sha256(_json(parts).encode()).hexdigest())
+        # A private API cannot be deployed before it has its policy.
         deployment = aws.apigateway.Deployment(
             f"{name}-api-deployment",
             rest_api=self.api.id,
             triggers={"redeploy": redeploy},
-            opts=pulumi.ResourceOptions(parent=self, depends_on=[method, integration]),
+            opts=pulumi.ResourceOptions(
+                parent=self, depends_on=[method, integration, self.api_policy]
+            ),
         )
         self.stage = aws.apigateway.Stage(
             f"{name}-api-stage",

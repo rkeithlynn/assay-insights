@@ -32,6 +32,9 @@ NON_FILTERABLE_METADATA_KEYS = ("text",)
 VECTOR_DATA_TYPE = "float32"
 VECTOR_DISTANCE_METRIC = "cosine"
 RETENTION_MODE = "GOVERNANCE"
+# S3 blocks SSE-C on every new bucket and reports it in the encryption rule; the rule is
+# written the way S3 stores it. Objects are encrypted with the tenant key only.
+BLOCKED_ENCRYPTION_TYPES = ("SSE-C",)
 RETENTION_DAYS = 1
 
 # Stack outputs, read back by the provisioning task.
@@ -134,9 +137,14 @@ def tenant_program(settings: ProvisionSettings, tenant_id: uuid.UUID) -> Callabl
                         sse_algorithm="aws:kms", kms_master_key_id=key.arn
                     ),
                     bucket_key_enabled=True,
+                    blocked_encryption_types=list(BLOCKED_ENCRYPTION_TYPES),
                 )
             ],
-            opts=opts,
+            # After the other settings, so the bucket is no longer brand new when the
+            # provider reads the rule back.
+            opts=pulumi.ResourceOptions(
+                provider=provider, depends_on=[ownership, public_access, versioning]
+            ),
         )
         object_lock = aws.s3.BucketObjectLockConfiguration(
             "bucket-object-lock",
