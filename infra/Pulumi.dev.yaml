@@ -1,0 +1,12 @@
+config:
+  aws:region: us-east-1
+  aws:profile: pilar-dev
+  aws:allowedAccountIds:
+    - "429100266783"
+  aws:defaultTags:
+    tags:
+      app: assay-insights
+      env: dev
+  assay-platform:hostedZone: dev.assayinsights.ai
+  assay-platform:tenantHost: dev.assayinsights.ai
+  assay-platform:adminHost: admin.dev.assayinsights.ai

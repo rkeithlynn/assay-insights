@@ -68,9 +68,10 @@ PowerShell, Docker Desktop on WSL 2, and `pulumi up` run by hand.
 - Never package Lambda code or native dependencies (`pypdfium2`, `psycopg`, `pyHanko`)
   from the Windows host. Build them inside a Linux container, or ship those functions
   as container images.
-- Pin the project's Python in `.python-version` to the newest version AWS Lambda
-  supports in `us-east-1`, use the same version in the container images, and manage it
-  with `uv`. Do not rely on the Python installed on the machine.
+- Pin Python to the newest version that AWS Lambda supports and that every native
+  dependency publishes Linux x86-64 builds for; prefer one release behind the latest.
+  Use the same version in the container images, and manage it with `uv`. Do not rely
+  on the Python installed on the machine.
 - Give commands for the developer in PowerShell, one line each, not bash. Scripts the
   developer runs are Python (`uv run ...`), not shell scripts.
 - Add a `.gitattributes` that forces LF line endings for Dockerfiles, shell scripts

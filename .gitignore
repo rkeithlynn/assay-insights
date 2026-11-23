@@ -1,0 +1,30 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node / portal
+node_modules/
+portal/dist/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+.claude/settings.local.json
+
+# Editors and OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+Thumbs.db
+.DS_Store

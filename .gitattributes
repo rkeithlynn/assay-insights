@@ -1,0 +1,24 @@
+# Default: let Git normalise text files
+* text=auto
+
+# Always LF: anything that runs inside a Linux container or is Python
+*.py            text eol=lf
+*.pyi           text eol=lf
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+*.dockerfile    text eol=lf
+.dockerignore   text eol=lf
+*.toml          text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+uv.lock         text eol=lf
+.python-version text eol=lf
+
+# Binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.tif  binary
+*.tiff binary
+*.pdf  binary

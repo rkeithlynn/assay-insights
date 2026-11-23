@@ -1,0 +1,11 @@
+name: assay-platform
+description: Assay Insights platform infrastructure (network, data, auth, compute, edge, pipeline)
+runtime:
+  name: python
+  options:
+    toolchain: uv
+    virtualenv: ../.venv
+config:
+  pulumi:tags:
+    value:
+      app: assay-insights

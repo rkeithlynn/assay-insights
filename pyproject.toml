@@ -1,0 +1,58 @@
+[project]
+name = "assay-insights"
+version = "0.1.0"
+description = "Assay Insights: multi-tenant AI search over signed loan document archives"
+requires-python = ">=3.14,<3.15"
+dependencies = ["assay-infra"]
+
+[tool.uv]
+package = false
+# Never use the Python installed on the machine (BUILD_SPEC.md section 2).
+python-preference = "only-managed"
+
+[tool.uv.sources]
+assay-infra = { workspace = true }
+
+[tool.uv.workspace]
+members = ["infra"]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.8",
+    "mypy>=1.18",
+    "pip-audit>=2.9",
+    "pytest>=8.4",
+    "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = ["portal"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PTH"]
+
+[tool.ruff.format]
+# Markdown (including BUILD_SPEC.md) is prose and is never reformatted.
+exclude = ["*.md"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["assay_infra"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["infra", "tests"]
+explicit_package_bases = true
+mypy_path = "infra"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+addopts = "-ra"
+
+[tool.bandit]
+exclude_dirs = [".venv", "tests", "portal"]
