@@ -85,6 +85,8 @@ Pulumi config or the `ai_models` table.
 
 ```
 infra/      Pulumi program (Python): network, data, auth, compute, edge, pipeline
+db/         Database: SQLAlchemy models, Alembic migrations, database roles and RLS
+            (uv workspace package `assay_db`, shared by api/ and workers/)
 api/        FastAPI app (ECS Fargate)
 workers/    Pipeline code: Lambda handlers and the Fargate worker
 tss/        Tenant Storage Service (Lambda) and its client package
@@ -292,6 +294,17 @@ Database roles:
   to any other table. The view must not expose `file_name`.
 - `platform_writer`: used only by tenant provisioning and admin tenant changes.
 - `migrator`: Alembic only.
+- `audit_writer`: used by the Cognito trigger Lambdas. `INSERT` on `audit_log` only
+  (section 7a).
+- `tss`: used by the Tenant Storage Service. The only role that can read `tenant_storage`.
+- `platform_view_owner`: cannot sign in. Owns the views that `platform_reader` reads
+  (`platform_ingestion_v` and any later admin views, in schema `platform`) and can read
+  only the columns those views need, so `platform_reader` needs no access to tenant tables.
+  Admin routes that need more than `tenants`, `audit_log` and `platform_ingestion_v` get
+  a narrow view of this kind (counts, admin names); never a direct table grant.
+
+No database role has `BYPASSRLS`. Login roles sign in with IAM database authentication;
+only the RDS master user has a password, which RDS manages in Secrets Manager.
 
 ## 7a. Audit trail
 

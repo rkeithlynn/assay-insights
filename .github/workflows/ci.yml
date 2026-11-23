@@ -17,6 +17,24 @@ jobs:
   python:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Throwaway PostgreSQL for the role, RLS and migration tests (tests/unit/test_db_security.py).
+    # Same major version as Aurora (dbEngineVersion); pinned by digest.
+    services:
+      postgres:
+        image: postgres:17@sha256:223efeb196329b55b3b9a13db144956411dbc18e727e59f681c3e0aede6475cf # 17.12
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ASSAY_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/postgres
+      # Fail, rather than skip, if the database tests cannot run.
+      ASSAY_REQUIRE_DB_TESTS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,4 +68,4 @@ jobs:
           uv run pip-audit --strict --disable-pip --require-hashes -r "$RUNNER_TEMP/requirements.txt"
 
       - name: Bandit
-        run: uv run bandit -c pyproject.toml -r infra
+        run: uv run bandit -c pyproject.toml -r infra db scripts

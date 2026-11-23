@@ -10,3 +10,13 @@ config:
   assay-platform:hostedZone: dev.assayinsights.ai
   assay-platform:tenantHost: dev.assayinsights.ai
   assay-platform:adminHost: admin.dev.assayinsights.ai
+  assay-platform:vpcCidr: 10.40.0.0/16
+  # Zone IDs, not names. Workloads and the interface endpoints run in workloadAzId, which
+  # must offer every endpoint service (cognito-idp is only in use1-az2, use1-az4, use1-az6).
+  assay-platform:workloadAzId: use1-az2
+  assay-platform:secondAzId: use1-az4
+  assay-platform:dbEngineVersion: "17.11"
+  assay-platform:dbName: assay
+  assay-platform:dbMinAcu: "0"
+  assay-platform:dbMaxAcu: "4"
+  assay-platform:dbAutoPauseSeconds: "300"

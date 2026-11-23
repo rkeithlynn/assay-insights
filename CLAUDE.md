@@ -26,7 +26,7 @@ change. Where this file and the spec differ, the spec wins.
 | Step | Status |
 | --- | --- |
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
-| 2. Network, database, migrations, database roles and RLS | Next. Not started |
+| 2. Network, database, migrations, database roles and RLS | **Built, awaiting `pulumi up`** (2026-11-23). Then `uv run scripts/migrate.py` and verification |
 | 3–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -121,6 +121,7 @@ Related rules elsewhere in the spec that protect isolation:
 
 ```
 infra/      Pulumi program (Python). Components live in infra/assay_infra/
+db/         Database package assay_db: models, Alembic migrations, roles, migration Lambda
 api/        FastAPI app (ECS Fargate)
 workers/    Pipeline code: Lambda handlers and the Fargate worker
 tss/        Tenant Storage Service (Lambda) and its client package
@@ -151,6 +152,10 @@ assets/     Logo and favicon SVGs
     only days old. setup-uv is on v10.3.3 rather than v10.4.0 for this reason.
 - Run the checks locally with `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy` and `uv run pytest`.
+- The database tests (`tests/unit/test_db_security.py`) need a throwaway PostgreSQL 17;
+  without one they skip locally, and CI (`ASSAY_REQUIRE_DB_TESTS=1`) fails instead:
+  `docker run -d --name assay-pg-test -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1:55432:5432 postgres:17`
+  then `$env:ASSAY_TEST_DATABASE_URL = "postgresql://postgres@127.0.0.1:55432/postgres"`.
 - Every AWS resource is tagged `app=assay-insights`, `env=dev` through `aws:defaultTags`
   in stack config.
 
@@ -178,3 +183,39 @@ assets/     Logo and favicon SVGs
   The fix is to replace the certificate:
   `pulumi up --cwd infra --stack pilartech/dev --replace '<certificate URN>'`.
   Use single quotes, because the URN contains `$aws`.
+
+### Step 2 (network, database, migrations, roles, RLS)
+
+- **VPC flow logs** go to this account's CloudWatch Logs (30 days) for now. Move them to
+  the Log Archive account before production.
+- **The default VPC** (`172.31.0.0/16`) exists in the account despite section 2. The owner
+  decided on 2026-11-23 to leave it alone. Pulumi does not manage it.
+- **Workload zone.** Workloads and interface endpoints run in `workloadAzId` (`use1-az2`).
+  The `cognito-idp` endpoint service is offered only in `use1-az2`, `use1-az4` and
+  `use1-az6`; S3 Vectors is not offered in `use1-az3`. Check both before changing it.
+- **Migrations run only in the migration Lambda**, started by `uv run scripts/migrate.py`
+  after `pulumi up` (and monthly by EventBridge Scheduler for `audit_log` partitions).
+  Never run them from `pulumi up`. The Lambda bootstraps the roles as the RDS master user,
+  then runs Alembic as `migrator`.
+- **Database sign-in.** Every login role uses IAM database authentication (`rds_iam`); only
+  the master user has a password (RDS-managed, in Secrets Manager). Grant a service
+  `rds-db:connect` for exactly the database user it needs.
+- **`platform_reader` never gets direct table access** beyond `tenants` and `audit_log`.
+  Admin routes that need more (tenant admin names, user and document counts, models) get a
+  narrow view in schema `platform`, owned by `platform_view_owner`, which is granted only
+  the columns the view needs.
+- **New tables** need, in their own migration: `ENABLE` and `FORCE ROW LEVEL SECURITY`,
+  policies and grants for each role that uses them. Migrations keep their SQL inline rather
+  than importing it, so history doesn't change. `test_db_security.py` checks that every
+  table except `ai_models` has `tenant_id` and forced RLS, and checks the exact privilege
+  matrix, so update `EXPECTED_PRIVILEGES` there in the same change.
+- `platform_writer` cannot read `tenant_storage`, so provisioning retries use
+  `INSERT ... ON CONFLICT DO NOTHING` with no conflict target (a target needs `SELECT`).
+- **Lambda container images** are built by `scripts/build_image.py` (run by a Pulumi
+  `command.local.Command`) with `--provenance=false --sbom=false`. Docker Engine 29 adds
+  provenance attestations by default, which pushes an OCI image index that Lambda
+  rejects. The `pulumi-docker-build` provider cannot turn attestations off, so don't use it
+  for Lambda images. Base images in Dockerfiles are pinned by digest.
+- **Aurora engine version** is in `ignore_changes`, because minor versions upgrade
+  automatically. To upgrade on purpose, change `dbEngineVersion` and lift the ignore for
+  that `pulumi up`.

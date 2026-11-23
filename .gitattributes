@@ -22,3 +22,5 @@ uv.lock         text eol=lf
 *.tif  binary
 *.tiff binary
 *.pdf  binary
+*.mako        text eol=lf
+*.ini         text eol=lf
