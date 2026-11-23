@@ -8,7 +8,8 @@ BUILD_SPEC.md section 4, item 4.
   immutable `custom:tenant_id` that no app client can write. A pre-token-generation trigger
   copies it into the access token, with whether the user has TOTP (`assay_api.claims`).
 - Platform pool: groups master-admin and master-user; TOTP MFA required.
-- Managed login (version 2) on a Cognito prefix domain, branded with the logo; public app
+- Managed login (version 2) on a Cognito prefix domain, branded with the logo
+  (`assay_infra.branding`, which checks every asset against Cognito's limits); public app
   clients with no secret, authorization code flow with PKCE, access token 60 minutes,
   refresh token 8 hours.
 - Email goes through Cognito's built-in sender. That choice lives in `email_configuration()`
@@ -28,9 +29,7 @@ key rotation needs a redeploy. The trigger runs outside the VPC.
 
 from __future__ import annotations
 
-import base64
 import json
-import re
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -40,6 +39,7 @@ from typing import Any
 import pulumi
 import pulumi_aws as aws
 
+from assay_infra.branding import branding_assets, branding_settings
 from assay_infra.config import AuthConfig, DnsConfig
 from assay_infra.images import ContainerImage
 
@@ -72,47 +72,6 @@ TRIGGER_SOURCES = (
 TRIGGER_TIMEOUT_SECONDS = 5
 LOG_RETENTION_DAYS = 30
 
-LOGO = "assets/assay-insights-logo.svg"
-MARK = "assets/assay-insights-mark.svg"
-
-# Brand colours as managed login wants them: RRGGBBAA, lower case. Gold on white fails WCAG
-# AA contrast for text and focus rings, so links are navy and focus rings the darker gold.
-NAVY = "14213dff"
-NAVY_PRESSED = "0b1426ff"
-GOLD_TEXT = "b07d12ff"
-WHITE = "ffffffff"
-
-# Managed login rejects SVG attributes outside its documented allow-list (role and
-# aria-label among them). Only the attributes our two SVGs use are listed here; any other
-# attribute is dropped before upload.
-SVG_ATTRIBUTES = frozenset(
-    {
-        "xmlns",
-        "viewbox",
-        "x",
-        "y",
-        "width",
-        "height",
-        "rx",
-        "cx",
-        "cy",
-        "r",
-        "d",
-        "dx",
-        "fill",
-        "opacity",
-        "stroke",
-        "stroke-width",
-        "stroke-linecap",
-        "font-family",
-        "font-size",
-        "font-weight",
-        "letter-spacing",
-    }
-)
-_ATTRIBUTE = re.compile(r'\s([A-Za-z][A-Za-z0-9:-]*)="[^"]*"')
-
-
 # --- Pure helpers (unit tested) ---------------------------------------------------------
 
 
@@ -125,70 +84,6 @@ def email_configuration() -> aws.cognito.UserPoolEmailConfigurationArgs:
     `{####}` for SMS, and `{username}` and `{####}` in the email message.
     """
     return aws.cognito.UserPoolEmailConfigurationArgs(email_sending_account="COGNITO_DEFAULT")
-
-
-def brandable_svg(svg: str) -> str:
-    """The SVG with every attribute that managed login does not allow removed."""
-
-    def keep(match: re.Match[str]) -> str:
-        return match.group(0) if match.group(1).lower() in SVG_ATTRIBUTES else ""
-
-    return _ATTRIBUTE.sub(keep, svg)
-
-
-def svg_asset(path: Path, category: str) -> aws.cognito.ManagedLoginBrandingAssetArgs:
-    svg = brandable_svg(path.read_text(encoding="utf-8"))
-    return aws.cognito.ManagedLoginBrandingAssetArgs(
-        category=category,
-        color_mode="LIGHT",
-        extension="SVG",
-        bytes=base64.b64encode(svg.encode("utf-8")).decode("ascii"),
-    )
-
-
-def branding_settings() -> str:
-    """A partial settings document; Cognito keeps its defaults for everything else."""
-    pressed = {"backgroundColor": NAVY_PRESSED, "textColor": WHITE}
-    return json.dumps(
-        {
-            "categories": {
-                "global": {
-                    "colorSchemeMode": "LIGHT",
-                    "pageHeader": {"enabled": False},
-                    "pageFooter": {"enabled": False},
-                }
-            },
-            "components": {
-                "favicon": {"enabledTypes": ["SVG"]},
-                "form": {
-                    "logo": {
-                        "enabled": True,
-                        "formInclusion": "IN",
-                        "location": "CENTER",
-                        "position": "TOP",
-                    }
-                },
-                "pageText": {"lightMode": {"headingColor": NAVY}},
-                "primaryButton": {
-                    "lightMode": {
-                        "defaults": {"backgroundColor": NAVY, "textColor": WHITE},
-                        "hover": pressed,
-                        "active": pressed,
-                    }
-                },
-            },
-            "componentClasses": {
-                "focusState": {"lightMode": {"borderColor": GOLD_TEXT}},
-                "link": {
-                    "lightMode": {
-                        "defaults": {"textColor": NAVY},
-                        "hover": {"textColor": NAVY_PRESSED},
-                    }
-                },
-            },
-        },
-        sort_keys=True,
-    )
 
 
 def canonical_jwks(document: Mapping[str, Any]) -> str:
@@ -395,10 +290,8 @@ class UserPool(pulumi.ComponentResource):
             user_pool_id=self.pool.id,
             client_id=self.client.id,
             settings=branding_settings(),
-            assets=[
-                svg_asset(repo_root / LOGO, "FORM_LOGO"),
-                svg_asset(repo_root / MARK, "FAVICON_SVG"),
-            ],
+            # Checked against Cognito's limits here, so a bad asset fails the preview.
+            assets=[asset.args() for asset in branding_assets(repo_root)],
             opts=pulumi.ResourceOptions(parent=self, depends_on=[self.domain]),
         )
 

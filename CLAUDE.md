@@ -301,13 +301,23 @@ assets/     Logo and favicon SVGs
   the token; **admin routes run as `platform_reader`** in read-only transactions. Platform
   users are read through `platform.platform_users_v` (migration `0002`), whose owner's RLS
   policy on `users` shows only the platform tenant's users.
-- **Managed login branding.** Prefix domains (`tenantAuthDomainPrefix`,
-  `platformAuthDomainPrefix`), because a custom domain needs an A record on
-  `dev.assayinsights.ai`, which arrives with CloudFront. Managed login rejects SVG
-  attributes outside its allow-list (`role` and `aria-label` among them), so
-  `brandable_svg()` strips them before upload. Gold on white fails WCAG AA, so links are
-  navy and focus rings `#B07D12`. `ManagedLoginBranding` is validated only by Cognito at
-  `pulumi up`, not by `pulumi preview`.
+- **Managed login branding** (`infra/assay_infra/branding.py`). Prefix domains
+  (`tenantAuthDomainPrefix`, `platformAuthDomainPrefix`), because a custom domain needs an
+  A record on `dev.assayinsights.ai`, which arrives with CloudFront. Gold on white fails
+  WCAG AA, so links are navy and focus rings `#B07D12`.
+  - Cognito validates branding only at `pulumi up`, so the program checks every asset when
+    it runs and a bad one fails `pulumi preview` and `tests/unit/test_branding.py`. The
+    checks are the documented limits (file types per category, base64 at most 1,000,000
+    characters, request at most 2 MB, the SVG element and attribute allow-lists, with
+    disallowed attributes such as `role` and `aria-label` stripped before upload), one
+    undocumented limit and a few rules of our own.
+  - The undocumented limit, learned from the second failed `pulumi up` of step 3: logos
+    need a width:height ratio between 1:1 and 4:1, read from the SVG's viewBox. The portal
+    logo (520x120, 4.33:1) fails, so the form logo is `assets/assay-insights-logo-login.svg`:
+    the same artwork with viewBox `0 -10 520 140` and matching width and height (3.71:1,
+    vertically centred). The portal keeps `assay-insights-logo.svg`.
+  - Our own rules: favicons square, width and height (if given) matching the viewBox
+    ratio, and no `href`, `style`, `a`, `image`, `audio`, `video`, `canvas` or `script`.
 - **No custom Cognito message templates while email uses `COGNITO_DEFAULT`.** The first
   `pulumi up` of step 3 failed creating the platform pool: the provider sends all three
   invitation template fields (email message, subject, SMS message) whenever

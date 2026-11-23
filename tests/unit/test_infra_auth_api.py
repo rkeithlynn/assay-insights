@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -12,13 +11,8 @@ import pulumi
 import pytest
 
 from assay_infra.api import ApiService, task_role_policy
-from assay_infra.auth import (
-    SVG_ATTRIBUTES,
-    Auth,
-    brandable_svg,
-    canonical_jwks,
-    jwks_url,
-)
+from assay_infra.auth import Auth, canonical_jwks, jwks_url
+from assay_infra.branding import Asset, asset_problems
 from assay_infra.config import AuthConfig, build_dns, validate_auth
 from assay_infra.database import Database
 from assay_infra.network import Network
@@ -195,8 +189,17 @@ def test_managed_login_domains_and_branding() -> Any:
             assert categories == ["FAVICON_SVG", "FORM_LOGO"]
             for asset in branding["assets"]:
                 assert (asset["extension"], asset["colorMode"]) == ("SVG", "LIGHT")
-                svg = base64.b64decode(asset["bytes"]).decode()
-                assert _attributes(svg) <= SVG_ATTRIBUTES
+                # What is actually uploaded passes every check in assay_infra.branding.
+                uploaded = Asset(
+                    path="uploaded",
+                    category=asset["category"],
+                    extension=asset["extension"],
+                    color_mode=asset["colorMode"],
+                    content=base64.b64decode(asset["bytes"]),
+                )
+                assert asset_problems(uploaded) == []
+            logo = next(a for a in branding["assets"] if a["category"] == "FORM_LOGO")
+            assert 'viewBox="0 -10 520 140"' in base64.b64decode(logo["bytes"]).decode()
 
     return _after_everything(auth, api).apply(check)
 
@@ -363,21 +366,6 @@ def _assert_no_custom_templates(pool: dict[str, Any]) -> None:
         assert name not in pool, name
     # Without an SMS configuration no SMS can be sent, so no SMS text is needed either.
     assert "smsConfiguration" not in pool
-
-
-def _attributes(svg: str) -> set[str]:
-    return {name.lower() for name in re.findall(r'\s([A-Za-z][A-Za-z0-9:-]*)="', svg)}
-
-
-@pytest.mark.parametrize(
-    "asset", ["assets/assay-insights-logo.svg", "assets/assay-insights-mark.svg"]
-)
-def test_brandable_svg_drops_only_disallowed_attributes(asset: str) -> None:
-    original = (REPO_ROOT / asset).read_text(encoding="utf-8")
-    cleaned = brandable_svg(original)
-    assert _attributes(original) - _attributes(cleaned) == {"role", "aria-label"}
-    assert _attributes(cleaned) <= SVG_ATTRIBUTES
-    assert "<text" in cleaned or "mark" in asset  # the logo keeps its words
 
 
 def test_canonical_jwks_keeps_only_public_signing_keys() -> None:
