@@ -223,6 +223,13 @@ assets/     Logo and favicon SVGs
   `PATH` for those subprocesses, because without a `credsStore` the CLI otherwise falls
   back to `wincred`. It checks the token stayed in the file, then deletes the directory.
   The user's Docker config and credential store are never touched.
+- **Files in Lambda images must be readable by a non-root user**: Lambda runs code as uid
+  993, not root. `ADD <url>` always creates files with mode 0600. `COPY --chmod` applies its
+  mode to any parent directory it creates too, so create the directory first
+  (`RUN install -d -m 0755 ...`). `tests/unit/test_migrate_image.py` builds the image and
+  checks the RDS CA bundle as uid 993: genuine (pinned checksum), 0444 in a 0755 directory,
+  read by libpq, and `verify-full` still enforced. It needs Docker and skips without it,
+  except in CI (`ASSAY_REQUIRE_IMAGE_TESTS=1`).
 - **Aurora engine version** is in `ignore_changes`, because minor versions upgrade
   automatically. To upgrade on purpose, change `dbEngineVersion` and lift the ignore for
   that `pulumi up`.

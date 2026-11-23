@@ -33,8 +33,10 @@ jobs:
           --health-retries 10
     env:
       ASSAY_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/postgres
-      # Fail, rather than skip, if the database tests cannot run.
+      # Fail, rather than skip, if the database or image tests cannot run.
       ASSAY_REQUIRE_DB_TESTS: "1"
+      # tests/unit/test_migrate_image.py builds db/Dockerfile and runs it as a non-root user.
+      ASSAY_REQUIRE_IMAGE_TESTS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
