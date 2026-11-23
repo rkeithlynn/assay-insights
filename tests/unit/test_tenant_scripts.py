@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -98,3 +99,64 @@ def test_isolation_report_passes_only_when_the_runner_says_ok(
     assert "expected access denied" in printed
     assert "1 passed, 1 failed, 0 skipped" in printed
     assert run_isolation.report({"ok": True, "passed": 2, "tests": []}) is True
+
+
+# --- The provisioning role's probe, as run_isolation.py starts and reads it ------------------
+
+
+def probe_line(check: str, *, ok: bool, outcome: str = "denied") -> str:
+    return json.dumps(
+        {
+            "time": "2026-11-23T23:00:00+00:00",
+            "level": "INFO",
+            "message": "probe",
+            "check": check,
+            "tenant_id": str(TENANT),
+            "expected": "denied",
+            "outcome": outcome,
+            "ok": ok,
+        }
+    )
+
+
+def test_probe_task_is_started_with_the_probe_command_and_both_tenants() -> None:
+    other = uuid.uuid4()
+    overrides = run_isolation.probe_overrides((TENANT, other))
+    [container] = overrides["containerOverrides"]
+    assert container["name"] == "provision"
+    assert container["environment"] == [
+        {"name": "PROVISION_COMMAND", "value": "probe"},
+        {"name": "PROBE_TENANTS", "value": f"{TENANT},{other}"},
+    ]
+
+
+def test_probe_results_are_read_from_the_tasks_log_lines() -> None:
+    messages = [
+        "not json",
+        json.dumps({"message": "probe finished", "checks": 2, "failed": 0}),
+        probe_line("read an object", ok=True),
+        probe_line("list vectors", ok=False, outcome="allowed"),
+    ]
+    checks = run_isolation.probe_checks(messages)
+    assert [c["check"] for c in checks] == ["read an object", "list vectors"]
+
+
+def test_probe_report_passes_only_with_results_all_ok_and_exit_code_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    good = run_isolation.probe_checks([probe_line("read an object", ok=True)])
+    bad = run_isolation.probe_checks(
+        [
+            probe_line("read an object", ok=True),
+            probe_line("list vectors", ok=False, outcome="allowed"),
+        ]
+    )
+    assert run_isolation.report_probe(good, 0) is True
+    assert run_isolation.report_probe(bad, 1) is False
+    printed = capsys.readouterr().out
+    assert "FAIL  provisioning role, tenant aaaaaaaa: list vectors" in printed
+    assert "(expected denied, was allowed)" in printed
+    # No results is never a pass, and neither is a task that failed for another reason.
+    assert run_isolation.report_probe([], 0) is False
+    assert run_isolation.report_probe(good, 1) is False
+    assert run_isolation.report_probe(good, None) is False

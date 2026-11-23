@@ -137,6 +137,9 @@ SCAN_BUCKET_ACTIONS = (
     "s3:PutBucketNotification",
 )
 
+# What the provisioning role needs of a tenant key to create its vector bucket and index.
+# Granted only for calls S3 Vectors makes on the role's behalf (kms:ViaService).
+PROVISIONING_KEY_USE = ("kms:GenerateDataKey", "kms:Decrypt")
 # Key administration by the provisioning role. No cryptographic operation is in this list.
 KEY_ADMIN_ACTIONS = (
     "kms:DescribeKey",
@@ -543,12 +546,16 @@ def tenant_key_policy(
                 "Resource": "*",
             },
             {
-                # S3 Vectors requires GenerateDataKey of whoever creates a vector bucket with
-                # this key. It is no use for reading data: the role never gets Decrypt.
-                "Sid": "ProvisioningCreatesTheVectorBucket",
+                # S3 Vectors requires both of whoever creates a vector bucket (GenerateDataKey)
+                # and a vector index (Decrypt) with this key, and uses the key on the
+                # caller's behalf. The condition limits them to exactly that: the role cannot
+                # call KMS itself, and cannot use the key through S3, where the documents
+                # are. It still cannot read a vector: its own policy has no vector data
+                # action and the vector bucket's policy denies it every one.
+                "Sid": "ProvisioningCreatesVectorBucketAndIndex",
                 "Effect": "Allow",
                 "Principal": {"AWS": p.provisioning_role_arn},
-                "Action": "kms:GenerateDataKey",
+                "Action": list(PROVISIONING_KEY_USE),
                 "Resource": "*",
                 "Condition": {"StringEquals": {"kms:ViaService": vectors}},
             },

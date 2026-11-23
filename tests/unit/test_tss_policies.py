@@ -324,13 +324,19 @@ def test_provisioning_role_administers_but_never_decrypts() -> None:
         if s["Principal"] == {"AWS": PRINCIPALS.provisioning_role_arn}
     ]
     granted = set().union(*(actions(s) for s in provisioning))
-    assert "kms:Decrypt" not in granted and "kms:Encrypt" not in granted
-    # The one cryptographic action, and only when S3 Vectors asks on its behalf.
-    vector_bucket = by_sid(policy, "ProvisioningCreatesTheVectorBucket")
-    assert vector_bucket["Action"] == "kms:GenerateDataKey"
-    assert vector_bucket["Condition"] == {
+    assert not granted & {"kms:Encrypt", "kms:ReEncrypt*", "kms:CreateGrant", "kms:*"}
+    # Regression (2026-11-23): S3 Vectors needs GenerateDataKey of whoever creates a vector
+    # bucket and Decrypt of whoever creates a vector index. Both are granted only for calls
+    # S3 Vectors makes on the role's behalf: never directly, and never through S3.
+    use = by_sid(policy, "ProvisioningCreatesVectorBucketAndIndex")
+    assert actions(use) == {"kms:GenerateDataKey", "kms:Decrypt"}
+    assert use["Condition"] == {
         "StringEquals": {"kms:ViaService": f"s3vectors.{REGION}.amazonaws.com"}
     }
+    unconditional = [
+        s["Sid"] for s in provisioning if actions(s) & CRYPTO and s["Sid"] != use["Sid"]
+    ]
+    assert unconditional == []
 
 
 def test_tenant_role_uses_the_key_only_for_its_own_tenant_and_only_through_storage() -> None:

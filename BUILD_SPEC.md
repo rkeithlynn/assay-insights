@@ -250,8 +250,23 @@ collection (`assay-dev-t-{8 hex}`), then writes the
 `tenant_storage` row, sets status `active` and invites the first admin. On failure it
 records the failed step, sets status `failed` and allows retry.
 
+The provisioning task's role manages the settings, tags and policies of tenant resources
+and never tenant data. It has one accepted, deliberate exception (owner, 2026-11-23): on a
+tenant's KMS key it may use `kms:Decrypt` and `kms:GenerateDataKey`, but only for calls
+that S3 Vectors makes on its behalf. S3 Vectors requires both of whoever creates a vector
+bucket and index encrypted with that key. The role cannot reach tenant data with them, for
+three reasons:
+
+1. The permission applies only through S3 Vectors. The role cannot call KMS itself, and
+   cannot use the key through S3, where the documents are.
+2. The role's policy allows no action that reads or writes vectors, and each tenant's
+   vector bucket policy denies it every one.
+3. The role's policy and each tenant's bucket policy deny it every action on an object.
+
 `tests/isolation` assumes tenant A's role and tries to read tenant B's bucket, key,
-vector index and rows. Every attempt must fail. It runs against the real account.
+vector index and rows. Every attempt must fail. It also tries, as the provisioning role,
+to read and write a tenant's objects and vectors and to use its key directly; those must
+fail too. It runs against the real account.
 
 ## 7. Data model
 

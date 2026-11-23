@@ -48,7 +48,7 @@ s3.get_object(Bucket=ctx.bucket, Key=ctx.text_key(document_id))
 | --- | --- | --- | --- |
 | Tenant role, tagged for this tenant | Read and write objects | Read and write vectors | Decrypt and generate data keys, only through S3 and S3 Vectors |
 | Tenant role, tagged for another tenant | Nothing | Nothing | Nothing |
-| Provisioning role | Settings, tags and the policy. No object data. It can list key names, because the AWS provider's `HeadBucket` needs `s3:ListBucket`; keys hold IDs only | The bucket, its index, tags and policy. No vectors | Administer, tag and set the policy. No decrypt. `GenerateDataKey` only through S3 Vectors, which requires it to create the vector bucket |
+| Provisioning role | Settings, tags and the policy. No object data. It can list key names, because the AWS provider's `HeadBucket` needs `s3:ListBucket`; keys hold IDs only | The bucket, its index, tags and policy. No vectors | Administer, tag and set the policy. `GenerateDataKey` and `Decrypt` only through S3 Vectors, which requires them to create the vector bucket and index; never directly or through S3. `tenant_id` is write-once |
 | GuardDuty scan role | Read and tag objects; write its one test object | Nothing | Decrypt and generate data keys through S3 |
 | Break-glass role | Read objects; repair the bucket policy | Nothing (vectors can be rebuilt) | Decrypt; repair the key policy |
 | Anyone else, including account administrators | Nothing | Nothing | Metadata only (description, policy, rotation, tags) |

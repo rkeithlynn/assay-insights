@@ -262,6 +262,48 @@ def test_task_refuses_to_start_without_a_request(provision_image: str) -> None:
     assert "PROVISION_REQUEST" in result.stderr
 
 
+# What the platform stack puts in the task's environment (assay_infra.provisioning).
+TASK_ENVIRONMENT = {
+    "AWS_REGION": "us-east-1",
+    "ACCOUNT_ID": "000000000000",
+    "NAME_PREFIX": "assay-dev",
+    "TENANT_ROLE_ARN": "arn:aws:iam::000000000000:role/assay-dev-tenant",
+    "BREAK_GLASS_ROLE_ARN": "arn:aws:iam::000000000000:role/assay-dev-break-glass",
+    "PROVISIONING_ROLE_ARN": "arn:aws:iam::000000000000:role/provisioning",
+    "SCAN_ROLE_ARN": "arn:aws:iam::000000000000:role/scan",
+    "STATE_BUCKET": "state",
+    "STATE_KEY_ARN": "arn:aws:kms:us-east-1:000000000000:key/state",
+    "INVITE_FUNCTION": "invite",
+    "VECTOR_DIMENSIONS": "1024",
+    "DEFAULT_TAGS": '{"app":"assay-insights"}',
+}
+
+
+@requires_docker
+def test_task_probe_command_never_passes_when_it_cannot_reach_aws(provision_image: str) -> None:
+    """The isolation probe runs in this image. With no network every call fails, and a
+    failed call is not a refusal: the probe must report errors and exit non-zero."""
+    args = ["run", "--rm", "--platform", "linux/amd64", "--read-only", "--network", "none"]
+    args += ["--user", TASK_USER, "--tmpfs", "/work:rw,uid=10001,gid=10001,mode=0700"]
+    environment = TASK_ENVIRONMENT | {
+        "PROVISION_COMMAND": "probe",
+        "PROBE_TENANTS": "7f3a91c2-0000-4000-8000-000000000001",
+        "AWS_ACCESS_KEY_ID": "AKIAFAKEFAKEFAKEFAKE",
+        "AWS_SECRET_ACCESS_KEY": "fake",
+    }
+    for key, value in environment.items():
+        args += ["-e", f"{key}={value}"]
+    result = docker(*args, provision_image, check=False, timeout=600)
+    assert result.returncode == 1, result.stderr
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    checks = [line for line in lines if line.get("message") == "probe"]
+    assert len(checks) == 13
+    assert all(not check["ok"] for check in checks)
+    assert all(check["outcome"].startswith("error:") for check in checks)
+    [summary] = [line for line in lines if line.get("message") == "probe finished"]
+    assert (summary["checks"], summary["failed"]) == (13, 13)
+
+
 # --- The TSS Lambda ---------------------------------------------------------------------------
 
 

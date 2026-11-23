@@ -208,7 +208,9 @@ def tenant_program(settings: ProvisionSettings, tenant_id: uuid.UUID) -> Callabl
                 non_filterable_metadata_keys=list(NON_FILTERABLE_METADATA_KEYS)
             ),
             tags=tags,
-            opts=kept,
+            # S3 Vectors decrypts with the tenant key, on this role's behalf, to create the
+            # index, so the key and its policy must be in place first.
+            opts=pulumi.ResourceOptions(provider=provider, protect=True, depends_on=[key]),
         )
 
         collection = aws.rekognition.Collection(

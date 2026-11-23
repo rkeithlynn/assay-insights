@@ -168,3 +168,8 @@ pulumi.export("provisioning_state_machine_arn", provisioning.state_machine.arn)
 pulumi.export("provisioning_role_arn", provisioning.task_role.arn)
 pulumi.export("tenant_state_bucket", provisioning.state_bucket.bucket)
 pulumi.export("cognito_admin_function_name", provisioning.invite_function.name)
+# Read by scripts/run_isolation.py, which runs the provisioning task's probe command.
+pulumi.export("provisioning_cluster_name", provisioning.cluster.name)
+pulumi.export("provisioning_task_definition_arn", provisioning.task_definition.arn)
+pulumi.export("provisioning_log_group", provisioning.log_group.name)
+pulumi.export("workload_security_group_id", network.workload_security_group.id)

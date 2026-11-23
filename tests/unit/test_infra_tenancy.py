@@ -332,9 +332,108 @@ def test_provisioning_role_cannot_decrypt_with_a_tenant_key() -> None:
     assert users == ["StateKey"]
     assert by_sid(policy, "StateKey")["Resource"].endswith("key/state")
     deny = by_sid(policy, "NeverDecryptWithATenantKey")
-    assert deny["Effect"] == "Deny"
-    assert "kms:Decrypt" in deny["Action"]
-    assert deny["Condition"] == {"Null": {"aws:ResourceTag/tenant_id": "false"}}
+    assert (deny["Effect"], deny["Action"], deny["Resource"]) == ("Deny", "kms:Decrypt", ANY_KEY)
+    # The one exception: S3 Vectors decrypting on the role's behalf (creating an index).
+    assert deny["Condition"] == {
+        "Null": {"aws:ResourceTag/tenant_id": "false"},
+        "StringNotEquals": {"kms:ViaService": f"s3vectors.{REGION}.amazonaws.com"},
+    }
+    other = by_sid(policy, "NeverReEncryptOrGrantWithATenantKey")
+    assert other["Effect"] == "Deny"
+    assert set(other["Action"]) == {"kms:ReEncrypt*", "kms:CreateGrant"}
+    assert other["Condition"] == {"Null": {"aws:ResourceTag/tenant_id": "false"}}
+
+
+S3_VECTORS = f"s3vectors.{REGION}.amazonaws.com"
+S3 = f"s3.{REGION}.amazonaws.com"
+ON_TENANT_KEY = {"aws:ResourceTag/tenant_id": "aaaaaaaa-0000-4000-8000-000000000001"}
+A_TENANT_KEY = f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/11111111-1111-4111-8111-111111111111"
+A_TENANT_INDEX = (
+    f"arn:aws:s3vectors:{REGION}:{ACCOUNT_ID}:bucket/assay-dev-t-aaaaaaaa-vectors/index/documents"
+)
+
+
+@pytest.mark.parametrize(
+    ("what", "action", "context", "expected"),
+    [
+        ("decrypt directly", "kms:Decrypt", ON_TENANT_KEY, "explicitDeny"),
+        (
+            "decrypt through S3",
+            "kms:Decrypt",
+            {**ON_TENANT_KEY, "kms:ViaService": S3},
+            "explicitDeny",
+        ),
+        # IAM says nothing; the tenant key's own policy allows it for S3 Vectors only.
+        (
+            "decrypt through S3 Vectors",
+            "kms:Decrypt",
+            {**ON_TENANT_KEY, "kms:ViaService": S3_VECTORS},
+            "implicitDeny",
+        ),
+        (
+            "re-encrypt through S3 Vectors",
+            "kms:ReEncryptFrom",
+            {**ON_TENANT_KEY, "kms:ViaService": S3_VECTORS},
+            "explicitDeny",
+        ),
+        (
+            "create a grant",
+            "kms:CreateGrant",
+            {**ON_TENANT_KEY, "kms:ViaService": S3_VECTORS},
+            "explicitDeny",
+        ),
+    ],
+)
+def test_tenant_key_use_by_the_provisioning_role(
+    what: str, action: str, context: dict[str, Any], expected: str
+) -> None:
+    assert decide(provisioning_policy(), action, A_TENANT_KEY, context) == expected, what
+
+
+def test_provisioning_role_can_create_a_vector_index_but_read_no_vector() -> None:
+    """Regression: the second provisioning run failed creating the index (2026-11-23).
+
+    S3 Vectors decrypts with the tenant key, on the caller's behalf, to create an index. The
+    role is allowed exactly that, and still has no way to read what the key protects: no
+    vector data action in its own policy, every one denied by the vector bucket's policy,
+    and no object access at all.
+    """
+    tenant_id = "aaaaaaaa-0000-4000-8000-000000000001"
+    principals = policies.Principals(
+        tenant_role_arn=f"{ROLE}/tenant",
+        break_glass_role_arn=f"{ROLE}/break-glass",
+        provisioning_role_arn=f"{ROLE}/provisioning",
+        scan_role_arn=f"{ROLE}/scan",
+    )
+    key_policy = policies.tenant_key_policy(
+        region=REGION,
+        account_id=ACCOUNT_ID,
+        tenant_id=tenant_id,
+        vector_bucket="assay-dev-t-aaaaaaaa-vectors",
+        principals=principals,
+    )
+    use = by_sid(key_policy, "ProvisioningCreatesVectorBucketAndIndex")
+    assert "kms:Decrypt" in use["Action"]
+    assert use["Condition"] == {"StringEquals": {"kms:ViaService": S3_VECTORS}}
+
+    role_policy = provisioning_policy()
+    through_vectors = {**ON_TENANT_KEY, "kms:ViaService": S3_VECTORS}
+    assert decide(role_policy, "kms:Decrypt", A_TENANT_KEY, through_vectors) != "explicitDeny"
+    assert decide(role_policy, "s3vectors:CreateIndex", A_TENANT_INDEX, {}) == "allowed"
+
+    for action in policies.VECTOR_DATA_ACTIONS:
+        assert decide(role_policy, action, A_TENANT_INDEX, {}) == "implicitDeny", action
+    vector_bucket_policy = policies.tenant_vector_bucket_policy(
+        region=REGION,
+        account_id=ACCOUNT_ID,
+        vector_bucket="assay-dev-t-aaaaaaaa-vectors",
+        tenant_id=tenant_id,
+        principals=principals,
+    )
+    denied = by_sid(vector_bucket_policy, "ProvisioningRoleNeverTouchesVectors")
+    assert set(denied["Action"]) == set(policies.VECTOR_DATA_ACTIONS)
+    tenant_object = "arn:aws:s3:::assay-dev-t-aaaaaaaa/originals/x.pdf"
+    assert decide(role_policy, "s3:GetObject", tenant_object, {}) == "explicitDeny"
 
 
 def test_provisioning_role_creates_only_keys_tagged_for_a_tenant() -> None:
@@ -1058,6 +1157,15 @@ def test_provisioning_task_and_state_machine() -> Any:
         alarm = _one("aws:cloudwatch/metricAlarm:MetricAlarm", "p2-provision-failed-alarm")
         metrics = {q["metric"]["metricName"] for q in alarm["metricQueries"] if q.get("metric")}
         assert metrics == {"ExecutionsFailed", "ExecutionsTimedOut", "ExecutionsAborted"}
+        # Each metric is filled with zero: one metric with no data point in a period must
+        # not leave the sum without a value, which the alarm would read as "not breaching".
+        [expression] = [q["expression"] for q in alarm["metricQueries"] if q.get("expression")]
+        assert expression == "FILL(failed, 0) + FILL(timed_out, 0) + FILL(aborted, 0)"
+        assert {q["id"] for q in alarm["metricQueries"] if q.get("metric")} == {
+            "failed",
+            "timed_out",
+            "aborted",
+        }
         assert alarm["alarmActions"] == [stack.topic_arn()]
 
     return stack.ready().apply(check)

@@ -7,6 +7,10 @@ The state machine passes everything in the environment:
 - `PROVISION_REQUEST`: the execution's request, as JSON;
 - `PROVISION_ERROR`: for `fail`, the error name Step Functions reported.
 
+A third command, `probe`, is not part of provisioning: `scripts/run_isolation.py` runs the
+task with it to show what this role cannot do with tenant data (`PROBE_TENANTS`, a
+comma-separated list of tenant IDs; see `probe.py`).
+
 Exits 0 on success and 1 on failure, so the execution's status shows the result.
 """
 
@@ -20,13 +24,14 @@ import sys
 
 from assay_db.connect import DbTarget, iam_engine
 from assay_tss.provision.invite import LambdaInviter
+from assay_tss.provision.probe import Probe, parse_tenants
 from assay_tss.provision.settings import ProvisionSettings
 from assay_tss.provision.stack import StackRunner, prepare_pulumi_home
 from assay_tss.provision.task import Provisioner, ProvisioningFailed, ProvisionRequest
 
 APPLICATION_NAME = "assay-provision"
 DB_USER = "platform_writer"  # assay_db.roles.PLATFORM_WRITER
-COMMANDS = ("provision", "fail")
+COMMANDS = ("provision", "fail", "probe")
 _STANDARD = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
 
 
@@ -50,6 +55,16 @@ def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 
 
+def run_probe(log: logging.Logger) -> int:
+    """Try, as this role, what it must not be able to do with tenant data."""
+    settings = ProvisionSettings.from_env()
+    tenants = parse_tenants(os.environ.get("PROBE_TENANTS", ""))
+    results = Probe(settings).run(tenants)
+    failed = [check for check in results if not check.ok]
+    log.info("probe finished", extra={"checks": len(results), "failed": len(failed)})
+    return 1 if failed else 0
+
+
 def main() -> int:
     configure_logging()
     log = logging.getLogger("assay_tss.provision")
@@ -57,6 +72,8 @@ def main() -> int:
     if command not in COMMANDS:
         log.error("unknown command", extra={"command": command})
         return 2
+    if command == "probe":
+        return run_probe(log)
     prepare_pulumi_home(os.environ)
     request = ProvisionRequest.model_validate_json(os.environ["PROVISION_REQUEST"])
     settings = ProvisionSettings.from_env()

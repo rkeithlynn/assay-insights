@@ -9,7 +9,8 @@ What is here:
 
 - **The provisioning role** (the task's role). Scoped to resources named `<prefix>-t-*` and
   the state bucket. It manages settings, tags and policies; it has no object read access
-  and no decrypt on tenant keys, and its own policy denies both.
+  and cannot decrypt with a tenant key except where S3 Vectors does it on its behalf
+  to create a vector index. Its own policy denies both.
 - **The state bucket and key.** Tenant stacks keep their state here, because the task has
   no route to Pulumi Cloud. Versioned, encrypted with its own key, and its objects are
   readable only by the provisioning role.
@@ -62,6 +63,11 @@ LOG_RETENTION_DAYS = 30
 
 GUARDDUTY_PLAN_SERVICE = "malware-protection-plan.guardduty.amazonaws.com"
 GUARDDUTY_RULE = "DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*"
+
+# A math expression has no value for a period in which any of its metrics has no data
+# point, and the alarm then treats the period as not breaching. FILL keeps one metric's
+# silence from hiding another's count.
+FAILURES_EXPRESSION = "FILL(failed, 0) + FILL(timed_out, 0) + FILL(aborted, 0)"
 
 # Bucket settings only: no action here reads, writes or deletes an object. s3:ListBucket is
 # what HeadBucket needs, which the AWS provider calls to read a bucket.
@@ -358,10 +364,23 @@ def provisioning_role_policy(
                     "Resource": [bucket, f"{bucket}/*"],
                 },
                 {
+                    # Decrypt with a tenant key is denied unless S3 Vectors is making the call
+                    # for this role, which creating a vector index requires. A direct call
+                    # has no kms:ViaService, and a call through S3 names S3: both are denied.
                     "Sid": "NeverDecryptWithATenantKey",
                     "Effect": "Deny",
-                    "Action": ["kms:Decrypt", "kms:ReEncrypt*", "kms:CreateGrant"],
-                    "Resource": f"arn:aws:kms:{region}:{account_id}:key/*",
+                    "Action": "kms:Decrypt",
+                    "Resource": any_key,
+                    "Condition": {
+                        "Null": {tenant_tag: "false"},
+                        "StringNotEquals": {"kms:ViaService": f"s3vectors.{region}.amazonaws.com"},
+                    },
+                },
+                {
+                    "Sid": "NeverReEncryptOrGrantWithATenantKey",
+                    "Effect": "Deny",
+                    "Action": ["kms:ReEncrypt*", "kms:CreateGrant"],
+                    "Resource": any_key,
                     "Condition": {"Null": {tenant_tag: "false"}},
                 },
             ],
@@ -1107,7 +1126,7 @@ class Provisioning(pulumi.ComponentResource):
             metric_queries=[
                 aws.cloudwatch.MetricAlarmMetricQueryArgs(
                     id="failures",
-                    expression="failed + timed_out + aborted",
+                    expression=FAILURES_EXPRESSION,
                     label="Unsuccessful executions",
                     return_data=True,
                 ),

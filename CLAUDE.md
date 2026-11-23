@@ -90,10 +90,11 @@ has done all of this, in order, and each has succeeded:
 2. `uv run scripts/add_tenant.py` twice, for the fixture tenants "Isolation Test A" and
    "Isolation Test B". Each must end `SUCCEEDED`, and each admin must get an invitation.
    **In progress:** "Isolation Test A" is tenant `cfd08356-aac4-4dfe-a3f5-32a2f3294c4e`.
-   Its first run failed at `storage` (key tagging; see the step 4 notes), leaving an empty
-   bucket and face collection in its stack. After a `pulumi up` with the fixed role
-   policy, continue it with `uv run scripts/add_tenant.py --retry <that ID>`; do not add
-   it again under a new ID.
+   Its first run failed at `storage` on key tagging and its second on creating the vector
+   index (see the step 4 notes). Its stack now holds everything except the vector index
+   and the malware protection plan; there is no `tenant_storage` row or Cognito user yet.
+   After a `pulumi up` with the fix, continue it with
+   `uv run scripts/add_tenant.py --retry <that ID>`; do not add it again under a new ID.
 3. `uv run scripts/run_isolation.py` with the two tenant IDs: every test passes.
 4. `pulumi preview` shows no changes.
 
@@ -496,6 +497,27 @@ assets/     Logo and favicon SVGs
   - `kms:GenerateDataKey` on tenant keys, **only through S3 Vectors**
     (`kms:ViaService`). S3 Vectors requires it of whoever creates a vector bucket with a
     customer-managed key. Never widen that condition; `test_tss_policies.py` checks it.
+  And a third, an **accepted, deliberate exception** (owner, 2026-11-23, after the second
+  provisioning run failed on it; also in BUILD_SPEC.md section 6):
+  - `kms:Decrypt` on tenant keys, **only through S3 Vectors**. `CreateIndex` on a vector
+    bucket encrypted with a customer-managed key is refused unless the caller has it
+    ("not authorized to perform: kms:Decrypt"). The tenant key's policy grants it under
+    the same `kms:ViaService` condition, and the role's own deny on decrypt exempts that
+    one service. It cannot reach tenant data, for three reasons:
+    1. The permission applies only through S3 Vectors: the role cannot call KMS itself,
+       and cannot use the key through S3, where the documents are.
+    2. Its policy allows no action that reads or writes vectors, and each tenant's vector
+       bucket policy denies it every one.
+    3. Its policy and each tenant's bucket policy deny it every action on an object.
+    The alternatives were worse: an index not encrypted with the tenant key, or letting
+    some other principal with tenant data access create it. Never widen the condition.
+  - **The isolation tests try all of this as the provisioning role.**
+    `scripts/run_isolation.py` runs the provisioning task with `PROVISION_COMMAND=probe`
+    (`assay_tss/provision/probe.py`) for the two test tenants: reading and writing an
+    object, listing object versions, reading, querying and writing vectors, and using the
+    key directly must each be refused, and three settings calls must succeed so that a run
+    where everything fails cannot pass. It runs as a task because nothing else can be the
+    provisioning role; the isolation Lambda is not allowed to assume it.
   For the same `HeadBucket` reason an administrator can list the state bucket's object
   names (tenant IDs), which the owner also accepted.
 - **Each tenant's vector bucket has its own policy** (`tenant_vector_bucket_policy`),
@@ -550,6 +572,18 @@ assets/     Logo and favicon SVGs
   publish to a topic that uses the AWS-managed SNS key. An email subscription delivers
   nothing until the owner follows the confirmation link SNS sends at `pulumi up`; an
   unconfirmed one lapses after 48 hours and must be created again.
+  - **Checking whether an alarm fired and was delivered** (all read-only):
+    `aws cloudwatch describe-alarm-history --alarm-name <name>` shows each state change and
+    "Successfully executed action" for the topic; the `AWS/SNS` metrics
+    `NumberOfNotificationsDelivered` and `NumberOfNotificationsFailed` for the topic show
+    what SNS did with it. On 2026-11-23 the provisioning-failure alarm fired for both
+    failed executions (about a minute after each ended) and SNS reported both delivered,
+    none failed; the owner had not seen the emails, so look at the mail side first.
+  - An alarm notifies on a change of state only. A second failure while the alarm is
+    still in `ALARM` sends nothing; it returns to `OK` about 15 minutes after a failure.
+  - The provisioning-failure alarm sums three metrics, each wrapped in `FILL(..., 0)`: a
+    math expression has no value for a period in which any metric has no data point, and
+    the alarm would read that as not breaching.
 - **Not in step 4:** `POST /admin/tenants` and the retry route (step 5), default models
   for a new tenant (step 5, with the catalog seed), bucket CORS for browser uploads and
   `DetectFaces`/`CompareFaces` in the tenant role (steps 6 and 8), the cross-tenant face
@@ -605,18 +639,21 @@ assets/     Logo and favicon SVGs
   step with the reason in the task's log and in `audit_log`:
   1. GuardDuty accepts the scan role's trust policy with the `aws:SourceAccount` condition
      (AWS's documented trust policy has no condition).
-  2. S3 Vectors needs only `kms:GenerateDataKey` of the provisioning role to create the
-     vector bucket and index (documented for the bucket, not stated for the index).
-  3. `guardduty:CreateMalwareProtectionPlan` needs nothing beyond that action and
+  2. `guardduty:CreateMalwareProtectionPlan` needs nothing beyond that action and
      `iam:PassRole`.
-  4. S3 Vectors accepts the vector bucket policy's `Principal: "*"` and `Condition`
-     elements. If it rejects them, tell the owner before changing the policy: admitting
-     only two roles cannot be written without one of them.
-  5. `kms:CreateKey` passes with `aws:RequestTag/tenant_id` as its only condition. The
-     failed run's error named `kms:TagResource`, not `kms:CreateKey`, which suggests it
-     does, but the key was not created.
-  Settled by the first run: `s3:CreateBucket` passes the S3 gateway endpoint's policy,
-  the Rekognition collection is created, and the task definition's container definition
-  round-trips with no preview difference.
+  3. `CreateIndex` needs nothing of the tenant key beyond `kms:Decrypt` and
+     `kms:GenerateDataKey` through S3 Vectors.
+  Settled by the first two runs (2026-11-23):
+  - `s3:CreateBucket` passes the S3 gateway endpoint's policy; the Rekognition collection
+    is created; the task definition's container definition round-trips with no preview
+    difference.
+  - `kms:CreateKey` passes with `aws:RequestTag/tenant_id` as its condition, the tags sent
+    with it are accepted, and the write-once deny does not block creation.
+  - A tenant key's policy, alias, bucket settings and bucket policy are all accepted, and
+    `kms:GenerateDataKey` through S3 Vectors is enough to create the vector bucket.
+  - S3 Vectors accepts the vector bucket policy's `Principal: "*"` and `Condition`, and
+    enforces it: the account administrator is refused `GetVectorBucket`.
+  - **Wrong:** S3 Vectors needs only `kms:GenerateDataKey` to create the index. It needs
+    `kms:Decrypt` as well (see the provisioning role's bullet above).
   `run_isolation.py` then checks the result: a principal whose IAM policy allows it is
   still refused when it lists a tenant's vectors.
