@@ -13,6 +13,12 @@ BUILD_SPEC.md section 4, item 4.
   refresh token 8 hours.
 - Email goes through Cognito's built-in sender. That choice lives in `email_configuration()`
   only, so a later switch to SES is a change there and in stack config.
+- No custom message templates. Invitations, verification and password-reset codes use
+  Cognito's built-in text. The API reference allows a custom email message and subject
+  only with SES (`DEVELOPER`), and the provider sends all three invitation fields (email
+  message, subject and SMS message) whenever an invitation template is set, so an unset
+  SMS message goes out as "" and Cognito rejects the pool. Add a template with SES, and
+  then give every field a valid value (see `email_configuration()`).
 
 Neither pool can be reached through the cognito-idp interface endpoint: AWS documents that a
 user pool with a domain is incompatible with PrivateLink, and managed login needs a domain.
@@ -111,7 +117,13 @@ _ATTRIBUTE = re.compile(r'\s([A-Za-z][A-Za-z0-9:-]*)="[^"]*"')
 
 
 def email_configuration() -> aws.cognito.UserPoolEmailConfigurationArgs:
-    """The one place that picks how Cognito sends email (section 4: no SES yet)."""
+    """The one place that picks how Cognito sends email (section 4: no SES yet).
+
+    Switching to SES (`DEVELOPER`) is also the point at which custom invitation and
+    verification templates become possible. Every invitation template field, the SMS
+    message included, must then be valid: 6 to 140 characters with `{username}` and
+    `{####}` for SMS, and `{username}` and `{####}` in the email message.
+    """
     return aws.cognito.UserPoolEmailConfigurationArgs(email_sending_account="COGNITO_DEFAULT")
 
 
@@ -176,19 +188,6 @@ def branding_settings() -> str:
             },
         },
         sort_keys=True,
-    )
-
-
-def invitation_template(
-    host: str,
-) -> aws.cognito.UserPoolAdminCreateUserConfigInviteMessageTemplateArgs:
-    return aws.cognito.UserPoolAdminCreateUserConfigInviteMessageTemplateArgs(
-        email_subject="Your Assay Insights invitation",
-        email_message=(
-            "You have been invited to Assay Insights. Sign in at https://"
-            f"{host}/ with your email address {{username}} and the temporary password "
-            "{####} within 7 days, then choose a new password."
-        ),
     )
 
 
@@ -310,9 +309,9 @@ class UserPool(pulumi.ComponentResource):
             user_attribute_update_settings=aws.cognito.UserPoolUserAttributeUpdateSettingsArgs(
                 attributes_require_verification_before_updates=["email"]
             ),
+            # No invite_message_template: see the module docstring.
             admin_create_user_config=aws.cognito.UserPoolAdminCreateUserConfigArgs(
                 allow_admin_create_user_only=True,
-                invite_message_template=invitation_template(spec.host),
             ),
             password_policy=aws.cognito.UserPoolPasswordPolicyArgs(
                 minimum_length=PASSWORD_MIN_LENGTH,

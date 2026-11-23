@@ -98,6 +98,7 @@ def test_tenant_pool() -> Any:
         assert pool["usernameAttributes"] == ["email"]
         assert pool["adminCreateUserConfig"]["allowAdminCreateUserOnly"] is True
         assert pool["passwordPolicy"]["temporaryPasswordValidityDays"] == 7
+        _assert_no_custom_templates(pool)
         assert pool["accountRecoverySetting"] == {
             "recoveryMechanisms": [{"name": "verified_email", "priority": 1}]
         }
@@ -129,6 +130,7 @@ def test_platform_pool_requires_mfa_and_has_no_tenant_attribute() -> Any:
         assert pool["softwareTokenMfaConfiguration"] == {"enabled": True}
         assert pool["adminCreateUserConfig"]["allowAdminCreateUserOnly"] is True
         assert pool["emailConfiguration"] == {"emailSendingAccount": "COGNITO_DEFAULT"}
+        _assert_no_custom_templates(pool)
         assert not pool.get("schemas")
         assert not pool.get("lambdaConfig")
         groups = sorted(
@@ -340,6 +342,27 @@ def test_task_role_policy_sorts_resources() -> None:
 
 
 # --- Helpers ------------------------------------------------------------------------------
+
+# Pool inputs that hold message text. Cognito validates them only at deploy time, and the
+# provider sends every invitation template field, set or not ("" fails: the failed first
+# `pulumi up` of step 3). With Cognito's default sender none of them may be set.
+MESSAGE_INPUTS = (
+    "emailVerificationMessage",
+    "emailVerificationSubject",
+    "smsAuthenticationMessage",
+    "smsVerificationMessage",
+    "verificationMessageTemplate",
+)
+
+
+def _assert_no_custom_templates(pool: dict[str, Any]) -> None:
+    assert pool["emailConfiguration"]["emailSendingAccount"] == "COGNITO_DEFAULT"
+    assert "inviteMessageTemplate" not in pool["adminCreateUserConfig"]
+    assert pool["adminCreateUserConfig"] == {"allowAdminCreateUserOnly": True}
+    for name in MESSAGE_INPUTS:
+        assert name not in pool, name
+    # Without an SMS configuration no SMS can be sent, so no SMS text is needed either.
+    assert "smsConfiguration" not in pool
 
 
 def _attributes(svg: str) -> set[str]:

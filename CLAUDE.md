@@ -308,6 +308,17 @@ assets/     Logo and favicon SVGs
   `brandable_svg()` strips them before upload. Gold on white fails WCAG AA, so links are
   navy and focus rings `#B07D12`. `ManagedLoginBranding` is validated only by Cognito at
   `pulumi up`, not by `pulumi preview`.
+- **No custom Cognito message templates while email uses `COGNITO_DEFAULT`.** The first
+  `pulumi up` of step 3 failed creating the platform pool: the provider sends all three
+  invitation template fields (email message, subject, SMS message) whenever
+  `invite_message_template` is set, so the unset SMS message went out as `""`
+  (minimum 6 characters). The API reference also allows a custom email message and subject
+  only with SES (`DEVELOPER`). So invitations, verification and reset codes use Cognito's
+  built-in text, and the invitation has no portal link. When SES arrives, add the template
+  with every field valid (SMS: 6 to 140 characters with `{username}` and `{####}`).
+  `test_infra_auth_api.py` fails if a template or message setting appears while email
+  uses `COGNITO_DEFAULT`. Cognito validates these only at deploy time; `pulumi preview`
+  does not.
 - **User pools are `protect=True`** with Cognito deletion protection on: replacing a pool
   deletes its users. Custom attributes cannot change after creation.
 - **Section 7a's Cognito audit triggers belong to build step 5** (portal shell, sign-in,
