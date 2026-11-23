@@ -132,5 +132,18 @@ assets/     Logo and favicon SVGs
   `aws.acm.CertificateValidation` waiter when CloudFront first uses the certificate.
 - The hosted zone is `protect=True`. Replacing it would change its name servers and break
   the Squarespace delegation.
-- The parent zone `assayinsights.ai` (at Squarespace) is DNSSEC-signed. The `dev`
-  delegation is deliberately unsigned, so no DS record is added for it.
+- **DNS layout.** The parent zone `assayinsights.ai` is hosted at Squarespace
+  (`nsd1`–`nsd4.squarespacedns.com`) with DNSSEC turned on. Only `dev.assayinsights.ai`
+  is delegated to Route 53, through four NS records at Squarespace. Every other name in
+  the parent stays at Squarespace, and neither this repo nor Pulumi manages it. The
+  `dev` delegation is deliberately unsigned, so never add a DS record for `dev` at
+  Squarespace and never enable DNSSEC signing on the Route 53 zone.
+  - Observed 2026-11-23: Squarespace publishes DNSKEYs for the parent, but `.ai` had no
+    DS record for `assayinsights.ai`, so resolvers treated the zone as unsigned (no AD
+    flag). Earlier that morning it had validated. A DS that doesn't match the DNSKEYs
+    would break resolution of the whole domain, `dev` included.
+- **ACM `CAA_ERROR`.** ACM checks CAA records up the tree to `assayinsights.ai`. If the
+  parent's name servers fail, validation fails with `CAA_ERROR` and ACM does not retry.
+  The fix is to replace the certificate:
+  `pulumi up --cwd infra --stack pilartech/dev --replace '<certificate URN>'`.
+  Use single quotes, because the URN contains `$aws`.
