@@ -118,6 +118,17 @@ assets/     Logo and favicon SVGs
   as workspace members.
 - CI (`.github/workflows/ci.yml`) runs ruff (lint and format), mypy (strict), pytest,
   pip-audit and Bandit. It never deploys.
+- **GitHub Actions pinning (SOC 2).** Pin every action to a full 40-character commit
+  SHA, with the release in a trailing comment:
+  `uses: owner/repo@<sha> # vX.Y.Z`. Never use a tag or branch alone. Before using or
+  bumping a version, verify that it exists, and never guess it from memory. Some
+  actions, astral-sh/setup-uv among them, publish no moving major tag such as `v10`.
+  - `gh api repos/<owner>/<repo>/releases/latest --jq .tag_name` gives the latest release.
+  - `gh api repos/<owner>/<repo>/tags --jq '.[] | .name + " " + .commit.sha'` gives the
+    tag's commit SHA.
+  - `gh api repos/<owner>/<repo>/commits/<sha>` confirms that the commit exists.
+  - Check that every `with:` input the workflow passes is still in the action's
+    `action.yml` at that SHA.
 - Run the checks locally with `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy` and `uv run pytest`.
 - Every AWS resource is tagged `app=assay-insights`, `env=dev` through `aws:defaultTags`
