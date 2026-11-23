@@ -10,6 +10,7 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 
 from assay_tss import handler as tss_handler
 from assay_tss import naming, service
@@ -143,6 +144,35 @@ def test_upload_access_gets_the_narrow_session_policy() -> None:
     policy = json.loads(sts.calls[0]["Policy"])
     assert [s["Action"] for s in policy["Statement"]] == [["s3:PutObject"], ["kms:GenerateDataKey"]]
     assert sts.calls[0]["RoleSessionName"] == "t-aaaaaaaa-upload"
+
+
+def test_a_refused_assume_role_is_reported_with_its_own_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression (2026-11-23): STS refused the TSS (a trust policy fault) and every resolve
+    answered a bare `internal_error`. The caller now gets a code that says what failed, and
+    the log has STS's own message, which names the refused action."""
+    message = (
+        "User: arn:aws:sts::000000000000:assumed-role/tss/tss is not authorized to perform: "
+        "sts:SetSourceIdentity on resource: arn:aws:iam::000000000000:role/assay-dev-tenant"
+    )
+
+    class RefusingSts:
+        def assume_role(self, **kwargs: Any) -> dict[str, Any]:
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": message}}, "AssumeRole")
+
+    subject = Resolver(SETTINGS, FakeReader(profile(TENANT_A)), RefusingSts())  # type: ignore[arg-type]
+    with pytest.raises(service.TenantRoleRefused) as raised:
+        subject.resolve(request(), service="api")
+    assert "sts:SetSourceIdentity" in str(raised.value)
+
+    with caplog.at_level(logging.INFO):
+        response = tss_handler.handle(event(good_body()), SETTINGS, subject)
+    assert response["statusCode"] == 500
+    # The code only: STS's message, with its ARNs, stays in the log.
+    assert json.loads(response["body"]) == {"error": "tenant_role_refused"}
+    logged = " ".join(str(r.__dict__) for r in caplog.records)
+    assert "sts:SetSourceIdentity" in logged
 
 
 def test_unknown_tenant_gets_nothing() -> None:

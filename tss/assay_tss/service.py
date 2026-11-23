@@ -23,6 +23,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from botocore.exceptions import ClientError
+
 from assay_tss import naming, policies
 from assay_tss.models import (
     CREDENTIAL_SECONDS,
@@ -70,6 +72,13 @@ class StorageNotActive(TssError):
 class StorageProfileInvalid(TssError):
     status = 500
     code = "storage_profile_invalid"
+
+
+class TenantRoleRefused(TssError):
+    """STS would not let the TSS assume the tenant role: a deployment fault, not a caller's."""
+
+    status = 500
+    code = "tenant_role_refused"
 
 
 @dataclass(frozen=True)
@@ -181,14 +190,22 @@ class Resolver:
             raise SourceIdentityMismatch("source identity must start with the caller's service")
         profile = self._checked_profile(request.tenant_id)
         account_id = self._settings.account_id
-        response = self._sts.assume_role(
-            RoleArn=profile.role_arn,
-            RoleSessionName=f"t-{request.tenant_id.hex[:8]}-{request.access.value}",
-            DurationSeconds=CREDENTIAL_SECONDS,
-            Tags=policies.session_tags(profile),  # type: ignore[arg-type]
-            SourceIdentity=request.source_identity,
-            Policy=policies.session_policy_json(request.access, profile, account_id=account_id),
-        )
+        try:
+            response = self._sts.assume_role(
+                RoleArn=profile.role_arn,
+                RoleSessionName=f"t-{request.tenant_id.hex[:8]}-{request.access.value}",
+                DurationSeconds=CREDENTIAL_SECONDS,
+                Tags=policies.session_tags(profile),  # type: ignore[arg-type]
+                SourceIdentity=request.source_identity,
+                Policy=policies.session_policy_json(request.access, profile, account_id=account_id),
+            )
+        except ClientError as exc:
+            # STS's own words go to the log, where they name the refused action. The
+            # caller gets only the code.
+            reason = exc.response.get("Error", {})
+            raise TenantRoleRefused(
+                f"{reason.get('Code', 'unknown')}: {reason.get('Message', '')}"
+            ) from exc
         creds: Any = response["Credentials"]
         return StorageContext(
             tenant_id=request.tenant_id,

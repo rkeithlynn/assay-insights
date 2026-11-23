@@ -41,10 +41,18 @@ Every cross-tenant test runs in both directions (A against B, and B against A).
 | `test_storage.py` (runner probes) | The runner's own role, whose IAM policy *allows* it, still cannot assume the tenant role (trust policy), read, write or tag a tenant bucket (bucket policy), use or tag a tenant key (key policy), read tenant vectors, or invoke the Cognito admin Lambda. |
 | `test_tss_api.py` | The TSS refuses an unsigned request, an unknown tenant, another service's name in the source identity, and any route but `resolve`. |
 | `test_rows.py` | As `app_tenant` with one tenant set, the other tenant's rows cannot be read or inserted, `tenant_storage` cannot be read at all, and with no tenant set nothing is visible. |
-| The provisioning role's probe | The provisioning role cannot read or write a tenant's objects, list object versions, read, query or write its vectors, or use its key directly. It may use the key only through S3 Vectors, to create the vector bucket and index (an accepted exception; BUILD_SPEC.md section 6). Three settings calls it is allowed must succeed. |
+| The provisioning role's probe | The provisioning role cannot read an object that exists, write an object, list object versions, read, query or write vectors, or use the tenant's key directly. It can list keys, which hold IDs only. It may use the key only through S3 Vectors, to create the vector bucket and index (an accepted exception; BUILD_SPEC.md section 6). Three settings calls it is allowed must succeed. |
 
-The tests write nothing. Every write they attempt must be refused, and every database
-transaction is rolled back. Tagging probes use a tag no policy looks at.
+The tests write one thing: a small fixture object in each test tenant's own bucket
+(`derived/text/00000000-0000-4000-8000-0000000000f1.json`), once, with that tenant's
+credentials. Object Lock keeps it, so later runs find it and write nothing. Every other
+write they attempt must be refused, and every database transaction is rolled back. Tagging
+probes use a tag no policy looks at.
+
+The fixture object is there because a refused read proves something only for an object
+that exists. S3 answers "no such key" (404) for a missing key to any caller that may list
+the bucket, whatever its right to read. So every read that must be refused is tried on the
+fixture object, and a 404 fails the check.
 
 ## Adding a test
 

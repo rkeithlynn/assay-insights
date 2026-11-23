@@ -32,8 +32,9 @@ change. Where this file and the spec differ, the spec wins.
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
-| 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Deployed 2026-11-23; fixture tenants and isolation run still to do** (branch `build-step-4`) |
-| 5–9 | Not started |
+| 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
+| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | Next. Not started |
+| 6–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
 
@@ -77,29 +78,36 @@ Step 3 was verified on 2026-11-23:
   (step 5), and whether a real access token's `amr` shows MFA.
 - CI on the `build-step-3` pull request must pass before `main` is fast-forwarded.
 
-Step 4 was built on 2026-11-23 and passes its unit tests. It is complete only when the owner
-has done all of this, in order, and each has succeeded:
+Step 4 was verified on 2026-11-23:
 
-1. `pulumi up`, then `uv run scripts/migrate.py` (revision `0003`). The owner follows the
-   confirmation link SNS emails to `alarmEmail`, or no alarm is delivered.
-   **Done 2026-11-23:** 88 created, 2 updated, 3 replaced; migration at `0003` with RLS and
-   roles verified; subscription confirmed. The next preview then showed two differences
-   (the TSS API's policy and the state bucket's encryption rule). Both were correct in AWS;
-   the fix is in the code and needs **one more `pulumi up`** before tenants are added, so
-   that the provisioning image carries the corrected tenant program.
-2. `uv run scripts/add_tenant.py` twice, for the fixture tenants "Isolation Test A" and
-   "Isolation Test B". Each must end `SUCCEEDED`, and each admin must get an invitation.
-   **In progress:** "Isolation Test A" is tenant `cfd08356-aac4-4dfe-a3f5-32a2f3294c4e`.
-   Its first run failed at `storage` on key tagging and its second on creating the vector
-   index (see the step 4 notes). Its stack now holds everything except the vector index
-   and the malware protection plan; there is no `tenant_storage` row or Cognito user yet.
-   After a `pulumi up` with the fix, continue it with
-   `uv run scripts/add_tenant.py --retry <that ID>`; do not add it again under a new ID.
-3. `uv run scripts/run_isolation.py` with the two tenant IDs: every test passes.
-4. `pulumi preview` shows no changes.
-
-The first real provisioning run is also the first test of several things no unit test can
-reach; they are listed under "Step 4" in the notes below.
+- The TSS runs as a Lambda in the VPC behind a private REST API with IAM authorization.
+  The tenant role trusts only the TSS's role. The break-glass role, its rule and alarm,
+  and the alarm topic (subscription confirmed) are in place.
+- `uv run scripts/migrate.py` moved Aurora to revision `0003` with `rls_verified: true` and
+  `roles_verified: true`.
+- Both fixture tenants were provisioned through the state machine and are `active`:
+  "Isolation Test A" is `cfd08356-aac4-4dfe-a3f5-32a2f3294c4e` and "Isolation Test B" is
+  `3f2d2180-2e99-4991-8cee-de1fd53bcbb5`. Each has its key, bucket, vector bucket and
+  index, malware protection plan and face collection.
+- `uv run scripts/run_isolation.py` passed for those two tenants (reported by the owner):
+  62 of 62 tests in the isolation Lambda, and 28 of 28 checks in the provisioning role's
+  probe. Run it with
+  `--tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`;
+  stack config `isolationTenantIds` is not set.
+- `pulumi preview` on the `dev` stack shows 200 unchanged.
+- Fixes found during deployment, all on `build-step-4`:
+  - the TSS API's policy and the bucket encryption rule written as AWS stores them;
+  - the provisioning role allowed to tag a tenant key at creation, with `tenant_id`
+    write-once;
+  - `kms:Decrypt` through S3 Vectors for the provisioning role, to create a vector index
+    (an accepted exception; BUILD_SPEC.md section 6);
+  - the tenant role's trust policy split into one statement per STS action;
+  - the provisioning role's probe reading an object that exists.
+  The notes under "Step 4" below explain each.
+- Carried forward: the owner applies the AI services opt-out policy from the management
+  account before step 6; step 6 must follow the two "For step 6" notes below (no file
+  names in keys, and the reserved fixture document ID).
+- CI on the `build-step-4` pull request (#3) must pass before `main` is fast-forwarded.
 
 ## Fixed facts (BUILD_SPEC.md section 2)
 
@@ -513,11 +521,12 @@ assets/     Logo and favicon SVGs
     some other principal with tenant data access create it. Never widen the condition.
   - **The isolation tests try all of this as the provisioning role.**
     `scripts/run_isolation.py` runs the provisioning task with `PROVISION_COMMAND=probe`
-    (`assay_tss/provision/probe.py`) for the two test tenants: reading and writing an
-    object, listing object versions, reading, querying and writing vectors, and using the
-    key directly must each be refused, and three settings calls must succeed so that a run
-    where everything fails cannot pass. It runs as a task because nothing else can be the
-    provisioning role; the isolation Lambda is not allowed to assume it.
+    (`assay_tss/provision/probe.py`) for the two test tenants: reading an object that
+    exists, writing an object, listing object versions, reading, querying and writing
+    vectors, and using the key directly must each be refused. Three settings calls and
+    listing keys must succeed, so that a run where everything fails cannot pass. It runs
+    as a task because nothing else can be the provisioning role; the isolation Lambda is
+    not allowed to assume it.
   For the same `HeadBucket` reason an administrator can list the state bucket's object
   names (tenant IDs), which the owner also accepted.
 - **Each tenant's vector bucket has its own policy** (`tenant_vector_bucket_policy`),
@@ -593,6 +602,25 @@ assets/     Logo and favicon SVGs
   (`StorageContext.inbox_key(batch_id, file_id)`) and keep `file_name` only in the
   database. Pair companion files and stipulations with their PDF by the names in the
   database, not by listing keys. BUILD_SPEC.md section 6 has the layout.
+- **For step 6 (pipeline): ignore the isolation tests' fixture object.** Each test tenant's
+  bucket holds one object the isolation tests wrote, kept by Object Lock:
+  `derived/text/00000000-0000-4000-8000-0000000000f1.json` (`FIXTURE_DOCUMENT` in
+  `tests/isolation/conftest.py`). It is outside `inbox/`, so no upload or scan event ever
+  refers to it, but it sits under `derived/text/`, which the pipeline writes. That document
+  ID is reserved: it has no `documents` row and must never get one. The pipeline must work
+  only from database rows and scan events, never from a listing of `derived/` or any other
+  prefix, so it never treats this object as a document's text. Owner's condition
+  (2026-11-23): the fixture is never in the inbox, and the pipeline ignores it. The owner
+  decided to keep it at this key. Step 6 must also do the following:
+  - **Define the reserved document ID as a constant in one place.** Today it is defined
+    only in `tests/isolation/conftest.py`, which the pipeline cannot import. Move it to
+    code that both the pipeline and the isolation tests import (`assay_tss.keys` is the
+    natural home, next to the key builders) and have the tests use that constant. It must
+    not be written out a second time anywhere.
+  - **Refuse the reserved ID.** The pipeline must refuse to create a document with that ID
+    and refuse to process one: no `documents` row, no object written under it, no step run
+    for it.
+  - **Cover both refusals with a unit test.**
 - **Tagging a KMS key in the request that creates it needs `kms:TagResource` in an IAM
   policy "that isn't restricted to particular KMS keys"** (AWS KMS guide, "Control access
   to tags"). The first provisioning run (2026-11-23, tenant `cfd08356-…`) failed at the
@@ -634,9 +662,30 @@ assets/     Logo and favicon SVGs
 - **`audit_log` cannot be read from outside the VPC before step 5** (the audit page). Until
   then a failed provisioning step is read from the task's log group
   (`/aws/ecs/assay-dev-provision`), which records the same step and reason.
-- **Unverified until a provisioning run gets past them.** Each of these is an assumption a
-  real `add_tenant.py` run tests. If one is wrong, provisioning fails at the `storage`
-  step with the reason in the task's log and in `audit_log`:
+- **A role's trust policy needs one statement per STS action.** One `AssumeRole` call
+  with session tags and a source identity is authorized as three actions (`sts:AssumeRole`,
+  `sts:TagSession`, `sts:SetSourceIdentity`), each against its own request context, and the
+  tags are not in the context for `sts:SetSourceIdentity`. A single statement with every
+  condition on all three refused that action, so every TSS `resolve` failed
+  (2026-11-23: "not authorized to perform: sts:SetSourceIdentity"). The tenant role's trust
+  policy now has three statements, as AWS's own examples do: `sts:AssumeRole` requires the
+  tags and the source identity, `sts:TagSession` the tags, `sts:SetSourceIdentity` the
+  source identity. Same principal and same three actions as before; nothing was added.
+  A refused AssumeRole now reaches the caller as `tenant_role_refused`, with STS's message
+  in the TSS log.
+- **S3 answers 404, not 403, for a key that does not exist, to any caller that may list
+  the bucket**, whatever its right to read objects. For an object that exists it answers
+  403. So a refused read is proved only on an existing object. The provisioning role may
+  list (HeadBucket), and its probe at first asked for random keys and got 404; IAM's
+  evaluation of the deployed role was explicit deny all along
+  (`aws iam simulate-principal-policy`, read-only). The probe now lists one key and reads
+  that, and the isolation tests leave one fixture object in each test tenant's bucket for
+  it (the only thing they write). A 404 or an empty bucket still fails the check.
+- **Every provisioning assumption is now settled** by the runs of 2026-11-23. The two that
+  were wrong are fixed (key tagging at creation; `kms:Decrypt` for `CreateIndex`). The rest
+  held: GuardDuty accepts the scan role's source-account condition, the malware protection
+  plan needs only its own action and `iam:PassRole`, and `CreateIndex` needs only the two
+  key permissions through S3 Vectors. For the record, the assumptions were:
   1. GuardDuty accepts the scan role's trust policy with the `aws:SourceAccount` condition
      (AWS's documented trust policy has no condition).
   2. `guardduty:CreateMalwareProtectionPlan` needs nothing beyond that action and

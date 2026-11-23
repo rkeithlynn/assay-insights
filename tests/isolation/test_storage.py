@@ -25,7 +25,14 @@ import pytest
 from assay_tss import naming
 from assay_tss.models import StorageAccess, StorageContext
 from assay_tss.policies import BUCKET_TAG, TENANT_TAG, VECTOR_BUCKET_TAG
-from tests.isolation.conftest import PROBE_TAG, Env, Pair, assert_denied, client
+from tests.isolation.conftest import (
+    FIXTURE_BODY,
+    PROBE_TAG,
+    Env,
+    Pair,
+    assert_denied,
+    client,
+)
 
 if TYPE_CHECKING:
     from mypy_boto3_kms import KMSClient
@@ -37,6 +44,7 @@ if TYPE_CHECKING:
     from mypy_boto3_sts import STSClient
 
 Resolve = Callable[[uuid.UUID, StorageAccess], StorageContext]
+ObjectKey = Callable[[StorageContext], str]
 
 
 def s3(session: boto3.Session, region: str) -> S3Client:
@@ -130,14 +138,27 @@ def test_own_face_collection_is_reachable(tenant: StorageContext) -> None:
     assert described["ResponseMetadata"]["HTTPStatusCode"] == 200
 
 
-def test_other_tenants_bucket_is_refused(pair: Pair) -> None:
+def test_a_tenant_writes_and_reads_back_its_own_object(
+    tenant: StorageContext, object_key: ObjectKey
+) -> None:
+    """The fixture object: written under the tenant's key, and readable by the tenant."""
+    key = object_key(tenant)
+    api = s3(tenant.session(), tenant.region)
+    fetched = api.get_object(Bucket=tenant.bucket, Key=key)
+    assert fetched["Body"].read() == FIXTURE_BODY
+    assert fetched["ServerSideEncryption"] == "aws:kms"
+    assert fetched["SSEKMSKeyId"] == tenant.kms_key_arn
+
+
+def test_other_tenants_bucket_is_refused(pair: Pair, object_key: ObjectKey) -> None:
     api = s3(pair.own.session(), pair.own.region)
     other = pair.other
+    existing = object_key(other)
     assert_denied(lambda: api.list_objects_v2(Bucket=other.bucket, MaxKeys=1))
+    # An object that exists, so the refusal is a refusal and not a missing key.
+    assert_denied(lambda: api.get_object(Bucket=other.bucket, Key=existing))
+    assert_denied(lambda: api.head_object(Bucket=other.bucket, Key=existing))
     assert_denied(lambda: api.get_object(Bucket=other.bucket, Key=other.text_key(uuid.uuid4())))
-    assert_denied(
-        lambda: api.head_object(Bucket=other.bucket, Key=other.original_key(uuid.uuid4()))
-    )
     assert_denied(
         lambda: api.put_object(
             Bucket=other.bucket,
@@ -197,11 +218,14 @@ def test_a_tenant_key_works_only_through_storage(tenant: StorageContext) -> None
     assert_denied(lambda: api.generate_data_key(KeyId=tenant.kms_key_arn, KeySpec="AES_256"))
 
 
-def test_upload_access_cannot_read_or_list(env: Env, resolve: Resolve) -> None:
+def test_upload_access_cannot_read_or_list(
+    env: Env, resolve: Resolve, context_a: StorageContext, object_key: ObjectKey
+) -> None:
+    existing = object_key(context_a)
     upload = resolve(env.tenant_a, StorageAccess.UPLOAD)
     api = s3(upload.session(), upload.region)
     assert_denied(lambda: api.list_objects_v2(Bucket=upload.bucket, MaxKeys=1))
-    assert_denied(lambda: api.get_object(Bucket=upload.bucket, Key=upload.text_key(uuid.uuid4())))
+    assert_denied(lambda: api.get_object(Bucket=upload.bucket, Key=existing))
     # Outside inbox/ an upload is refused too.
     assert_denied(
         lambda: api.put_object(
@@ -210,10 +234,14 @@ def test_upload_access_cannot_read_or_list(env: Env, resolve: Resolve) -> None:
     )
 
 
-def test_read_access_cannot_write(env: Env, resolve: Resolve) -> None:
+def test_read_access_reads_but_cannot_write(
+    env: Env, resolve: Resolve, context_a: StorageContext, object_key: ObjectKey
+) -> None:
+    existing = object_key(context_a)
     read = resolve(env.tenant_a, StorageAccess.READ)
     api = s3(read.session(), read.region)
     assert api.list_objects_v2(Bucket=read.bucket, MaxKeys=1)["ResponseMetadata"]
+    assert api.get_object(Bucket=read.bucket, Key=existing)["Body"].read() == FIXTURE_BODY
     assert_denied(
         lambda: api.put_object(
             Bucket=read.bucket,
@@ -317,10 +345,14 @@ def test_only_the_tss_can_assume_the_tenant_role(
     )
 
 
-def test_bucket_policy_refuses_the_runner(runner: boto3.Session, tenant: StorageContext) -> None:
+def test_bucket_policy_refuses_the_runner(
+    runner: boto3.Session, tenant: StorageContext, object_key: ObjectKey
+) -> None:
+    existing = object_key(tenant)
     api = s3(runner, tenant.region)
     assert_denied(lambda: api.list_objects_v2(Bucket=tenant.bucket, MaxKeys=1))
-    assert_denied(lambda: api.get_object(Bucket=tenant.bucket, Key=tenant.text_key(uuid.uuid4())))
+    assert_denied(lambda: api.get_object(Bucket=tenant.bucket, Key=existing))
+    assert_denied(lambda: api.head_object(Bucket=tenant.bucket, Key=existing))
     assert_denied(
         lambda: api.put_object(
             Bucket=tenant.bucket,

@@ -853,10 +853,17 @@ def test_tenant_role_trusts_only_the_tss_and_uses_the_one_template() -> Any:
         role = _one("aws:iam/role:Role", f"{stack.name_prefix}-tenant-role")
         assert role["name"] == f"{stack.name_prefix}-tenant"
         assert role["maxSessionDuration"] == 3600
-        [statement] = json.loads(role["assumeRolePolicy"])["Statement"]
+        trust = json.loads(role["assumeRolePolicy"])
         tss_role = f"{ROLE}/t1-tss-role-a1b2c3d"
-        assert statement["Principal"] == {"AWS": tss_role}
-        assert "sts:SourceIdentity" in statement["Condition"]["StringLike"]
+        assert trust == policies.tenant_role_trust_policy(
+            tss_role_arn=tss_role, name_prefix=stack.name_prefix
+        )
+        assert all(s["Principal"] == {"AWS": tss_role} for s in trust["Statement"])
+        assert [s["Action"] for s in trust["Statement"]] == [
+            "sts:AssumeRole",
+            "sts:TagSession",
+            "sts:SetSourceIdentity",
+        ]
 
         policy = _one("aws:iam/rolePolicy:RolePolicy", f"{stack.name_prefix}-tenant-policy")
         assert json.loads(policy["policy"]) == policies.tenant_role_policy(

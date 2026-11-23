@@ -4,8 +4,9 @@ The two tenants come from the runner's event (`ISOLATION_TENANT_A`, `ISOLATION_T
 Every storage context is issued by the real TSS. "The runner" is this Lambda's own role: a
 probe whose IAM policy allows what the tenant resources' own policies must refuse.
 
-The tests write nothing: every write they attempt must be refused, and every database
-transaction is rolled back.
+The tests write one thing: a small fixture object in each tenant's own bucket, once, with
+that tenant's credentials (`ensure_fixture_object`). Every other write they attempt must be
+refused, and every database transaction is rolled back.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import boto3
 import pytest
@@ -32,6 +34,10 @@ DENIED_CODES = frozenset({"AccessDenied", "AccessDeniedException", "403", "Forbi
 # A tag no policy looks at. If a tagging probe ever got through, it would change nothing
 # that isolation depends on.
 PROBE_TAG = "isolation-probe"
+# The one object the tests write, once per tenant: derived/text/<this ID>.json.
+FIXTURE_DOCUMENT = uuid.UUID("00000000-0000-4000-8000-0000000000f1")
+FIXTURE_BODY = b'{"isolation-test-fixture": true}\n'
+MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
 
 @dataclass(frozen=True)
@@ -137,11 +143,48 @@ def pair(
 
 
 @pytest.fixture(params=["tenant-a", "tenant-b"])
-def tenant(
-    request: pytest.FixtureRequest, context_a: StorageContext, context_b: StorageContext
-) -> StorageContext:
-    """Each tenant in turn, with its full (pipeline) access."""
-    return context_a if request.param == "tenant-a" else context_b
+def tenant(request: pytest.FixtureRequest) -> StorageContext:
+    """Each tenant in turn, with its full (pipeline) access.
+
+    Only the named tenant's context is resolved, so a failure for one tenant does not hide
+    the other tenant's results.
+    """
+    name = "context_a" if request.param == "tenant-a" else "context_b"
+    context: StorageContext = request.getfixturevalue(name)
+    return context
+
+
+def ensure_fixture_object(context: StorageContext) -> str:
+    """One small object in the tenant's bucket, written once with the tenant's credentials.
+
+    A refused read proves something only for an object that exists: S3 answers "no such
+    key" for a missing key to any caller that may list the bucket. This is the only thing
+    the isolation tests write. Object Lock keeps it, so later runs find it and write nothing.
+    """
+    key = context.text_key(FIXTURE_DOCUMENT)
+    api: Any = context.session().client("s3", region_name=context.region, config=CLIENT_CONFIG)
+    try:
+        api.head_object(Bucket=context.bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in MISSING_CODES:
+            raise
+        api.put_object(
+            Bucket=context.bucket, Key=key, Body=FIXTURE_BODY, ContentType="application/json"
+        )
+    return key
+
+
+@pytest.fixture(scope="session")
+def object_key() -> Callable[[StorageContext], str]:
+    """The key of the tenant's fixture object, given the tenant's pipeline context."""
+    known: dict[uuid.UUID, str] = {}
+
+    def _key(context: StorageContext) -> str:
+        if context.tenant_id not in known:
+            known[context.tenant_id] = ensure_fixture_object(context)
+        return known[context.tenant_id]
+
+    return _key
 
 
 @pytest.fixture(scope="session")

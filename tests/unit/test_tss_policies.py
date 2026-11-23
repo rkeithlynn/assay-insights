@@ -6,6 +6,7 @@ and what it always denies. `tests/isolation` proves the same things against real
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import uuid
 from typing import Any
@@ -67,28 +68,125 @@ def actions(statement: dict[str, Any]) -> set[str]:
 # --- Trust policy: only the TSS ---------------------------------------------------------------
 
 
+def trust_policy() -> dict[str, Any]:
+    return policies.tenant_role_trust_policy(tss_role_arn=f"{ROLE}/tss", name_prefix=PREFIX)
+
+
+def trust_allows(action: str, context: dict[str, Any]) -> bool:
+    """Whether the trust policy allows one STS action, given that action's request context.
+
+    Handles the two operators the trust policy uses, as IAM does: StringLike needs the key
+    to be present and to match; ForAllValues is true when the key is absent.
+    """
+    for statement in trust_policy()["Statement"]:
+        if action not in as_list(statement["Action"]):
+            continue
+        holds = True
+        for operator, tests in statement["Condition"].items():
+            for key, expected in tests.items():
+                if operator == "StringLike":
+                    holds &= key in context and fnmatch.fnmatchcase(str(context[key]), expected)
+                elif operator == "ForAllValues:StringEquals":
+                    holds &= set(as_list(context.get(key, []))) <= set(expected)
+                else:
+                    raise AssertionError(f"operator {operator} is not handled by this test")
+        if holds:
+            return True
+    return False
+
+
+# What STS puts in each action's request context for one AssumeRole call with tags and a
+# source identity. The tags are not in the context for sts:SetSourceIdentity.
+SESSION_TAGS = {
+    "aws:RequestTag/tenant_id": str(TENANT_A),
+    "aws:RequestTag/bucket": "assay-dev-t-aaaaaaaa",
+    "aws:RequestTag/vector_bucket": "assay-dev-t-aaaaaaaa-vectors",
+    "aws:TagKeys": ["tenant_id", "bucket", "vector_bucket"],
+}
+SOURCE_IDENTITY = {"sts:SourceIdentity": "api.batch-42"}
+
+
 def test_only_the_tss_role_may_assume_the_tenant_role() -> None:
-    trust = policies.tenant_role_trust_policy(tss_role_arn=f"{ROLE}/tss", name_prefix=PREFIX)
-    [statement] = trust["Statement"]
-    assert statement["Effect"] == "Allow"
-    assert statement["Principal"] == {"AWS": f"{ROLE}/tss"}
-    assert actions(statement) == {"sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"}
+    trust = trust_policy()
+    assert {s["Effect"] for s in trust["Statement"]} == {"Allow"}
+    assert all(s["Principal"] == {"AWS": f"{ROLE}/tss"} for s in trust["Statement"])
+    # One statement per action, so each carries only the conditions that apply to it.
+    assert [s["Action"] for s in trust["Statement"]] == [
+        "sts:AssumeRole",
+        "sts:TagSession",
+        "sts:SetSourceIdentity",
+    ]
 
 
 def test_trust_policy_requires_the_tags_and_a_source_identity() -> None:
-    trust = policies.tenant_role_trust_policy(tss_role_arn=f"{ROLE}/tss", name_prefix=PREFIX)
-    condition = trust["Statement"][0]["Condition"]
-    required = condition["StringLike"]
-    assert required["aws:RequestTag/tenant_id"] == "?*"
-    assert required["aws:RequestTag/bucket"] == "assay-dev-t-*"
-    assert required["aws:RequestTag/vector_bucket"] == "assay-dev-t-*-vectors"
-    assert required["sts:SourceIdentity"] == "?*"
+    assume = by_sid(trust_policy(), "OnlyTheTenantStorageService")
+    required = assume["Condition"]["StringLike"]
+    assert required == {
+        "aws:RequestTag/tenant_id": "?*",
+        "aws:RequestTag/bucket": "assay-dev-t-*",
+        "aws:RequestTag/vector_bucket": "assay-dev-t-*-vectors",
+        "sts:SourceIdentity": "?*",
+    }
     # No other tag may ride along.
-    assert condition["ForAllValues:StringEquals"]["aws:TagKeys"] == [
+    assert assume["Condition"]["ForAllValues:StringEquals"]["aws:TagKeys"] == [
         "tenant_id",
         "bucket",
         "vector_bucket",
     ]
+
+
+def test_each_sts_action_is_allowed_in_its_own_request_context() -> None:
+    """Regression: every TSS resolve failed (2026-11-23).
+
+    One statement put the tag conditions on all three actions, and STS refused
+    `sts:SetSourceIdentity`: the session tags are not in that action's request context.
+    Each action must be allowed with only the keys its own context carries.
+    """
+    assert trust_allows("sts:AssumeRole", {**SESSION_TAGS, **SOURCE_IDENTITY})
+    assert trust_allows("sts:TagSession", SESSION_TAGS)
+    assert trust_allows("sts:SetSourceIdentity", SOURCE_IDENTITY)
+    tagging = by_sid(trust_policy(), "WithTheThreeSessionTags")
+    assert "sts:SourceIdentity" not in json.dumps(tagging)
+    identity = by_sid(trust_policy(), "WithASourceIdentity")
+    assert "aws:RequestTag" not in json.dumps(identity)
+    assert "aws:TagKeys" not in json.dumps(identity)
+
+
+@pytest.mark.parametrize(
+    ("what", "action", "context"),
+    [
+        ("no session without a source identity", "sts:AssumeRole", SESSION_TAGS),
+        ("no session without tags", "sts:AssumeRole", SOURCE_IDENTITY),
+        (
+            "no session without the tenant tag",
+            "sts:AssumeRole",
+            {
+                **{k: v for k, v in SESSION_TAGS.items() if k != "aws:RequestTag/tenant_id"},
+                **SOURCE_IDENTITY,
+            },
+        ),
+        (
+            "no session for a bucket that is not a tenant bucket",
+            "sts:AssumeRole",
+            {
+                **SESSION_TAGS,
+                **SOURCE_IDENTITY,
+                "aws:RequestTag/bucket": "assay-dev-provision-state",
+            },
+        ),
+        (
+            "no extra tag key",
+            "sts:TagSession",
+            {**SESSION_TAGS, "aws:TagKeys": ["tenant_id", "bucket", "vector_bucket", "admin"]},
+        ),
+        ("no tagging without the three tags", "sts:TagSession", {"aws:TagKeys": ["tenant_id"]}),
+        ("no empty source identity", "sts:SetSourceIdentity", {"sts:SourceIdentity": ""}),
+        ("no source identity action without one", "sts:SetSourceIdentity", {}),
+        ("no other action", "sts:AssumeRoleWithWebIdentity", {**SESSION_TAGS, **SOURCE_IDENTITY}),
+    ],
+)
+def test_trust_policy_refuses(what: str, action: str, context: dict[str, Any]) -> None:
+    assert not trust_allows(action, context), what
 
 
 # --- The one template -------------------------------------------------------------------------

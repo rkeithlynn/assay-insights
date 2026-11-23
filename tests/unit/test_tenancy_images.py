@@ -297,11 +297,11 @@ def test_task_probe_command_never_passes_when_it_cannot_reach_aws(provision_imag
     assert result.returncode == 1, result.stderr
     lines = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
     checks = [line for line in lines if line.get("message") == "probe"]
-    assert len(checks) == 13
+    assert len(checks) == 14
     assert all(not check["ok"] for check in checks)
     assert all(check["outcome"].startswith("error:") for check in checks)
     [summary] = [line for line in lines if line.get("message") == "probe finished"]
-    assert (summary["checks"], summary["failed"]) == (13, 13)
+    assert (summary["checks"], summary["failed"]) == (14, 14)
 
 
 # --- The TSS Lambda ---------------------------------------------------------------------------

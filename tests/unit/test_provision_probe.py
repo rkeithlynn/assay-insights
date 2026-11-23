@@ -1,8 +1,8 @@
 """The provisioning role's probe (assay_tss.provision.probe), with fake AWS clients.
 
 The real run is part of the isolation tests (`scripts/run_isolation.py`). These tests show
-that the probe passes only when every data call is refused with an access-denied error and
-the role's own settings calls work.
+that the probe passes only when every data call is refused with an access-denied error, for
+an object that exists, and the role's own settings calls work.
 """
 
 from __future__ import annotations
@@ -40,8 +40,10 @@ SETTINGS = ProvisionSettings(
     default_tags={"app": "assay-insights"},
     work_dir=Path("unused"),
 )
-# The settings calls the role is allowed. Everything else must be refused.
-SETTINGS_CALLS = {"get_bucket_versioning", "describe_key", "get_index"}
+# What the role is allowed: three settings calls, and listing keys (keys hold IDs only).
+ALLOWED_CALLS = {"get_bucket_versioning", "describe_key", "get_index", "list_objects_v2"}
+EXISTING_KEY = "derived/text/00000000-0000-4000-8000-0000000000f1.json"
+LISTING = {"Contents": [{"Key": EXISTING_KEY}]}
 
 
 def error(code: str) -> ClientError:
@@ -49,11 +51,15 @@ def error(code: str) -> ClientError:
 
 
 class FakeClient:
-    """Refuses everything with AccessDenied except the calls named in `allow`."""
+    """Refuses everything with access denied except the calls named in `allow`."""
 
-    def __init__(self, allow: set[str], overrides: dict[str, Exception | None] | None = None):
-        self.allow = allow
+    def __init__(
+        self,
+        overrides: dict[str, Exception | None] | None = None,
+        listing: dict[str, Any] | None = None,
+    ) -> None:
         self.overrides = overrides or {}
+        self.listing = LISTING if listing is None else listing
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def __getattr__(self, name: str) -> Any:
@@ -64,20 +70,28 @@ class FakeClient:
                 if failure is not None:
                     raise failure
                 return {}
-            if name not in self.allow:
-                raise error("AccessDeniedException" if name != "get_object" else "AccessDenied")
-            return {}
+            if name not in ALLOWED_CALLS:
+                # S3 answers 403 for HEAD and AccessDenied elsewhere; the others their own.
+                codes = {"head_object": "403", "get_object": "AccessDenied"}
+                raise error(codes.get(name, "AccessDeniedException"))
+            return self.listing if name == "list_objects_v2" else {}
 
         return call
 
 
-def probe(overrides: dict[str, Exception | None] | None = None) -> tuple[Probe, FakeClient]:
-    client = FakeClient(SETTINGS_CALLS, overrides)
+def probe(
+    overrides: dict[str, Exception | None] | None = None, listing: dict[str, Any] | None = None
+) -> tuple[Probe, FakeClient]:
+    client = FakeClient(overrides, listing)
     return Probe(SETTINGS, s3=client, vectors=client, kms=client), client  # type: ignore[arg-type]
 
 
 def by_name(results: list[Check]) -> dict[str, Check]:
     return {check.name: check for check in results}
+
+
+READ = "read an object that exists"
+HEAD = "read the metadata of an object that exists"
 
 
 def test_probe_passes_when_every_data_call_is_refused() -> None:
@@ -89,8 +103,9 @@ def test_probe_passes_when_every_data_call_is_refused() -> None:
         "read the bucket's settings": ALLOWED,
         "describe the key": ALLOWED,
         "describe the vector index": ALLOWED,
-        "read an object": DENIED,
-        "read an object's metadata": DENIED,
+        "list object keys": ALLOWED,
+        READ: DENIED,
+        HEAD: DENIED,
         "list object versions": DENIED,
         "write an object": DENIED,
         "list vectors": DENIED,
@@ -100,15 +115,60 @@ def test_probe_passes_when_every_data_call_is_refused() -> None:
         "generate a data key directly": DENIED,
         "encrypt directly": DENIED,
     }
-    assert {name for name, _ in client.calls} >= SETTINGS_CALLS
+    assert {name for name, _ in client.calls} >= ALLOWED_CALLS
+
+
+def test_probe_reads_an_object_that_exists() -> None:
+    """Regression (2026-11-23): the probe asked for keys that did not exist, and S3 answered
+    404 because the role may list the bucket. Only an existing object can show a refusal."""
+    subject, client = probe()
+    subject.run([TENANT])
+    reads = [kwargs for name, kwargs in client.calls if name in {"get_object", "head_object"}]
+    assert [r["Key"] for r in reads] == [EXISTING_KEY, EXISTING_KEY]
+    assert all(r["Bucket"] == "assay-dev-t-aaaaaaaa" for r in reads)
+
+
+@pytest.mark.parametrize(
+    ("call", "check", "code", "outcome"),
+    [
+        ("get_object", READ, "NoSuchKey", "error:NoSuchKey"),
+        ("head_object", HEAD, "404", "error:404"),
+    ],
+)
+def test_a_missing_object_is_never_a_refusal(
+    call: str, check: str, code: str, outcome: str
+) -> None:
+    """A 404 says nothing about the right to read, so it must fail the check."""
+    results = by_name(probe({call: error(code)})[0].run([TENANT]))
+    assert results[check].outcome == outcome
+    assert not results[check].ok
+
+
+def test_an_empty_bucket_fails_the_read_checks() -> None:
+    """With nothing to read, a refused read cannot be shown, and that is not a pass."""
+    subject, client = probe(listing={"KeyCount": 0})
+    results = by_name(subject.run([TENANT]))
+    assert results["list object keys"].ok
+    for check in (READ, HEAD):
+        assert results[check].outcome == "error:NoObjectToRead"
+        assert not results[check].ok
+    assert not any(name in {"get_object", "head_object"} for name, _ in client.calls)
+
+
+def test_a_refused_listing_is_not_a_refused_read() -> None:
+    results = by_name(probe({"list_objects_v2": error("AccessDenied")})[0].run([TENANT]))
+    assert results["list object keys"].outcome == DENIED
+    assert not results["list object keys"].ok
+    for check in (READ, HEAD):
+        assert results[check].outcome == "error:NoObjectToRead"
+        assert not results[check].ok
 
 
 def test_probe_targets_the_tenants_own_resources() -> None:
     subject, client = probe()
     subject.run([TENANT])
     calls = dict(client.calls)
-    assert calls["get_object"]["Bucket"] == "assay-dev-t-aaaaaaaa"
-    assert calls["get_object"]["Key"].startswith("originals/")
+    assert calls["list_objects_v2"]["Bucket"] == "assay-dev-t-aaaaaaaa"
     assert calls["put_object"]["Key"].startswith("inbox/")
     assert calls["list_vectors"]["vectorBucketName"] == "assay-dev-t-aaaaaaaa-vectors"
     assert calls["list_vectors"]["indexName"] == "documents"
@@ -117,15 +177,20 @@ def test_probe_targets_the_tenants_own_resources() -> None:
 
 
 def test_probe_runs_every_check_for_each_tenant() -> None:
-    results = probe()[0].run([TENANT, OTHER])
-    assert len(results) == 26
+    subject, client = probe()
+    results = subject.run([TENANT, OTHER])
+    assert len(results) == 28
     assert {check.tenant_id for check in results} == {str(TENANT), str(OTHER)}
+    # Each tenant's read is tried on an object found in that tenant's own bucket.
+    listed = [kwargs["Bucket"] for name, kwargs in client.calls if name == "list_objects_v2"]
+    assert set(listed) == {"assay-dev-t-aaaaaaaa", "assay-dev-t-bbbbbbbb"}
 
 
 @pytest.mark.parametrize(
     ("call", "check"),
     [
-        ("get_object", "read an object"),
+        ("get_object", READ),
+        ("head_object", HEAD),
         ("list_object_versions", "list object versions"),
         ("put_object", "write an object"),
         ("list_vectors", "list vectors"),
@@ -139,13 +204,6 @@ def test_a_data_call_that_succeeds_fails_the_probe(call: str, check: str) -> Non
     assert results[check].outcome == ALLOWED
     assert not results[check].ok
     assert sum(not c.ok for c in results.values()) == 1
-
-
-def test_a_missing_object_is_not_a_refusal() -> None:
-    """NoSuchKey would mean the read was authorized: the object just was not there."""
-    results = by_name(probe({"get_object": error("NoSuchKey")})[0].run([TENANT]))
-    assert results["read an object"].outcome == "error:NoSuchKey"
-    assert not results["read an object"].ok
 
 
 def test_an_unreachable_endpoint_is_not_a_refusal() -> None:
@@ -172,8 +230,8 @@ def test_attempt_distinguishes_refused_from_everything_else() -> None:
     assert attempt(lambda: None) == ALLOWED
     for code in ("AccessDenied", "AccessDeniedException", "403", "Forbidden"):
         assert attempt(raises(error(code))) == DENIED
-    assert attempt(raises(error("ValidationException"))) == "error:ValidationException"
-    assert attempt(raises(error("NotFoundException"))) == "error:NotFoundException"
+    for code in ("NoSuchKey", "404", "ValidationException", "NotFoundException"):
+        assert attempt(raises(error(code))) == f"error:{code}"
 
 
 def test_parse_tenants() -> None:
@@ -184,7 +242,7 @@ def test_parse_tenants() -> None:
         parse_tenants("not-a-uuid")
 
 
-# --- The task's entry point -----------------------------------------------------------------
+# --- The task's entry point -------------------------------------------------------------------
 
 
 class FakeProbe:
@@ -204,7 +262,7 @@ class FakeProbe:
 def test_probe_command_needs_no_request_and_reports_by_exit_code(
     monkeypatch: pytest.MonkeyPatch, outcome: str, exit_code: int
 ) -> None:
-    FakeProbe.results = [Check(str(TENANT), "read an object", DENIED, outcome)]
+    FakeProbe.results = [Check(str(TENANT), READ, DENIED, outcome)]
     monkeypatch.setattr(entry, "Probe", FakeProbe)
     monkeypatch.setattr(ProvisionSettings, "from_env", classmethod(lambda cls: SETTINGS))
     monkeypatch.setenv("PROVISION_COMMAND", "probe")

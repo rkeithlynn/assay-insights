@@ -206,26 +206,52 @@ def _s3vectors_service(region: str) -> str:
 
 
 def tenant_role_trust_policy(*, tss_role_arn: str, name_prefix: str) -> Policy:
-    """Only the TSS Lambda's role, and only with all three tags and a source identity."""
+    """Only the TSS Lambda's role, and only with all three tags and a source identity.
+
+    One AssumeRole call with tags and a source identity is authorized as three actions, and
+    STS checks each against its own request context: the tags are not in the context for
+    `sts:SetSourceIdentity`. A single statement that put every condition on all three
+    actions refused that action, and with it every AssumeRole. So there is one statement
+    per action, each with only the conditions that apply to it, as AWS's own examples have:
+
+    - `sts:AssumeRole` requires the tags and the source identity, so no session can exist
+      without both;
+    - `sts:TagSession` requires the tags, and no tag key but the three;
+    - `sts:SetSourceIdentity` requires the source identity.
+    """
     pattern = tenant_pattern(name_prefix)
+    principal = {"AWS": tss_role_arn}
+    tags = {
+        f"aws:RequestTag/{TENANT_TAG}": "?*",
+        f"aws:RequestTag/{BUCKET_TAG}": pattern,
+        f"aws:RequestTag/{VECTOR_BUCKET_TAG}": pattern + VECTOR_BUCKET_SUFFIX,
+    }
+    source_identity = {"sts:SourceIdentity": "?*"}
+    only_these_tags = {"ForAllValues:StringEquals": {"aws:TagKeys": list(SESSION_TAG_KEYS)}}
     return {
         "Version": VERSION,
         "Statement": [
             {
                 "Sid": "OnlyTheTenantStorageService",
                 "Effect": "Allow",
-                "Principal": {"AWS": tss_role_arn},
-                "Action": ["sts:AssumeRole", "sts:TagSession", "sts:SetSourceIdentity"],
-                "Condition": {
-                    "StringLike": {
-                        f"aws:RequestTag/{TENANT_TAG}": "?*",
-                        f"aws:RequestTag/{BUCKET_TAG}": pattern,
-                        f"aws:RequestTag/{VECTOR_BUCKET_TAG}": pattern + VECTOR_BUCKET_SUFFIX,
-                        "sts:SourceIdentity": "?*",
-                    },
-                    "ForAllValues:StringEquals": {"aws:TagKeys": list(SESSION_TAG_KEYS)},
-                },
-            }
+                "Principal": principal,
+                "Action": "sts:AssumeRole",
+                "Condition": {"StringLike": {**tags, **source_identity}, **only_these_tags},
+            },
+            {
+                "Sid": "WithTheThreeSessionTags",
+                "Effect": "Allow",
+                "Principal": principal,
+                "Action": "sts:TagSession",
+                "Condition": {"StringLike": tags, **only_these_tags},
+            },
+            {
+                "Sid": "WithASourceIdentity",
+                "Effect": "Allow",
+                "Principal": principal,
+                "Action": "sts:SetSourceIdentity",
+                "Condition": {"StringLike": source_identity},
+            },
         ],
     }
 

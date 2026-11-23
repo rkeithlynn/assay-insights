@@ -10,6 +10,14 @@ data: every attempt to read or write an object or a vector, or to use the key di
 must be refused. A few settings calls that the role is allowed must succeed, so a run in
 which everything fails (no network, wrong names) cannot pass.
 
+Reading is tried on an object that exists. S3 answers "no such key" (404) for a key that
+is not there to any caller that may list the bucket, whatever its right to read objects,
+and this role may list (the AWS provider's HeadBucket needs `s3:ListBucket`). So asking
+for a missing key proves nothing either way: only a refusal for an object that exists
+shows the role cannot read. The probe lists one key and reads that; the isolation tests
+(which run first) leave one fixture object in each test tenant's bucket. A 404 still
+fails the check, as does a bucket with nothing in it.
+
 Nothing is written: each write attempted here must be refused.
 """
 
@@ -55,10 +63,16 @@ class Check:
         return self.outcome == self.expected
 
 
+class NothingToRead(Exception):
+    """The bucket holds no object, so a refused read cannot be shown."""
+
+
 def attempt(call: Callable[[], object]) -> str:
     """`allowed`, `denied`, or `error:<code>` for anything that is neither."""
     try:
         call()
+    except NothingToRead:
+        return "error:NoObjectToRead"
     except ClientError as exc:
         code = str(exc.response.get("Error", {}).get("Code", ""))
         return DENIED if code in DENIED_CODES else f"error:{code}"
@@ -90,6 +104,26 @@ class Probe:
             "s3vectors", region_name=region, config=CLIENT_CONFIG
         )
         self._kms: KMSClient = kms or boto3.client("kms", region_name=region, config=CLIENT_CONFIG)
+        # One existing key per bucket, found by listing.
+        self._existing: dict[str, str | None] = {}
+
+    def _existing_key(self, bucket: str) -> str:
+        """The key of an object in the bucket. The role may list keys; it must not read."""
+        if bucket not in self._existing:
+            found: str | None = None
+            try:
+                page = self._s3.list_objects_v2(Bucket=bucket, MaxKeys=1)
+                contents = page.get("Contents") or []
+                found = contents[0]["Key"] if contents else None
+            except ClientError, BotoCoreError:
+                # A failed listing must not pass for a refused read. "list object keys"
+                # reports the listing itself.
+                found = None
+            self._existing[bucket] = found
+        key = self._existing[bucket]
+        if key is None:
+            raise NothingToRead(bucket)
+        return key
 
     def checks(self, tenant_id: uuid.UUID) -> list[tuple[str, str, Callable[[], object]]]:
         """(what, expected outcome, the call) for one tenant."""
@@ -113,16 +147,22 @@ class Probe:
                 ALLOWED,
                 lambda: vectors.get_index(vectorBucketName=vector_bucket, indexName=index),
             ),
-            # Objects.
+            # Objects. Listing keys is the one thing the role can do here (accepted: keys
+            # hold IDs only); reading is tried on an object that exists.
             (
-                "read an object",
-                DENIED,
-                lambda: s3.get_object(Bucket=bucket, Key=keys.original_key(uuid.uuid4())),
+                "list object keys",
+                ALLOWED,
+                lambda: s3.list_objects_v2(Bucket=bucket, MaxKeys=1),
             ),
             (
-                "read an object's metadata",
+                "read an object that exists",
                 DENIED,
-                lambda: s3.head_object(Bucket=bucket, Key=keys.text_key(uuid.uuid4())),
+                lambda: s3.get_object(Bucket=bucket, Key=self._existing_key(bucket)),
+            ),
+            (
+                "read the metadata of an object that exists",
+                DENIED,
+                lambda: s3.head_object(Bucket=bucket, Key=self._existing_key(bucket)),
             ),
             (
                 "list object versions",
