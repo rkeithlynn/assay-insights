@@ -31,8 +31,9 @@ change. Where this file and the spec differ, the spec wins.
 | --- | --- |
 | 1. Repo scaffold, CI checks, Pulumi project, DNS zone and certificate | **Complete** (2026-11-23) |
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
-| 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Built** on `build-step-3`; waiting for the owner's `pulumi up` and post-deploy checks |
-| 4–9 | Not started |
+| 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
+| 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | Next. Not started |
+| 5–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
 
@@ -56,6 +57,25 @@ Step 2 was verified on 2026-11-23:
   Windows Credential Manager, the RDS CA bundle made readable by Lambda's non-root user,
   and a bootstrap that works under Aurora's non-superuser master user.
 - CI on the `build-step-2` pull request must pass before `main` is fast-forwarded.
+
+Step 3 was verified on 2026-11-23:
+
+- Both user pools exist on the Essentials plan (tenant `us-east-1_qPZSlzN6i`, MFA optional;
+  platform `us-east-1_lXRGqH8C7`, MFA on), each with its groups, app client and managed
+  login v2 domain (`assay-dev-tenant`, `assay-dev-admin`, both `ACTIVE`). Each client
+  has its branding (form logo and SVG favicon); the owner checks the look in a browser.
+- The API runs on Fargate as task definition revision 2 (image `src-26064c7b61b2a28e`),
+  rollout `COMPLETED`, and its target behind the internal ALB is `healthy`.
+- `uv run scripts/migrate.py --command verify` reported revision `0002`,
+  `rls_verified: true` and `roles_verified: true`.
+- `pulumi preview` on the `dev` stack shows 111 unchanged.
+- Fixes found during deployment, all on `build-step-3`: no custom invitation template
+  (the provider sent an empty SMS message), a 3.71:1 login logo with the branding checked
+  before deploy, and the task's container definition written as ECS stores it, with an
+  empty JWKS refused.
+- Not yet tested in AWS: `GET /me` end to end, which needs CloudFront and seeded users
+  (step 5), and whether a real access token's `amr` shows MFA.
+- CI on the `build-step-3` pull request must pass before `main` is fast-forwarded.
 
 ## Fixed facts (BUILD_SPEC.md section 2)
 
