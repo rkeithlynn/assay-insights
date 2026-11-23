@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -35,6 +36,61 @@ BREAK_GLASS_PRINCIPAL = f"arn:aws:iam::{ACCOUNT_ID}:role/aws-reserved/sso.amazon
 TAGS = {"app": "assay-insights", "env": "dev"}
 ROLE = f"arn:aws:iam::{ACCOUNT_ID}:role"
 ALARM_EMAIL = "alarms@example.test"
+PLATFORM_KEYS = [
+    f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/database",
+    f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/state",
+]
+
+
+def _resolve(value: str, request: dict[str, Any]) -> str | None:
+    """A condition value, with a `${key}` policy variable replaced from the request."""
+    if value.startswith("${") and value.endswith("}"):
+        found = request.get(value[2:-1])
+        return None if found is None else str(found)
+    return value
+
+
+def conditions_hold(condition: dict[str, dict[str, Any]], request: dict[str, Any]) -> bool:
+    """Evaluate the condition operators the provisioning role's policy uses, as IAM does."""
+    for operator, tests in condition.items():
+        for key, expected in tests.items():
+            present = key in request
+            if operator == "Null":
+                holds = (not present) == (expected == "true")
+            elif operator == "ForAllValues:StringEquals":
+                holds = set(as_list(request.get(key, []))) <= set(as_list(expected))
+            elif operator == "ForAnyValue:StringEquals":
+                holds = bool(set(as_list(request.get(key, []))) & set(as_list(expected)))
+            elif operator == "StringEquals":
+                wanted = {_resolve(v, request) for v in as_list(expected)}
+                holds = present and str(request[key]) in wanted
+            elif operator == "StringNotEquals":
+                # A negated operator matches when the key, or the variable, has no value.
+                wanted = {_resolve(v, request) for v in as_list(expected)}
+                holds = not present or str(request[key]) not in wanted
+            else:
+                raise AssertionError(f"operator {operator} is not handled by this test")
+            if not holds:
+                return False
+    return True
+
+
+def decide(policy: dict[str, Any], action: str, resource: str, request: dict[str, Any]) -> str:
+    """IAM's decision for one request against one identity policy."""
+    decision = "implicitDeny"
+    for statement in policy["Statement"]:
+        actions = as_list(statement["Action"])
+        if not any(fnmatch.fnmatchcase(action, pattern) for pattern in actions):
+            continue
+        resources = as_list(statement["Resource"])
+        if not any(fnmatch.fnmatchcase(resource, pattern) for pattern in resources):
+            continue
+        if not conditions_hold(statement.get("Condition", {}), request):
+            continue
+        if statement["Effect"] == "Deny":
+            return "explicitDeny"
+        decision = "allowed"
+    return decision
 
 
 def as_list(value: Any) -> list[Any]:
@@ -105,6 +161,7 @@ class Stack:
             storage=self.storage,
             vector_dimensions=1024,
             default_tags=TAGS,
+            platform_key_arns=[self.database.key.arn, self.alerts.key.arn],
             alarm_topic_arn=self.alerts.topic.arn,
         )
         self.runner: IsolationRunner | None = None
@@ -195,7 +252,8 @@ def provisioning_policy() -> dict[str, Any]:
             region=REGION,
             account_id=ACCOUNT_ID,
             name_prefix=PREFIX,
-            platform_tag="app",
+            tag_keys=["app", "env", "tenant_id"],
+            platform_keys=PLATFORM_KEYS,
             state_bucket="arn:aws:s3:::state-bucket",
             state_key=f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/state",
             scan_role=f"{ROLE}/scan",
@@ -208,10 +266,13 @@ def provisioning_policy() -> dict[str, Any]:
 
 # The only statements without a resource to scope to, and why each is safe.
 UNSCOPED = {
-    "CreateTenantKeys": "conditions on the request and resource tags",
+    "CreateTenantKeys": "only a key created with a tenant_id tag",
     "ListForTheProvider": "list actions only",
     "CreateMalwareProtectionPlans": "a plan has no ARN before it exists",
 }
+# AWS KMS requires the permission to tag a key at creation "in an IAM policy that isn't
+# restricted to particular KMS keys". An explicit deny keeps it off the platform's keys.
+ANY_KEY = f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/*"
 
 
 def test_provisioning_role_is_scoped_to_tenant_resources_and_the_state_bucket() -> None:
@@ -222,6 +283,9 @@ def test_provisioning_role_is_scoped_to_tenant_resources_and_the_state_bucket() 
         resources = as_list(statement["Resource"])
         if "*" in resources:
             assert statement["Sid"] in UNSCOPED, statement["Sid"]
+            continue
+        if resources == [ANY_KEY]:
+            assert statement["Sid"] == "TagKeysWhenCreatingThem"
             continue
         for resource in resources:
             scoped = (
@@ -273,13 +337,276 @@ def test_provisioning_role_cannot_decrypt_with_a_tenant_key() -> None:
     assert deny["Condition"] == {"Null": {"aws:ResourceTag/tenant_id": "false"}}
 
 
-def test_provisioning_role_tags_only_new_tenant_keys() -> None:
-    """It can create a key tagged with a tenant ID, and cannot tag a platform key."""
+def test_provisioning_role_creates_only_keys_tagged_for_a_tenant() -> None:
     create = by_sid(provisioning_policy(), "CreateTenantKeys")
-    assert set(create["Action"]) == {"kms:CreateKey", "kms:TagResource"}
-    assert create["Condition"] == {
-        "Null": {"aws:RequestTag/tenant_id": "false", "aws:ResourceTag/app": "true"}
+    assert create["Action"] == "kms:CreateKey"
+    assert create["Condition"] == {"Null": {"aws:RequestTag/tenant_id": "false"}}
+
+
+def test_tagging_a_key_at_creation_does_not_depend_on_request_or_resource_tags() -> None:
+    """Regression: the first real provisioning run failed here (2026-11-23).
+
+    The role could create a key but was refused `kms:TagResource` for the tags sent with
+    CreateKey, because that grant was conditioned on `aws:RequestTag` and `aws:ResourceTag`.
+    AWS KMS requires the permission "in an IAM policy that isn't restricted to particular
+    KMS keys". So the grant is on every key and conditioned only on the request's tag keys.
+    """
+    policy = provisioning_policy()
+    taggers = [
+        s
+        for s in policy["Statement"]
+        if s["Effect"] == "Allow" and "kms:TagResource" in as_list(s["Action"])
+    ]
+    [grant] = taggers
+    assert grant["Sid"] == "TagKeysWhenCreatingThem"
+    assert grant["Action"] == "kms:TagResource"
+    assert grant["Resource"] == ANY_KEY
+    assert grant["Condition"] == {
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["app", "env", "tenant_id"]}
     }
+    assert "aws:RequestTag" not in json.dumps(grant)
+    assert "aws:ResourceTag" not in json.dumps(grant)
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        # Whichever tag keys KMS puts in the request context when a key is created with
+        # tags, the grant must hold. The failed policy held in none of these.
+        {},
+        {"aws:RequestTag/tenant_id": "t", "aws:RequestTag/app": "a", "aws:RequestTag/env": "e"},
+        {"aws:ResourceTag/tenant_id": "t", "aws:ResourceTag/app": "a", "aws:ResourceTag/env": "e"},
+        {
+            "aws:RequestTag/tenant_id": "t",
+            "aws:RequestTag/app": "a",
+            "aws:ResourceTag/tenant_id": "t",
+            "aws:ResourceTag/app": "a",
+        },
+    ],
+)
+def test_tag_grant_holds_in_every_creation_context(context: dict[str, str]) -> None:
+    grant = by_sid(provisioning_policy(), "TagKeysWhenCreatingThem")
+    request = {**context, "aws:TagKeys": ["app", "env", "tenant_id"]}
+    assert conditions_hold(grant["Condition"], request)
+    # A tag key the tenant stack never sets is still refused.
+    assert not conditions_hold(grant["Condition"], {**request, "aws:TagKeys": ["owner"]})
+
+
+def test_tag_grant_covers_exactly_the_tags_a_tenant_key_is_created_with() -> None:
+    """The provider's default tags plus tenant_id (assay_tss.provision.program)."""
+    grant = by_sid(provisioning_policy(), "TagKeysWhenCreatingThem")
+    allowed = grant["Condition"]["ForAllValues:StringEquals"]["aws:TagKeys"]
+    assert set(allowed) == {*TAGS, policies.TENANT_TAG}
+
+
+def test_provisioning_role_never_tags_a_platform_key() -> None:
+    policy = provisioning_policy()
+    deny = by_sid(policy, "NeverTagPlatformKeys")
+    assert deny["Effect"] == "Deny" and "Condition" not in deny
+    assert set(deny["Action"]) == {"kms:TagResource", "kms:UntagResource"}
+    assert deny["Resource"] == sorted(PLATFORM_KEYS)
+    # And nothing in IAM lets it untag any key; a tenant key's own policy does that.
+    untaggers = [
+        s["Sid"]
+        for s in policy["Statement"]
+        if s["Effect"] == "Allow" and "kms:UntagResource" in as_list(s["Action"])
+    ]
+    assert untaggers == []
+
+
+# --- tenant_id on a KMS key is write-once -------------------------------------------------
+
+TENANT_KEY = f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/11111111-1111-4111-8111-111111111111"
+TENANT_A_ID = "aaaaaaaa-0000-4000-8000-000000000001"
+TENANT_B_ID = "bbbbbbbb-0000-4000-8000-000000000002"
+NEW_KEY_TAGS = {"app": "assay-insights", "env": "dev", "tenant_id": TENANT_A_ID}
+
+
+def request_tags(**tags: str) -> dict[str, Any]:
+    return {f"aws:RequestTag/{key}": value for key, value in tags.items()}
+
+
+def resource_tags(**tags: str) -> dict[str, Any]:
+    return {f"aws:ResourceTag/{key}": value for key, value in tags.items()}
+
+
+def tag_request(*keys: str, **context: Any) -> dict[str, Any]:
+    return {"aws:TagKeys": list(keys), **context}
+
+
+EXISTING_TENANT_KEY = resource_tags(**NEW_KEY_TAGS)
+# What KMS might put in the request context for the tags sent with CreateKey. Which of
+# these it is has not been observed; the policy must allow all four.
+CREATION_CONTEXTS = {
+    "tag keys only": {},
+    "request tags": request_tags(**NEW_KEY_TAGS),
+    "new tags shown as resource tags": resource_tags(**NEW_KEY_TAGS),
+    "request and resource tags": {**request_tags(**NEW_KEY_TAGS), **resource_tags(**NEW_KEY_TAGS)},
+}
+
+
+def test_write_once_statements_are_as_designed() -> None:
+    policy = provisioning_policy()
+    change = by_sid(policy, "TenantIdTagNeverChanges")
+    assert (change["Effect"], change["Action"], change["Resource"]) == (
+        "Deny",
+        "kms:TagResource",
+        ANY_KEY,
+    )
+    # All three must hold: the key has a tenant_id, the request sets one, and they differ.
+    assert change["Condition"] == {
+        "Null": {"aws:ResourceTag/tenant_id": "false", "aws:RequestTag/tenant_id": "false"},
+        "StringNotEquals": {"aws:RequestTag/tenant_id": "${aws:ResourceTag/tenant_id}"},
+    }
+    remove = by_sid(policy, "TenantIdTagIsNeverRemoved")
+    assert (remove["Effect"], remove["Action"], remove["Resource"]) == (
+        "Deny",
+        "kms:UntagResource",
+        ANY_KEY,
+    )
+    assert remove["Condition"] == {"ForAnyValue:StringEquals": {"aws:TagKeys": ["tenant_id"]}}
+
+
+@pytest.mark.parametrize("name", list(CREATION_CONTEXTS))
+def test_creating_a_tenant_key_with_its_tags_is_allowed_in_every_context(name: str) -> None:
+    """The write-once deny must never apply while a key is being created.
+
+    A deny on "the key has a tenant_id and the request touches tenant_id" would refuse
+    creation in the two contexts where the new key's tags appear as resource tags.
+    """
+    policy = provisioning_policy()
+    context = CREATION_CONTEXTS[name]
+    tagging = tag_request("app", "env", "tenant_id", **context)
+    assert decide(policy, "kms:TagResource", TENANT_KEY, tagging) == "allowed"
+    creating = tag_request("app", "env", "tenant_id", **request_tags(**NEW_KEY_TAGS))
+    assert decide(policy, "kms:CreateKey", "*", creating) == "allowed"
+
+
+@pytest.mark.parametrize(
+    ("what", "action", "context", "expected"),
+    [
+        (
+            "change tenant_id on an existing tenant key",
+            "kms:TagResource",
+            tag_request("tenant_id", **request_tags(tenant_id=TENANT_B_ID), **EXISTING_TENANT_KEY),
+            "explicitDeny",
+        ),
+        (
+            "change tenant_id together with app",
+            "kms:TagResource",
+            tag_request(
+                "app",
+                "tenant_id",
+                **request_tags(app="x", tenant_id=TENANT_B_ID),
+                **EXISTING_TENANT_KEY,
+            ),
+            "explicitDeny",
+        ),
+        (
+            "set tenant_id to the value it already has",
+            "kms:TagResource",
+            tag_request("tenant_id", **request_tags(tenant_id=TENANT_A_ID), **EXISTING_TENANT_KEY),
+            "allowed",
+        ),
+        (
+            "untag tenant_id",
+            "kms:UntagResource",
+            tag_request("tenant_id", **EXISTING_TENANT_KEY),
+            "explicitDeny",
+        ),
+        (
+            "untag tenant_id together with app",
+            "kms:UntagResource",
+            tag_request("app", "tenant_id", **EXISTING_TENANT_KEY),
+            "explicitDeny",
+        ),
+        (
+            "change app on a tenant key",
+            "kms:TagResource",
+            tag_request("app", **request_tags(app="renamed"), **EXISTING_TENANT_KEY),
+            "allowed",
+        ),
+        (
+            "change env on a tenant key",
+            "kms:TagResource",
+            tag_request("env", **request_tags(env="prod"), **EXISTING_TENANT_KEY),
+            "allowed",
+        ),
+        (
+            # IAM says nothing here; a tenant key's own policy lets this role untag app or env.
+            "untag app from a tenant key",
+            "kms:UntagResource",
+            tag_request("app", **EXISTING_TENANT_KEY),
+            "implicitDeny",
+        ),
+        (
+            "add any other tag key",
+            "kms:TagResource",
+            tag_request("owner", **request_tags(owner="x"), **EXISTING_TENANT_KEY),
+            "implicitDeny",
+        ),
+        (
+            "create a key with no tenant_id tag",
+            "kms:CreateKey",
+            tag_request("app", "env", **request_tags(app="x", env="y")),
+            "implicitDeny",
+        ),
+    ],
+)
+def test_tenant_id_on_a_key_is_write_once(
+    what: str, action: str, context: dict[str, Any], expected: str
+) -> None:
+    resource = "*" if action == "kms:CreateKey" else TENANT_KEY
+    assert decide(provisioning_policy(), action, resource, context) == expected, what
+
+
+@pytest.mark.parametrize("key", PLATFORM_KEYS)
+def test_platform_keys_cannot_be_tagged_or_untagged_at_all(key: str) -> None:
+    policy = provisioning_policy()
+    on_platform = resource_tags(app="assay-insights", env="dev")
+    for action, request in (
+        ("kms:TagResource", tag_request("tenant_id", **request_tags(tenant_id=TENANT_A_ID))),
+        ("kms:TagResource", tag_request("app", **request_tags(app="x"))),
+        ("kms:UntagResource", tag_request("app")),
+        ("kms:UntagResource", tag_request("tenant_id")),
+    ):
+        assert decide(policy, action, key, {**request, **on_platform}) == "explicitDeny"
+
+
+def test_provisioning_policy_needs_the_platform_keys() -> None:
+    with pytest.raises(ValueError, match="platform_keys"):
+        provisioning.provisioning_role_policy(
+            region=REGION,
+            account_id=ACCOUNT_ID,
+            name_prefix=PREFIX,
+            tag_keys=["app", "env", "tenant_id"],
+            platform_keys=[],
+            state_bucket="arn:aws:s3:::state-bucket",
+            state_key=f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/state",
+            scan_role=f"{ROLE}/scan",
+            invite_function="arn:fn",
+            db_user="arn:dbuser",
+        )
+
+
+@pulumi.runtime.test
+def test_every_platform_key_is_on_the_provisioning_roles_deny_list() -> Any:
+    stack = Stack("k1")
+
+    def check(_: list[Any]) -> None:
+        keys = sorted(
+            f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/{name}-key-id"
+            for name, _ in registered("aws:kms/key:Key", "k1-")
+        )
+        assert len(keys) == 3  # database, alarm topic, tenant stack state
+        policy = _one("aws:iam/rolePolicy:RolePolicy", "k1-provision-task-policy")["policy"]
+        assert by_sid(policy, "NeverTagPlatformKeys")["Resource"] == keys
+        allowed = by_sid(policy, "TagKeysWhenCreatingThem")["Condition"]
+        assert allowed == {
+            "ForAllValues:StringEquals": {"aws:TagKeys": ["app", "env", "tenant_id"]}
+        }
+
+    return stack.ready().apply(check)
 
 
 def test_provisioning_role_passes_only_the_scan_role_and_only_to_guardduty() -> None:

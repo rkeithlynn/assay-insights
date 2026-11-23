@@ -22,7 +22,7 @@ What is here:
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pulumi
@@ -186,25 +186,39 @@ def provisioning_role_policy(
     region: str,
     account_id: str,
     name_prefix: str,
-    platform_tag: str,
+    tag_keys: Sequence[str],
+    platform_keys: Sequence[str],
     state_bucket: str,
     state_key: str,
     scan_role: str,
     invite_function: str,
     db_user: str,
 ) -> str:
-    """Everything the provisioning task may do, and two things it never may.
+    """Everything the provisioning task may do, and what it never may.
 
-    `platform_tag` is a tag key every platform resource carries (a provider default tag).
-    Creating a key is allowed only for a request that sets `tenant_id` and names no
-    resource that already has `platform_tag`, so the role can tag a new tenant key but
-    cannot put a `tenant_id` tag on a platform key. After creation, the tenant key's own
-    policy is what lets this role administer it.
+    Tagging a key in the request that creates it is the one KMS permission that has to
+    come from this policy rather than the key's own. AWS KMS requires it "in an IAM policy
+    that isn't restricted to particular KMS keys", so the grant is on every key in the
+    account and may be conditioned only on the tag keys in the request (`tag_keys`: the
+    provider's default tags and `tenant_id`). Conditions on `aws:RequestTag` or
+    `aws:ResourceTag` are not met at creation: the first provisioning run failed on one.
+
+    What keeps the role away from the platform's own keys is therefore an explicit deny
+    that names them (`platform_keys`). After creation, a tenant key's own policy is what
+    lets this role administer and tag it.
+
+    `tenant_id` on a key is write-once (the tenant role's policy finds a key by it): the
+    role is denied changing its value on a key that has one, and denied removing it from
+    any key. It may still change the other tags.
     """
+    if not platform_keys:
+        raise ValueError("platform_keys must name every KMS key the platform stack creates")
     pattern = tenant_pattern(name_prefix)
     bucket = f"arn:aws:s3:::{pattern}"
     vector_bucket = f"arn:aws:s3vectors:{region}:{account_id}:bucket/{pattern}"
     tenant_tag = f"aws:ResourceTag/{policies.TENANT_TAG}"
+    tenant_request_tag = f"aws:RequestTag/{policies.TENANT_TAG}"
+    any_key = f"arn:aws:kms:{region}:{account_id}:key/*"
     return _json(
         {
             "Version": "2012-10-17",
@@ -234,15 +248,48 @@ def provisioning_role_policy(
                     "Resource": bucket,
                 },
                 {
+                    # Only keys created with a tenant_id tag.
                     "Sid": "CreateTenantKeys",
                     "Effect": "Allow",
-                    "Action": ["kms:CreateKey", "kms:TagResource"],
+                    "Action": "kms:CreateKey",
                     "Resource": "*",
+                    "Condition": {"Null": {f"aws:RequestTag/{policies.TENANT_TAG}": "false"}},
+                },
+                {
+                    # Tags sent with CreateKey. See the docstring for why it is this broad.
+                    "Sid": "TagKeysWhenCreatingThem",
+                    "Effect": "Allow",
+                    "Action": "kms:TagResource",
+                    "Resource": f"arn:aws:kms:{region}:{account_id}:key/*",
+                    "Condition": {"ForAllValues:StringEquals": {"aws:TagKeys": sorted(tag_keys)}},
+                },
+                {
+                    "Sid": "NeverTagPlatformKeys",
+                    "Effect": "Deny",
+                    "Action": ["kms:TagResource", "kms:UntagResource"],
+                    "Resource": sorted(platform_keys),
+                },
+                {
+                    # Write-once: a key that has a tenant_id keeps that value. The deny needs
+                    # the tag on the key, the tag in the request, and the two to differ, so it
+                    # cannot apply while a key is being created, whichever tags KMS puts in
+                    # the request context at that moment.
+                    "Sid": "TenantIdTagNeverChanges",
+                    "Effect": "Deny",
+                    "Action": "kms:TagResource",
+                    "Resource": any_key,
                     "Condition": {
-                        "Null": {
-                            f"aws:RequestTag/{policies.TENANT_TAG}": "false",
-                            f"aws:ResourceTag/{platform_tag}": "true",
-                        }
+                        "Null": {tenant_tag: "false", tenant_request_tag: "false"},
+                        "StringNotEquals": {tenant_request_tag: "${" + tenant_tag + "}"},
+                    },
+                },
+                {
+                    "Sid": "TenantIdTagIsNeverRemoved",
+                    "Effect": "Deny",
+                    "Action": "kms:UntagResource",
+                    "Resource": any_key,
+                    "Condition": {
+                        "ForAnyValue:StringEquals": {"aws:TagKeys": [policies.TENANT_TAG]}
                     },
                 },
                 {
@@ -716,6 +763,9 @@ class Provisioning(pulumi.ComponentResource):
         storage: TenantStorage,
         vector_dimensions: int,
         default_tags: Mapping[str, str],
+        # Every other KMS key the platform stack creates. The provisioning role is denied
+        # tagging them (and the state key, which this component adds itself).
+        platform_key_arns: Sequence[pulumi.Input[str]],
         # The SNS topic alarms notify (assay_infra.alerts).
         alarm_topic_arn: pulumi.Input[str],
         aws_profile: str | None = None,
@@ -725,8 +775,9 @@ class Provisioning(pulumi.ComponentResource):
         child = pulumi.ResourceOptions(parent=self)
         protected = pulumi.ResourceOptions(parent=self, protect=True)
         account = pulumi.Output.from_input(account_id)
-        # A tag key every platform resource carries; see provisioning_role_policy.
-        platform_tag = sorted(default_tags)[0]
+        # Every tag key a tenant key is created with: the provider's default tags and the
+        # tenant ID (assay_tss.provision.program).
+        tenant_key_tag_keys = sorted({*default_tags, policies.TENANT_TAG})
 
         # --- Roles (policies come later; the key and bucket policies need the ARNs) -------
         ecs_trust = account.apply(lambda acct: _ecs_tasks_trust(acct, region))
@@ -913,6 +964,7 @@ class Provisioning(pulumi.ComponentResource):
             role=self.task_role.id,
             policy=pulumi.Output.all(
                 account_id=account,
+                platform_keys=pulumi.Output.all(self.state_key.arn, *platform_key_arns),
                 state_bucket=self.state_bucket.arn,
                 state_key=self.state_key.arn,
                 scan_role=self.scan_role.arn,
@@ -922,7 +974,7 @@ class Provisioning(pulumi.ComponentResource):
                 ),
             ).apply(
                 lambda a: provisioning_role_policy(
-                    region=region, name_prefix=name_prefix, platform_tag=platform_tag, **a
+                    region=region, name_prefix=name_prefix, tag_keys=tenant_key_tag_keys, **a
                 )
             ),
             opts=child,

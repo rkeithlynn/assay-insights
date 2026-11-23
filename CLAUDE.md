@@ -89,6 +89,11 @@ has done all of this, in order, and each has succeeded:
    that the provisioning image carries the corrected tenant program.
 2. `uv run scripts/add_tenant.py` twice, for the fixture tenants "Isolation Test A" and
    "Isolation Test B". Each must end `SUCCEEDED`, and each admin must get an invitation.
+   **In progress:** "Isolation Test A" is tenant `cfd08356-aac4-4dfe-a3f5-32a2f3294c4e`.
+   Its first run failed at `storage` (key tagging; see the step 4 notes), leaving an empty
+   bucket and face collection in its stack. After a `pulumi up` with the fixed role
+   policy, continue it with `uv run scripts/add_tenant.py --retry <that ID>`; do not add
+   it again under a new ID.
 3. `uv run scripts/run_isolation.py` with the two tenant IDs: every test passes.
 4. `pulumi preview` shows no changes.
 
@@ -554,20 +559,64 @@ assets/     Logo and favicon SVGs
   (`StorageContext.inbox_key(batch_id, file_id)`) and keep `file_name` only in the
   database. Pair companion files and stipulations with their PDF by the names in the
   database, not by listing keys. BUILD_SPEC.md section 6 has the layout.
-- **Unverified until the first real provisioning run.** Each of these is an assumption the
-  first `add_tenant.py` run tests. If one is wrong, provisioning fails at the `storage`
-  step with the reason in `audit_log`:
+- **Tagging a KMS key in the request that creates it needs `kms:TagResource` in an IAM
+  policy "that isn't restricted to particular KMS keys"** (AWS KMS guide, "Control access
+  to tags"). The first provisioning run (2026-11-23, tenant `cfd08356-…`) failed at the
+  `storage` step on exactly this: the grant was conditioned on `aws:RequestTag` and
+  `aws:ResourceTag`, and KMS refused `kms:TagResource` during `CreateKey`. Now:
+  - `kms:CreateKey` is allowed only with a `tenant_id` tag in the request;
+  - `kms:TagResource` is allowed on every key in the account, conditioned only on the
+    request's tag keys (`aws:TagKeys`: the default tags and `tenant_id`), which is the
+    form AWS documents for tagging at creation;
+  - an explicit deny names every KMS key the platform stack creates, so the role cannot
+    tag or untag them. **A new platform KMS key must be added to `platform_key_arns` in
+    `infra/__main__.py`.** A key in this account that the stack does not create, and whose
+    policy trusts IAM, is not covered: the role could add one of those three tags to it,
+    which gives it no access to anything.
+  After creation a tenant key's own policy is what lets the role administer and tag it.
+- **`tenant_id` on a KMS key is write-once** (owner decision, 2026-11-23). The tenant
+  role's policy finds a key by this tag, so once set it never changes. The provisioning
+  role's policy has two explicit denies, which override the tenant key's own policy:
+  - `TenantIdTagNeverChanges`: `kms:TagResource` is denied when the key has a `tenant_id`,
+    the request sets `tenant_id`, and the two values differ.
+  - `TenantIdTagIsNeverRemoved`: `kms:UntagResource` is denied whenever the request names
+    `tenant_id`.
+  Setting `tenant_id` to the value it already has is allowed (it changes nothing), and
+  the role may still change `app` and `env` on a tenant key, so a change to the stack's
+  default tags can be rolled out. No other tag key can be added. Every other principal is
+  refused all tagging by the tenant key's own policy.
+  - **Why the tag deny compares values** instead of denying any request that touches
+    `tenant_id` on a tagged key: it is not known whether KMS shows a new key's tags as
+    resource tags while the key is being created (the failed run is consistent with it).
+    If it does, the simpler rule refuses creation; the simulator shows that in two of the
+    four possible contexts. Comparing values gives the same guarantee and cannot apply
+    during creation. Do not "simplify" it.
+  - `test_infra_tenancy.py` evaluates the policy for creation in all four contexts and for
+    each change, and `aws iam simulate-custom-policy` agreed on 24 cases.
+- **Check an IAM policy's logic with the policy simulator before a deploy:**
+  `aws iam simulate-custom-policy` is read-only. It evaluates the policy in IAM's own
+  engine, but it cannot say which condition keys a service supplies; only the service's
+  documentation or a real run can.
+- **`audit_log` cannot be read from outside the VPC before step 5** (the audit page). Until
+  then a failed provisioning step is read from the task's log group
+  (`/aws/ecs/assay-dev-provision`), which records the same step and reason.
+- **Unverified until a provisioning run gets past them.** Each of these is an assumption a
+  real `add_tenant.py` run tests. If one is wrong, provisioning fails at the `storage`
+  step with the reason in the task's log and in `audit_log`:
   1. GuardDuty accepts the scan role's trust policy with the `aws:SourceAccount` condition
      (AWS's documented trust policy has no condition).
   2. S3 Vectors needs only `kms:GenerateDataKey` of the provisioning role to create the
      vector bucket and index (documented for the bucket, not stated for the index).
-  3. `s3:CreateBucket` passes the S3 gateway endpoint's `aws:ResourceAccount` condition.
-  4. `kms:CreateKey` with tags passes the `CreateTenantKeys` conditions
-     (`aws:RequestTag/tenant_id` present, `aws:ResourceTag/app` absent).
-  5. `guardduty:CreateMalwareProtectionPlan` needs nothing beyond that action and
+  3. `guardduty:CreateMalwareProtectionPlan` needs nothing beyond that action and
      `iam:PassRole`.
-  6. S3 Vectors accepts the vector bucket policy's `Principal: "*"` and `Condition`
+  4. S3 Vectors accepts the vector bucket policy's `Principal: "*"` and `Condition`
      elements. If it rejects them, tell the owner before changing the policy: admitting
      only two roles cannot be written without one of them.
+  5. `kms:CreateKey` passes with `aws:RequestTag/tenant_id` as its only condition. The
+     failed run's error named `kms:TagResource`, not `kms:CreateKey`, which suggests it
+     does, but the key was not created.
+  Settled by the first run: `s3:CreateBucket` passes the S3 gateway endpoint's policy,
+  the Rekognition collection is created, and the task definition's container definition
+  round-trips with no preview difference.
   `run_isolation.py` then checks the result: a principal whose IAM policy allows it is
   still refused when it lists a tenant's vectors.

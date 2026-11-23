@@ -114,6 +114,9 @@ provisioning = Provisioning(
     storage=storage,
     vector_dimensions=config.tenancy.vector_dimensions,
     default_tags=config.tenancy.default_tags,
+    # Every KMS key this program creates outside the provisioning component. Add a new
+    # one here: the provisioning role is denied tagging the keys in this list.
+    platform_key_arns=[database.key.arn, alerts.key.arn],
     alarm_topic_arn=alerts.topic.arn,
     aws_profile=aws_profile,
 )
