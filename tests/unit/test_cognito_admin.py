@@ -298,6 +298,7 @@ class PoolsFake:
             "UserAttributes": user["attributes"],
             "UserStatus": user["status"],
             "Enabled": user["enabled"],
+            "UserMFASettingList": ["SOFTWARE_TOKEN_MFA"] if user["totp"] else [],
         }
 
     def admin_list_groups_for_user(self, **kwargs: Any) -> dict[str, Any]:
@@ -346,7 +347,8 @@ def pools(monkeypatch: pytest.MonkeyPatch) -> PoolsFake:
     monkeypatch.setenv("TENANT_POOL_ID", POOL)
     monkeypatch.setenv("PLATFORM_POOL_ID", PLATFORM_POOL)
     monkeypatch.setenv(
-        "OPERATIONS", "invite,resend_invite,reset_password,disable,enable,set_role,reset_mfa"
+        "OPERATIONS",
+        "invite,resend_invite,reset_password,disable,enable,set_role,reset_mfa,mfa_status",
     )
     return fake
 
@@ -361,7 +363,7 @@ def target(email: str = "ada@example.test", **changes: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    "operation", ["disable", "enable", "reset_password", "reset_mfa", "set_role"]
+    "operation", ["disable", "enable", "reset_password", "reset_mfa", "set_role", "mfa_status"]
 )
 @pytest.mark.parametrize(
     "event",
@@ -413,6 +415,24 @@ def test_reset_mfa_deletes_the_authenticator_and_signs_out(pools: PoolsFake) -> 
     assert pools.names() == ["admin_delete_software_token", "admin_user_global_sign_out"]
     # Again, with no authenticator left: still signs out.
     assert cognito_admin.handler({"operation": "reset_mfa", **target()}, None)["had_totp"] is False
+
+
+def test_mfa_status_only_reads(pools: PoolsFake) -> None:
+    assert cognito_admin.handler({"operation": "mfa_status", **target()}, None) == {"totp": True}
+    pools.users[(POOL, "ada@example.test")]["totp"] = False
+    assert cognito_admin.handler({"operation": "mfa_status", **target()}, None) == {"totp": False}
+    # admin_get_user and admin_list_groups_for_user only: nothing that changes the user.
+    assert pools.calls == []
+
+
+def test_mfa_status_is_for_the_tenant_pool_only(pools: PoolsFake) -> None:
+    event = {
+        "operation": "mfa_status",
+        "pool": "platform",
+        "email": "muser@example.test",
+        "sub": "sub-muser@example.test",
+    }
+    assert cognito_admin.handler(event, None) == {"error": "operation_not_allowed"}
 
 
 def test_resend_only_for_invited_and_reset_password_only_for_confirmed(pools: PoolsFake) -> None:

@@ -4,7 +4,9 @@
  * case, so the portal does: it shows nothing else until MFA is on. The QR code is drawn
  * in the browser; the secret goes nowhere but Cognito and the user's authenticator app.
  *
- * Once verified, the user signs in again: the new session's token says MFA was used.
+ * Once verified, the portal reports it (`POST /api/auth/mfa-enabled`); the API records it only
+ * if Cognito confirms TOTP is on. A failed report never holds the user up. Then the user signs
+ * in again: the new session's token says MFA was used.
  */
 
 import Alert from "@cloudscape-design/components/alert";
@@ -32,7 +34,7 @@ export function qrDataUrl(text: string): string {
 }
 
 export function MfaSetup() {
-  const { pool, token, me, signOut } = useSession();
+  const { pool, token, me, signOut, api } = useSession();
   const [secret, setSecret] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -62,13 +64,14 @@ export function MfaSetup() {
     setError(null);
     try {
       await verifySoftwareToken(pool.region, accessToken, code.trim());
+      await api.POST("/api/auth/mfa-enabled").catch(() => undefined);
       setDone(true);
     } catch (caught) {
       setError(cognitoMessage(caught));
     } finally {
       setBusy(false);
     }
-  }, [code, pool.region, token]);
+  }, [api, code, pool.region, token]);
 
   return (
     <Box padding={{ vertical: "xxl", horizontal: "l" }}>

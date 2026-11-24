@@ -2,6 +2,10 @@
  * Starts the portal: reads /config.json, picks the user pool from the host, completes a
  * sign-in redirect if this is one, and loads `GET /api/me`. Until then it shows a loading,
  * signed-out or error page.
+ *
+ * After a sign-in redirect only (not a reload, not a token refresh), it reports the session's
+ * start, so the audit trail has the sign-in's IP address and browser, which Cognito's
+ * trigger never sees. The API keeps one row per sign-in, however often this is called.
  */
 
 import Alert from "@cloudscape-design/components/alert";
@@ -14,7 +18,7 @@ import Spinner from "@cloudscape-design/components/spinner";
 import type { User, UserManager } from "oidc-client-ts";
 import { useCallback, useEffect, useState } from "react";
 
-import { ApiError, apiClient, call, type Me } from "./api/client";
+import { type Api, ApiError, apiClient, call, type Me } from "./api/client";
 import { App } from "./App";
 import { accessToken, CALLBACK_PATH, logoutUrl, userManager } from "./auth";
 import { type ActivePool, loadConfig, poolFor } from "./config";
@@ -42,6 +46,11 @@ function Page({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Report a session's start. Never blocks or fails the sign-in. */
+export async function reportSessionStart(client: Api): Promise<void> {
+  await client.POST("/api/auth/session-started").catch(() => undefined);
+}
+
 // One portal per page: the signed-in user lives here, outside React's render, and the API
 // client reads its access token on every request (the token renews in the background).
 let currentUser: User | null = null;
@@ -58,11 +67,12 @@ export function Root() {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
 
   const loadMe = useCallback(
-    async (user: User, manager: UserManager) => {
+    async (user: User, manager: UserManager, justSignedIn = false) => {
       currentUser = user;
       try {
         const me = await call(api.GET("/api/me"));
         setPhase({ kind: "ready", user, me });
+        if (justSignedIn) void reportSessionStart(api);
       } catch (error) {
         if (error instanceof ApiError && SIGN_IN_AGAIN.has(error.code)) {
           await manager.removeUser();
@@ -91,7 +101,8 @@ export function Root() {
         if (cancelled()) return;
         setStarted({ pool: active, manager });
         let user: User | null;
-        if (window.location.pathname === CALLBACK_PATH) {
+        const justSignedIn = window.location.pathname === CALLBACK_PATH;
+        if (justSignedIn) {
           user = await manager.signinRedirectCallback();
           window.history.replaceState(null, "", "/");
         } else {
@@ -105,7 +116,7 @@ export function Root() {
           setPhase({ kind: "signed-out" });
           return;
         }
-        await loadMe(user, manager);
+        await loadMe(user, manager, justSignedIn);
       } catch {
         if (!cancelled()) setPhase({ kind: "error", message: "The portal could not start. Reload the page." });
       }

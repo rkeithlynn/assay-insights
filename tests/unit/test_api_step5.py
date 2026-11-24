@@ -604,3 +604,97 @@ def test_sign_out_and_password_change_are_recorded(
     rows = audits(world, action, world.users[sub])
     assert rows and rows[-1][0] == getattr(world, tenant)
     assert rows[-1][4] == "198.51.100.7"
+
+
+# --- Session start (the sign-in's origin) and MFA enrolment ------------------------------------
+
+
+def session_rows(w: World, sub: str) -> list[tuple[Any, ...]]:
+    with psycopg.connect(w.url) as conn:
+        return conn.execute(
+            "SELECT tenant_id, at, host(ip_address), user_agent, detail "
+            "FROM assay.audit_log WHERE action = 'session_started' AND target_id = %s",
+            (str(w.users[sub]),),
+        ).fetchall()
+
+
+def post_as(w: World, path: str, bearer: str) -> Any:
+    return w.client.post(path, headers={"Authorization": f"Bearer {bearer}", **VIEWER})
+
+
+@pytest.mark.parametrize(("sub", "tenant"), [("a-user", "a"), ("m-admin", "platform")])
+def test_a_session_start_records_the_viewers_address_once(
+    world: World, sub: str, tenant: str
+) -> None:
+    signed_in = int(time.time()) - 30
+    first = token(world, sub, auth_time=signed_in)
+    for _attempt in range(3):
+        assert post_as(world, "/api/auth/session-started", first).status_code == 204
+    # A refreshed token: new iat and jti, the same auth_time. Still the same sign-in.
+    time.sleep(1)
+    refreshed = token(world, sub, auth_time=signed_in)
+    assert refreshed != first
+    assert post_as(world, "/api/auth/session-started", refreshed).status_code == 204
+    rows = [r for r in session_rows(world, sub) if int(r[1].timestamp()) == signed_in]
+    assert len(rows) == 1
+    [(tenant_id, at, ip, agent, detail)] = rows
+    assert tenant_id == getattr(world, tenant)
+    assert (ip, agent, detail) == ("198.51.100.7", "pytest-browser", {"reported_by": "portal"})
+    # The row's time is the sign-in's, not the call's.
+    assert int(at.timestamp()) == signed_in
+
+
+def test_each_sign_in_gets_its_own_session_start(world: World) -> None:
+    now = int(time.time())
+    for signed_in in (now - 120, now - 60):
+        bearer = token(world, "a-admin2", mfa=False, auth_time=signed_in)
+        assert post_as(world, "/api/auth/session-started", bearer).status_code == 204
+    times = {int(r[1].timestamp()) for r in session_rows(world, "a-admin2")}
+    assert {now - 120, now - 60} <= times
+
+
+@pytest.mark.parametrize("age", [6 * 60, 3600, -5 * 60])
+def test_a_session_start_only_right_after_the_sign_in(world: World, age: int) -> None:
+    before = len(session_rows(world, "b-user"))
+    bearer = token(world, "b-user", auth_time=int(time.time()) - age)
+    response = post_as(world, "/api/auth/session-started", bearer)
+    assert (response.status_code, response.json()["detail"]) == (409, "session_not_new")
+    assert len(session_rows(world, "b-user")) == before
+
+
+def test_mfa_enrolment_is_recorded_when_cognito_confirms_it(world: World) -> None:
+    # A tenant-admin setting up MFA: the token does not yet say MFA.
+    bearer = token(world, "a-admin", mfa=False)
+    assert post_as(world, "/api/auth/mfa-enabled", bearer).status_code == 204
+    call = world.cognito.last("mfa_status")
+    # Who to check comes from the token and the account, never from the request.
+    assert call == {
+        "pool": "tenant",
+        "tenant_id": str(world.a),
+        "email": "a-admin@example.test",
+        "sub": "a-admin",
+    }
+    rows = audits(world, "mfa_enabled", world.users["a-admin"])
+    assert rows and rows[-1][0] == world.a
+    assert rows[-1][4:] == ("198.51.100.7", "pytest-browser")
+
+
+def test_mfa_enrolment_is_not_recorded_unless_cognito_confirms_it(world: World) -> None:
+    before = len(audits(world, "mfa_enabled", world.users["a-user"]))
+    world.cognito.totp = False
+    try:
+        response = post_as(world, "/api/auth/mfa-enabled", token(world, "a-user"))
+    finally:
+        world.cognito.totp = True
+    assert (response.status_code, response.json()["detail"]) == (409, "mfa_not_enabled")
+    world.cognito.fail["mfa_status"] = "user_not_found"
+    response = post_as(world, "/api/auth/mfa-enabled", token(world, "a-user"))
+    assert (response.status_code, response.json()["detail"]) == (409, "user_not_found")
+    assert len(audits(world, "mfa_enabled", world.users["a-user"])) == before
+
+
+def test_mfa_enrolment_is_for_the_tenant_pool_only(world: World) -> None:
+    calls = len(world.cognito.calls)
+    response = post_as(world, "/api/auth/mfa-enabled", token(world, "m-user"))
+    assert (response.status_code, response.json()["detail"]) == (403, "tenant_pool_only")
+    assert len(world.cognito.calls) == calls

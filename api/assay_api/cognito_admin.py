@@ -18,6 +18,8 @@ checks, independently, that the target is who the caller says:
   `user_not_found`, never which tenant the user belongs to.
 - The only platform-pool operation is `reset_mfa`, and only for a user in the
   `master-user` group. No operation creates a platform-pool user.
+- `mfa_status` only reads: whether a tenant-pool user has TOTP MFA turned on, so the API
+  records an MFA enrolment only when Cognito confirms it.
 
 `custom:tenant_id` is immutable and decides which tenant the user's tokens belong to. It is
 set once, at creation (`invite`), from the `tenant_id` in the event, which the API takes
@@ -51,12 +53,22 @@ log = logging.getLogger()
 log.setLevel(logging.INFO)
 
 ALL_OPERATIONS = frozenset(
-    {"invite", "resend_invite", "reset_password", "disable", "enable", "set_role", "reset_mfa"}
+    {
+        "invite",
+        "resend_invite",
+        "reset_password",
+        "disable",
+        "enable",
+        "set_role",
+        "reset_mfa",
+        "mfa_status",
+    }
 )
 # The only operation allowed on the platform pool, and the only group it may target there.
 PLATFORM_OPERATIONS = frozenset({"reset_mfa"})
 PLATFORM_MFA_RESET_GROUP = "master-user"
 POOLS = ("tenant", "platform")
+TOTP = "SOFTWARE_TOKEN_MFA"
 
 CLIENT_CONFIG = Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 3})
 MAX_NAME = 200
@@ -175,6 +187,7 @@ class Target:
     groups: tuple[str, ...]
     enabled: bool
     status: str  # Cognito's UserStatus, for example FORCE_CHANGE_PASSWORD or CONFIRMED
+    totp: bool  # TOTP MFA is turned on (in the user's MFA settings)
 
 
 def confirm_target(event: dict[str, Any]) -> Target:
@@ -214,6 +227,7 @@ def confirm_target(event: dict[str, Any]) -> Target:
         groups=groups,
         enabled=bool(user.get("Enabled", True)),
         status=str(user.get("UserStatus", "")),
+        totp=TOTP in user.get("UserMFASettingList", []),
     )
 
 
@@ -343,6 +357,13 @@ def reset_mfa(event: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "had_totp": had_totp}
 
 
+def mfa_status(event: dict[str, Any]) -> dict[str, Any]:
+    """Whether a tenant-pool user has TOTP MFA turned on. Reads only; changes nothing."""
+    target = confirm_target(event)
+    _tenant_only(target)
+    return {"totp": target.totp}
+
+
 HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "invite": invite,
     "resend_invite": resend_invite,
@@ -351,6 +372,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "enable": enable,
     "set_role": set_role,
     "reset_mfa": reset_mfa,
+    "mfa_status": mfa_status,
 }
 
 

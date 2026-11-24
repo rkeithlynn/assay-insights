@@ -928,6 +928,7 @@ def test_the_apis_cognito_admin_function() -> Any:
             "enable",
             "set_role",
             "reset_mfa",
+            "mfa_status",
         }
         assert set(variables) == {"TENANT_POOL_ID", "PLATFORM_POOL_ID", "OPERATIONS"}
         # The same image as the provisioning function.

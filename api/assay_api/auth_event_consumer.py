@@ -3,8 +3,8 @@
 An SQS-triggered Lambda in the VPC. It signs in as `audit_writer` and does one thing per
 message: `SELECT auth_events.record(event_id, pool, sub, action, at)` (migration 0004). That
 SECURITY DEFINER function finds the user's tenant, ID, email and role in `users`, so the
-tenant never comes from the message, and it refuses any action but `sign_in` and
-`password_reset`.
+tenant never comes from the message, and it refuses any action but `sign_in`,
+`temporary_password_accepted` (migration 0006) and `password_reset`.
 
 A message fails, and is retried until it reaches the dead-letter queue (which raises an
 alarm), when it does not parse, names a user pool other than the two of this stack, or
@@ -30,7 +30,7 @@ from assay_db.roles import AUDIT_WRITER
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-ACTIONS = frozenset({"sign_in", "password_reset"})
+ACTIONS = frozenset({"sign_in", "temporary_password_accepted", "password_reset"})
 MESSAGE_VERSION = 1
 RECORDED = "recorded"
 # A queued event older than this is still recorded; one from the future is refused.

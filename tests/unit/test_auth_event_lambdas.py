@@ -16,8 +16,10 @@ NOW = dt.datetime(2026, 11, 23, 12, 0, tzinfo=dt.UTC)
 POOLS = {"us-east-1_T": "tenant", "us-east-1_P": "platform"}
 
 
-def cognito_event(source: str, pool: str = "us-east-1_T") -> dict[str, Any]:
-    return {
+def cognito_event(
+    source: str, pool: str = "us-east-1_T", user_status: str | None = "CONFIRMED"
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
         "version": "1",
         "triggerSource": source,
         "userPoolId": pool,
@@ -31,6 +33,9 @@ def cognito_event(source: str, pool: str = "us-east-1_T") -> dict[str, Any]:
         },
         "response": {},
     }
+    if user_status is not None:
+        event["request"]["userAttributes"]["cognito:user_status"] = user_status
+    return event
 
 
 class FakeSqs:
@@ -72,6 +77,50 @@ def test_the_trigger_queues_only_ids_and_returns_the_event(
     # No email, no name, no tenant: the consumer finds the tenant in the database.
     assert "ada@example.test" not in sent["MessageBody"]
     assert "custom:tenant_id" not in sent["MessageBody"]
+
+
+@pytest.mark.parametrize(
+    ("source", "user_status", "action"),
+    [
+        # A first sign-in: the temporary password accepted, a new-password challenge next.
+        (
+            "PostAuthentication_Authentication",
+            "FORCE_CHANGE_PASSWORD",
+            "temporary_password_accepted",
+        ),
+        # The second run, once the new password is set, and every later sign-in.
+        ("PostAuthentication_Authentication", "CONFIRMED", "sign_in"),
+        # No status, or one we do not know: a sign-in, as before.
+        ("PostAuthentication_Authentication", None, "sign_in"),
+        ("PostAuthentication_Authentication", "RESET_REQUIRED", "sign_in"),
+        # Only a sign-in is relabelled.
+        ("PostConfirmation_ConfirmForgotPassword", "FORCE_CHANGE_PASSWORD", "password_reset"),
+    ],
+)
+def test_a_first_sign_in_labels_the_temporary_password_step(
+    sqs: FakeSqs,
+    caplog: pytest.LogCaptureFixture,
+    source: str,
+    user_status: str | None,
+    action: str,
+) -> None:
+    trigger.handler(cognito_event(source, user_status=user_status), None)
+    [sent] = sqs.sent
+    body = json.loads(sent["MessageBody"])
+    assert body["action"] == action
+    # The status is logged (it is what the post-deploy check reads), never queued.
+    assert "user_status" not in body
+    [queued] = [r for r in caplog.records if r.getMessage() == "auth event queued"]
+    assert queued.__dict__["user_status"] == user_status
+
+
+def test_the_consumer_accepts_the_temporary_password_step() -> None:
+    body = trigger.message_for(
+        cognito_event("PostAuthentication_Authentication", user_status="FORCE_CHANGE_PASSWORD"),
+        NOW,
+    )
+    assert body is not None
+    assert consumer.parse(json.dumps(body), POOLS, NOW).action == "temporary_password_accepted"
 
 
 def test_other_trigger_sources_are_ignored(sqs: FakeSqs) -> None:

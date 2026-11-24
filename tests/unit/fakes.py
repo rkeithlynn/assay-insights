@@ -14,6 +14,8 @@ class FakeCognito:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail: dict[str, str] = {}
+        # What `mfa_status` reports (the real function reads it from Cognito).
+        self.totp = True
 
     def call(self, operation: str, **fields: Any) -> dict[str, Any]:
         self.calls.append((operation, fields))
@@ -22,6 +24,8 @@ class FakeCognito:
             raise CognitoRefused(code)
         if operation == "invite":
             return {"sub": f"sub-{fields['email']}", "created": True}
+        if operation == "mfa_status":
+            return {"totp": self.totp}
         return {"ok": True}
 
     def last(self, operation: str) -> dict[str, Any]:

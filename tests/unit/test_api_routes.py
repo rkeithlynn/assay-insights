@@ -453,6 +453,8 @@ def test_every_api_route_runs_the_account_check() -> None:
         "POST /api/admin/tenants",
         "POST /api/admin/users/{user_id}/reset-mfa",
         "POST /api/auth/signed-out",
+        "POST /api/auth/session-started",
+        "POST /api/auth/mfa-enabled",
     }
     assert unchecked_routes(app) == []
 

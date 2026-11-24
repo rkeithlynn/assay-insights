@@ -3,7 +3,12 @@
 Records two events by queuing them on SQS; the consumer (`assay_api.auth_event_consumer`)
 writes them to `audit_log`:
 
-- `PostAuthentication_Authentication`: a sign-in (`sign_in`).
+- `PostAuthentication_Authentication`: a sign-in (`sign_in`), or, while Cognito still reports
+  the user as `FORCE_CHANGE_PASSWORD`, the temporary password being accepted
+  (`temporary_password_accepted`). A first sign-in on the tenant pool runs this trigger twice:
+  once when the temporary password is accepted (a new-password challenge follows) and once
+  when the new password is set, just before tokens are issued. Only the second is the
+  sign-in. Any other status, or none, is recorded as `sign_in`.
 - `PostConfirmation_ConfirmForgotPassword`: a password reset with an emailed code
   (`password_reset`).
 
@@ -45,6 +50,10 @@ ACTIONS = {
     "PostAuthentication_Authentication": "sign_in",
     "PostConfirmation_ConfirmForgotPassword": "password_reset",
 }
+USER_STATUS = "cognito:user_status"
+# Cognito's status for a user who has not yet replaced the temporary password.
+FIRST_SIGN_IN_STATUS = "FORCE_CHANGE_PASSWORD"
+FIRST_SIGN_IN_ACTION = "temporary_password_accepted"
 MESSAGE_VERSION = 1
 CLIENT_CONFIG = Config(connect_timeout=1, read_timeout=2, retries={"max_attempts": 2})
 # Logged at ERROR; the stack's metric filter turns every ERROR line into an alarm.
@@ -60,11 +69,18 @@ def sqs() -> SQSClient:
     return _client
 
 
+def user_status(event: dict[str, Any]) -> str | None:
+    status = event.get("request", {}).get("userAttributes", {}).get(USER_STATUS)
+    return str(status) if status is not None else None
+
+
 def message_for(event: dict[str, Any], now: dt.datetime) -> dict[str, Any] | None:
     """The queue message for an event worth recording, or None for any other event."""
     action = ACTIONS.get(str(event.get("triggerSource")))
     if action is None:
         return None
+    if action == "sign_in" and user_status(event) == FIRST_SIGN_IN_STATUS:
+        action = FIRST_SIGN_IN_ACTION
     sub = str(event["request"]["userAttributes"]["sub"])
     return {
         "version": MESSAGE_VERSION,
@@ -83,7 +99,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             log.info("trigger source not recorded", extra={"source": event.get("triggerSource")})
             return event
         sqs().send_message(QueueUrl=os.environ["QUEUE_URL"], MessageBody=json.dumps(message))
-        log.info("auth event queued", extra={"action": message["action"]})
+        # The user status (never an identifier) shows which events Cognito sent with which.
+        log.info(
+            "auth event queued",
+            extra={"action": message["action"], "user_status": user_status(event)},
+        )
     except Exception as exc:  # never block a sign-in
         log.error(NOT_QUEUED, extra={"error": type(exc).__name__})
     return event

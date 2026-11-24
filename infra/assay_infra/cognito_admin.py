@@ -14,7 +14,8 @@ What its role may do in Cognito, by pool:
 
 - tenant pool: invite (create a user and add it to a group), resend an invitation, reset a
   password, disable and enable, change the group, and reset MFA (delete the TOTP device and
-  sign the user out everywhere), plus reading a user and their groups to check the target;
+  sign the user out everywhere), plus reading a user and their groups to check the target
+  (which is also all `mfa_status` does: it reports whether the user has TOTP turned on);
 - platform pool: only reading a user and their groups, deleting a TOTP device and signing a
   user out: the master admin's MFA reset of the master user. It cannot create, enable,
   disable or regroup a platform user.
@@ -38,6 +39,8 @@ OPERATIONS = (
     "enable",
     "set_role",
     "reset_mfa",
+    # Reads only (AdminGetUser, already allowed): confirms a tenant user's MFA enrolment.
+    "mfa_status",
 )
 TENANT_POOL_ACTIONS = (
     "cognito-idp:AdminCreateUser",

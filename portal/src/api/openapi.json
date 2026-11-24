@@ -1414,6 +1414,22 @@
         "summary": "Reset Admin Mfa"
       }
     },
+    "/api/auth/mfa-enabled": {
+      "post": {
+        "operationId": "mfa_enabled_api_auth_mfa_enabled_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mfa Enabled"
+      }
+    },
     "/api/auth/password-changed": {
       "post": {
         "operationId": "password_changed_api_auth_password_changed_post",
@@ -1428,6 +1444,22 @@
           }
         ],
         "summary": "Password Changed"
+      }
+    },
+    "/api/auth/session-started": {
+      "post": {
+        "operationId": "session_started_api_auth_session_started_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Session Started"
       }
     },
     "/api/auth/signed-out": {

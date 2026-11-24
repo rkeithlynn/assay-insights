@@ -93,6 +93,26 @@ def test_a_sign_in_is_recorded_in_the_users_own_tenant(
     assert state == ("active", NOW)
 
 
+def test_the_temporary_password_step_is_recorded_as_itself(
+    db: TestDb, tenant_user: tuple[uuid.UUID, str]
+) -> None:
+    """Migration 0006: a first sign-in's first trigger run, with the sign-in's effect on users."""
+    user_id, sub = tenant_user
+    event = uuid.uuid4()
+    with as_role(db, AUDIT_WRITER) as conn:
+        assert conn.execute(
+            RECORD, (event, "tenant", sub, "temporary_password_accepted", NOW)
+        ).fetchone() == ("recorded",)
+        conn.commit()
+    [row] = _audit_rows(db, event)
+    assert row[4:] == ("auth", "temporary_password_accepted", "success")
+    with psycopg.connect(db.url) as conn:
+        state = conn.execute(
+            "SELECT status, last_sign_in_at FROM assay.users WHERE id = %s", (user_id,)
+        ).fetchone()
+    assert state == ("active", NOW)
+
+
 def test_a_repeated_event_is_recorded_once(db: TestDb, tenant_user: tuple[uuid.UUID, str]) -> None:
     _, sub = tenant_user
     event = uuid.uuid4()
@@ -142,7 +162,7 @@ def test_an_unknown_user_is_reported_and_nothing_is_written(
     ("pool", "action"),
     [("tenant", "role_changed"), ("tenant", "sign_out"), ("tenant", None), ("other", "sign_in")],
 )
-def test_only_the_two_actions_and_pools_are_allowed(
+def test_only_the_recorded_actions_and_pools_are_allowed(
     db: TestDb, pool: str, action: str | None
 ) -> None:
     with (

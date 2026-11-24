@@ -33,7 +33,7 @@ change. Where this file and the spec differ, the spec wins.
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
-| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). **Second half (Audit history, Models) built** on `build-step-5`; `pulumi preview` reviewed, waiting for the owner's `pulumi up` and `migrate.py` |
+| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). **Second half (Audit history, Models) deployed**, migration `0005` applied, checked in a browser by the owner (2026-11-24). **Audit-trail follow-ups** (session start, first sign-in label, MFA enrolment, migration `0006`) built on `build-step-5`; waiting for the owner's `pulumi up` and `migrate.py`, then the checks under "Audit-trail follow-ups" below |
 | 6–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -167,7 +167,19 @@ views, not to the audit record.
   `ChangePassword` (it is in the user pool actions CloudTrail logs).
 - **Cognito sign-in rows have no IP address or browser**: the post-authentication event
   carries neither (without threat protection). Rows the API writes take the viewer's IP
-  from `CloudFront-Viewer-Address`.
+  from `CloudFront-Viewer-Address`. The portal's `session_started` row, written right after
+  the sign-in, carries both; the trigger's `sign_in` row stays the record of the sign-in.
+- **Platform-pool MFA enrolment is not recorded** (owner decision, 2026-11-24). Platform
+  users set up TOTP in managed login, and no Cognito trigger runs for it (post-authentication
+  did not run after MFA setup either). Only CloudTrail sees it (`VerifySoftwareToken`, with
+  the user's `sub`, no pool ID, and Cognito's own address as the source). Recording it would
+  need an EventBridge rule that sends to the auth-events queue, a new sender on that queue.
+  It is not needed for the trail: the platform pool requires MFA, so a platform user enrols
+  exactly at their first sign-in and at the first sign-in after an MFA reset, both of which
+  the trail already shows: the `temporary_password_accepted` row, or the `mfa_reset` row
+  followed by that user's next `session_started` (whether Cognito runs the trigger for a
+  sign-in that ends in MFA setup is not known; on the first sign-in it did not).
+  Tenant-pool enrolment, made on the portal's MFA screen, is recorded (`mfa_enabled`).
 
 ## Fixed facts (BUILD_SPEC.md section 2)
 
@@ -894,3 +906,68 @@ Second half (Audit history, Models), owner decisions and conditions (2026-11-23)
   (`model_not_available` otherwise).
 - **The role matrix** (`test_api_audit_models.py::test_role_matrix`) covers every route of
   build step 5 for every role, and checks that a refused call writes nothing.
+
+Audit-trail follow-ups (owner decisions and conditions, 2026-11-24):
+
+- **What Cognito does, from CloudTrail and the trigger logs** (2026-11-24 UTC, read-only):
+  - A tenant-pool first sign-in runs post-authentication **twice**: when the temporary
+    password is accepted (with the one `login_POST`), and when the new password is set,
+    0 to 3 seconds before the pre-token trigger's `TokenGeneration_NewPasswordChallenge`.
+    Six of six first sign-ins did this; later sign-ins run it once.
+  - The platform pool's first sign-in (one sample) ran it **once**, at the temporary
+    password, and not after MFA setup finished in managed login.
+  - A sign-in served from managed login's session cookie (no password, an authorization-code
+    exchange) runs **no** post-authentication trigger, so it has no `sign_in` row. Seen at
+    04:06:54: a tenant user who had not signed out since their password sign-in at 03:45:37.
+  - Sign-out works on both pools. Every one of the 17 sign-ins after a portal sign-out on
+    the same pool (14 tenant, 3 platform) asked for the password. The portal's sign-out
+    revokes its own refresh token and sends the browser to Cognito's `/logout`, which ends
+    the managed login session. It does not end the session of another tab still open: at
+    04:45:07 such a tab refreshed its token (`Token_POST` with a refresh token) after a
+    sign-out in another tab.
+- **`temporary_password_accepted`** (item 2). The trigger sends it instead of `sign_in` when
+  the event's `cognito:user_status` is `FORCE_CHANGE_PASSWORD`, and logs the status it saw
+  (`auth event queued`, `user_status`), never queues it. Any other status, or none, stays
+  `sign_in`. Migration `0006` replaces the body of `auth_events.record()` to accept it, with
+  the sign-in's effect on `users` (the platform pool's first sign-in sends nothing else). It
+  switches to `auth_event_recorder` for the `CREATE OR REPLACE`, because `migrator` holds
+  SET but not INHERIT on that role and so cannot replace a function it does not own; owner,
+  grants and search_path are unchanged.
+  - **Deploy order:** run `migrate.py` straight after `pulumi up`. Until `0006` is in, a
+    first sign-in's `temporary_password_accepted` is refused by the old function, retried,
+    and after 5 receives dead-lettered (and alarmed).
+  - **Not yet verified:** that the first run carries `FORCE_CHANGE_PASSWORD` and the second
+    `CONFIRMED`. Check after deploy with a new test user's first sign-in on the tenant pool
+    (owner's condition e): the trigger's two `auth event queued` lines and the trail.
+- **`session_started`** (item 1), `POST /api/auth/session-started`, called by the portal once,
+  right after a sign-in redirect (not on a reload or a token refresh). IP from
+  `CloudFront-Viewer-Address`, browser from `User-Agent`, `detail.reported_by: "portal"`.
+  - **One row per sign-in** (condition c): the row's ID is a UUIDv5 of the user and the
+    token's `auth_time`, and its time is `auth_time`. A repeat conflicts on the primary key
+    `(id, at)` and `ON CONFLICT DO NOTHING` drops it, which needs INSERT only
+    (`audit.write(row_id=..., at=...)`). Tested as `app_tenant` and `platform_writer`.
+  - **The window is `auth_time`, not `iat`** (condition b): refused (`session_not_new`, 409)
+    unless `auth_time` is within 5 minutes before now (1 minute of clock leeway after). A
+    token refresh changes `iat` but not `auth_time`, so `iat` would let a session report its
+    start long after the sign-in, from wherever the user is by then.
+  - **Not yet known:** what `auth_time` a sign-in from the session cookie carries. AWS
+    documents it only as when the user "completed authentication". If it is the cookie
+    sign-in's own time, that sign-in gets its own row; if it is the original password
+    sign-in's, it is the same sign-in and adds nothing (and is refused after 5 minutes).
+    Either way the row's time is the authentication it describes. Check after deploy: sign
+    in, close the tab without signing out, sign in again within the hour, and read the two
+    rows in Audit history.
+  - **The IP cannot be supplied by a viewer** (condition d). The `/api/*` behaviour uses
+    `Managed-AllViewerAndCloudFrontHeaders-2022-06` (`allViewerAndWhitelistCloudFront`, with
+    `CloudFront-Viewer-Address`), and AWS documents that when a policy adds such a header,
+    "CloudFront overwrites the header values that were in the viewer request" (CloudFront
+    developer guide, Lambda@Edge restrictions). The load balancer is internal, and its only
+    inbound rule is 443 from `CloudFront-VPCOrigins-Service-SG` (checked 2026-11-24). The
+    browser string is the viewer's own claim, as on every row.
+- **`mfa_enabled`** (item 3, variant b), `POST /api/auth/mfa-enabled`, tenant pool only
+  (`tenant_pool_only` otherwise). The MFA screen calls it after Cognito accepts the code. The
+  API asks `cognito-admin-api` for `mfa_status` (new, read-only: `confirm_target`'s
+  `AdminGetUser`, which also checks tenant and `sub`), and writes the row only if TOTP is on
+  (`mfa_not_enabled`, 409, otherwise). No IAM change: the function's role already had
+  `AdminGetUser`; the API may now ask it for one more operation, which changes nothing in
+  Cognito.
