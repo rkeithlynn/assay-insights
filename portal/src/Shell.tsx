@@ -1,6 +1,12 @@
 /**
  * The shell (BUILD_SPEC.md section 11): Cloudscape app layout. Top bar with the logo, the
  * tenant name, a "Development" tag and the user menu (Change password, Sign out).
+ *
+ * The banner's logo is the square mark next to the product name, both in one link to the
+ * role's home screen. The mark is imported, so Vite bundles it with the portal (served from
+ * the portal's own origin or inlined as a data: URL, both already in the CSP's img-src).
+ * Cloudscape draws the logo at most 32 px high (24 px on a narrow screen); the mark is drawn
+ * for favicon sizes, so it stays legible there. The full wordmark would be too small.
  */
 
 import AppLayout from "@cloudscape-design/components/app-layout";
@@ -9,11 +15,14 @@ import TopNavigation from "@cloudscape-design/components/top-navigation";
 import { type ReactNode, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 
-import logoUrl from "@assets/assay-insights-logo.svg";
+import markUrl from "@assets/assay-insights-mark.svg";
 
 import { screensFor } from "./navigation";
 import { ChangePassword } from "./pages/ChangePassword";
 import { useSession } from "./session";
+
+export const PRODUCT_NAME = "Assay Insights";
+export const LOGO_ALT = "Assay Insights logo";
 
 export function Shell({ children }: { children: ReactNode }) {
   const { me, signOut } = useSession();
@@ -21,17 +30,19 @@ export function Shell({ children }: { children: ReactNode }) {
   const location = useLocation();
   const [changingPassword, setChangingPassword] = useState(false);
   const screens = screensFor(me.role);
+  const home = screens[0]?.path ?? "/";
 
   return (
     <>
       <div id="top-nav" style={{ position: "sticky", top: 0, zIndex: 1002 }}>
         <TopNavigation
           identity={{
-            href: screens[0]?.path ?? "/",
-            logo: { src: logoUrl, alt: "Assay Insights" },
+            href: home,
+            title: PRODUCT_NAME,
+            logo: { src: markUrl, alt: LOGO_ALT },
             onFollow: (event) => {
               event.preventDefault();
-              void navigate(screens[0]?.path ?? "/");
+              void navigate(home);
             },
           }}
           utilities={[

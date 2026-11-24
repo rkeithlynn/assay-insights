@@ -104,7 +104,30 @@ function query(filters: Filters, sort: Sort, page: number) {
   };
 }
 
+const EMPTY = "-";
+
+function isEmpty(value: unknown): boolean {
+  return (
+    value === null ||
+    value === undefined ||
+    (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0)
+  );
+}
+
+/**
+ * The Before and After panes' text, or null when the event has neither (a sign-out, for
+ * example), so the panes are left out. One empty side shows a dash, never "null".
+ */
+export function beforeAfter(detail: AuditEvent["detail"]): { before: string; after: string } | null {
+  const before: unknown = detail?.before;
+  const after: unknown = detail?.after;
+  if (isEmpty(before) && isEmpty(after)) return null;
+  const text = (value: unknown) => (isEmpty(value) ? EMPTY : JSON.stringify(value, null, 2));
+  return { before: text(before), after: text(after) };
+}
+
 function EventDetail({ event, onDismiss }: { event: AuditEvent | null; onDismiss: () => void }) {
+  const values = event ? beforeAfter(event.detail) : null;
   return (
     <Modal visible={event !== null} onDismiss={onDismiss} header="Audit event" size="large">
       {event && (
@@ -123,18 +146,18 @@ function EventDetail({ event, onDismiss }: { event: AuditEvent | null; onDismiss
               { label: "Browser", value: event.user_agent ?? "-" },
             ]}
           />
-          <ColumnLayout columns={2} variant="text-grid">
-            {(["before", "after"] as const).map((side) => (
-              <div key={side}>
-                <Box variant="awsui-key-label">{side === "before" ? "Before" : "After"}</Box>
-                <Box variant="code">
-                  <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-                    {JSON.stringify(event.detail?.[side] ?? null, null, 2)}
-                  </pre>
-                </Box>
-              </div>
-            ))}
-          </ColumnLayout>
+          {values && (
+            <ColumnLayout columns={2} variant="text-grid">
+              {(["before", "after"] as const).map((side) => (
+                <div key={side}>
+                  <Box variant="awsui-key-label">{side === "before" ? "Before" : "After"}</Box>
+                  <Box variant="code">
+                    <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{values[side]}</pre>
+                  </Box>
+                </div>
+              ))}
+            </ColumnLayout>
+          )}
           {event.detail && Object.keys(event.detail).some((k) => k !== "before" && k !== "after") && (
             <div>
               <Box variant="awsui-key-label">Other details</Box>

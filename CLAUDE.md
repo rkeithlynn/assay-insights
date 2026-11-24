@@ -104,8 +104,8 @@ Step 4 was verified on 2026-11-23:
   - the tenant role's trust policy split into one statement per STS action;
   - the provisioning role's probe reading an object that exists.
   The notes under "Step 4" below explain each.
-- Carried forward: the owner applies the AI services opt-out policy from the management
-  account before step 6; step 6 must follow the two "For step 6" notes below (no file
+- Carried forward: the AI services opt-out policy (applied and verified, see "Rule 6"
+  under "Tenant isolation"); step 6 must follow the two "For step 6" notes below (no file
   names in keys, and the reserved fixture document ID).
 - CI on the `build-step-4` pull request (#3) must pass before `main` is fast-forwarded.
 
@@ -252,10 +252,15 @@ Owner decisions on these rules (2026-11-23):
 - **Break glass.** `assay-dev-break-glass` is assumable only by the owner's IAM Identity
   Center `AdministratorAccess` role (`breakGlassPrincipalArn`), and every AssumeRole of it
   raises an alarm. **Production needs a separate, approval-gated role instead.**
-- **Rule 6.** On 2026-11-23 the organization had not enabled the AI services opt-out policy
-  type, and Bedrock model invocation logging was off. The owner applies the opt-out policy
-  from the management account before build step 6. Check it before any content goes to
-  Bedrock, Textract or Rekognition:
+- **Rule 6.** The owner attached the AI services opt-out policy at the organization root
+  (policy `p-90y1yu22fy`, from the management account) on 2026-11-23. Verified from this
+  account on 2026-11-24 UTC: the effective policy is
+  `{"services":{"default":{"opt_out_policy":"optOut"}}}` (every AI service, Rekognition and
+  Textract included), last updated 2026-11-24 04:37:58 UTC, and Bedrock model invocation
+  logging is off (`aws bedrock get-model-invocation-logging-configuration` returns no
+  configuration). The policy ID is the owner's; a member account cannot list the policies
+  attached to it. Check both again before any content first goes to Bedrock, Textract or
+  Rekognition:
   `aws organizations describe-effective-policy --policy-type AISERVICES_OPT_OUT_POLICY --profile pilar-dev`.
 
 Related rules elsewhere in the spec that protect isolation:
