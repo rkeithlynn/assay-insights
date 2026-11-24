@@ -33,7 +33,7 @@ change. Where this file and the spec differ, the spec wins.
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
-| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). **Second half (Audit history, Models) deployed**, migration `0005` applied, checked in a browser by the owner (2026-11-24). **Audit-trail follow-ups** (session start, first sign-in label, MFA enrolment, migration `0006`) built on `build-step-5`; waiting for the owner's `pulumi up` and `migrate.py`, then the checks under "Audit-trail follow-ups" below |
+| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). **Second half (Audit history, Models) deployed**, migration `0005` applied, checked in a browser by the owner (2026-11-24). **Audit-trail follow-ups** (session start, first sign-in label, MFA enrolment, migration `0006`) deployed and checked in a browser by the owner (2026-11-24). **Portal layout fixes, rendered checks and migration `0007`** built on `build-step-5`; waiting for the owner's `pulumi up` and `migrate.py` |
 | 6–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -175,10 +175,19 @@ views, not to the audit record.
     credentials, and re-running it finds them without resending. An expired platform
     invitation is resent by hand (`aws cognito-idp admin-create-user --message-action
     RESEND`, owner's credentials).
-  - **Gap (owner to decide):** `temporary_password_accepted` moves `invited` to `active`
-    (migration 0006, as a sign-in did before). A user who enters the temporary password and
-    abandons the new-password form is shown Active, is offered "Reset password", which fails
-    with `wrong_state`, and is not offered a resend.
+  - **An abandoned new-password form, tenant pool** (owner decision, 2026-11-24, migration
+    0007): `temporary_password_accepted` changes nothing in `users`; only `sign_in` sets
+    `last_sign_in_at` and moves `invited` to `active`. A user who enters the temporary
+    password and abandons the new-password form stays Invited, with "Resend invitation"
+    offered. (Under 0006 they were shown Active and offered a reset Cognito refuses.)
+- **An abandoned new-password form, platform pool, shows the user Active** (owner decision,
+  2026-11-24). There `temporary_password_accepted` is the only event a first sign-in sends
+  (the trigger does not run again after MFA setup in managed login), so it keeps the
+  sign-in's effect: `last_sign_in_at` set and `invited` to `active`, even if the user never
+  set a new password. Cognito still has them in `FORCE_CHANGE_PASSWORD`, so they cannot reset
+  their own password either. The way back is a resent invitation, by hand with the owner's
+  credentials (the portal has no platform resend):
+  `aws cognito-idp admin-create-user --user-pool-id <platform pool> --username <email> --message-action RESEND --profile pilar-dev`.
 - **Failed sign-ins are not audited** (section 7a). Only successful sign-ins
   (post-authentication trigger), password resets (post-confirmation), sign-outs and password
   changes (reported by the portal) are recorded.
@@ -1006,11 +1015,15 @@ Audit-trail follow-ups (owner decisions and conditions, 2026-11-24):
 - **`temporary_password_accepted`** (item 2). The trigger sends it instead of `sign_in` when
   the event's `cognito:user_status` is `FORCE_CHANGE_PASSWORD`, and logs the status it saw
   (`auth event queued`, `user_status`), never queues it. Any other status, or none, stays
-  `sign_in`. Migration `0006` replaces the body of `auth_events.record()` to accept it, with
-  the sign-in's effect on `users` (the platform pool's first sign-in sends nothing else). It
-  switches to `auth_event_recorder` for the `CREATE OR REPLACE`, because `migrator` holds
-  SET but not INHERIT on that role and so cannot replace a function it does not own; owner,
-  grants and search_path are unchanged.
+  `sign_in`. Migration `0006` replaces the body of `auth_events.record()` to accept it.
+  Migration `0007` limits its effect on `users` to the platform pool (whose first sign-in
+  sends nothing else); in the tenant pool only `sign_in` makes a user Active (see "Known
+  limits"). Both switch to `auth_event_recorder` for the `CREATE OR REPLACE`, because
+  `migrator` holds SET but not INHERIT on that role and so cannot replace a function it does
+  not own; owner, grants and search_path are unchanged, and
+  `test_migration_0007_changes_no_owner_grant_or_policy` compares the function's owner and
+  ACL, every policy, every table and column grant and every role membership at 0006, at 0007
+  and after the downgrade.
   - **Deploy order:** run `migrate.py` straight after `pulumi up`. Until `0006` is in, a
     first sign-in's `temporary_password_accepted` is refused by the old function, retried,
     and after 5 receives dead-lettered (and alarmed).

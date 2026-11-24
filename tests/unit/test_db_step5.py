@@ -27,7 +27,17 @@ from assay_db.roles import (
     PLATFORM_READER,
     PLATFORM_WRITER,
 )
-from tests.unit.pgtest import TestDb, as_role, migrator_engine, requires_db
+from tests.unit.pgtest import (
+    TestDb,
+    _bootstrap_as_master,
+    _conninfo,
+    _create_database,
+    _drop_database,
+    _migrate,
+    as_role,
+    migrator_engine,
+    requires_db,
+)
 
 pytestmark = requires_db
 
@@ -93,24 +103,122 @@ def test_a_sign_in_is_recorded_in_the_users_own_tenant(
     assert state == ("active", NOW)
 
 
-def test_the_temporary_password_step_is_recorded_as_itself(
-    db: TestDb, tenant_user: tuple[uuid.UUID, str]
-) -> None:
-    """Migration 0006: a first sign-in's first trigger run, with the sign-in's effect on users."""
-    user_id, sub = tenant_user
+@pytest.fixture
+def invited_platform_user(db: TestDb) -> Iterator[tuple[uuid.UUID, str]]:
+    """An invited master-user of the platform tenant, removed afterwards."""
+    user_id = uuid.uuid4()
+    sub = f"sub-platform-{user_id.hex[:8]}"
+    with psycopg.connect(db.url) as conn:
+        conn.execute(
+            "INSERT INTO assay.users (id, tenant_id, cognito_sub, email, name, role, status) "
+            "VALUES (%s, %s, %s, %s, 'Invited Master', 'master-user', 'invited')",
+            (user_id, db.seed.platform, sub, f"{sub}@example.test"),
+        )
+    try:
+        yield user_id, sub
+    finally:
+        with psycopg.connect(db.url) as conn:
+            conn.execute("DELETE FROM assay.audit_log WHERE actor_user_id = %s", (user_id,))
+            conn.execute("DELETE FROM assay.users WHERE id = %s", (user_id,))
+
+
+def _record(db: TestDb, pool: str, sub: str, action: str, at: dt.datetime) -> uuid.UUID:
     event = uuid.uuid4()
     with as_role(db, AUDIT_WRITER) as conn:
-        assert conn.execute(
-            RECORD, (event, "tenant", sub, "temporary_password_accepted", NOW)
-        ).fetchone() == ("recorded",)
+        assert conn.execute(RECORD, (event, pool, sub, action, at)).fetchone() == ("recorded",)
         conn.commit()
-    [row] = _audit_rows(db, event)
-    assert row[4:] == ("auth", "temporary_password_accepted", "success")
+    return event
+
+
+def _state(db: TestDb, user_id: uuid.UUID) -> tuple[object, ...] | None:
     with psycopg.connect(db.url) as conn:
-        state = conn.execute(
+        return conn.execute(
             "SELECT status, last_sign_in_at FROM assay.users WHERE id = %s", (user_id,)
         ).fetchone()
-    assert state == ("active", NOW)
+
+
+def test_tenant_pool_an_abandoned_new_password_form_leaves_the_user_invited(
+    db: TestDb, tenant_user: tuple[uuid.UUID, str]
+) -> None:
+    """Migration 0007: the temporary password accepted, the new password never set."""
+    user_id, sub = tenant_user
+    event = _record(db, "tenant", sub, "temporary_password_accepted", NOW)
+    [row] = _audit_rows(db, event)
+    assert row[4:] == ("auth", "temporary_password_accepted", "success")
+    # Still invited, never signed in: the Users screen offers "Resend invitation".
+    assert _state(db, user_id) == ("invited", None)
+
+
+def test_tenant_pool_a_first_sign_in_completes_on_sign_in(
+    db: TestDb, tenant_user: tuple[uuid.UUID, str]
+) -> None:
+    user_id, sub = tenant_user
+    _record(db, "tenant", sub, "temporary_password_accepted", NOW)
+    signed_in = NOW + dt.timedelta(seconds=8)
+    _record(db, "tenant", sub, "sign_in", signed_in)
+    assert _state(db, user_id) == ("active", signed_in)
+
+
+def test_tenant_pool_a_later_temporary_password_changes_nothing(
+    db: TestDb, tenant_user: tuple[uuid.UUID, str]
+) -> None:
+    """An active user's last sign-in is not moved by a temporary-password event."""
+    user_id, sub = tenant_user
+    _record(db, "tenant", sub, "sign_in", NOW)
+    _record(db, "tenant", sub, "temporary_password_accepted", NOW + dt.timedelta(days=1))
+    assert _state(db, user_id) == ("active", NOW)
+
+
+def test_platform_pool_the_temporary_password_step_still_completes_a_first_sign_in(
+    db: TestDb, invited_platform_user: tuple[uuid.UUID, str]
+) -> None:
+    """The platform pool's first sign-in sends nothing else, so it keeps the sign-in's effect,
+    including when the new-password form is abandoned (a known limit, CLAUDE.md)."""
+    user_id, sub = invited_platform_user
+    event = _record(db, "platform", sub, "temporary_password_accepted", NOW)
+    [row] = _audit_rows(db, event)
+    assert row[0] == db.seed.platform
+    assert row[4:] == ("auth", "temporary_password_accepted", "success")
+    assert _state(db, user_id) == ("active", NOW)
+
+
+PRIVILEGES = (
+    # The function: owner, ACL, SECURITY DEFINER, search_path.
+    "SELECT pg_get_userbyid(p.proowner), p.proacl::text, p.prosecdef, p.proconfig::text "
+    "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+    "WHERE n.nspname = 'auth_events' AND p.proname = 'record'",
+    # Every policy, every table and column grant, every role membership.
+    "SELECT schemaname, tablename, policyname, roles::text, cmd, qual, with_check "
+    "FROM pg_policies ORDER BY 1, 2, 3",
+    "SELECT grantee, table_schema, table_name, privilege_type FROM "
+    "information_schema.role_table_grants ORDER BY 1, 2, 3, 4",
+    "SELECT grantee, table_schema, table_name, column_name, privilege_type FROM "
+    "information_schema.column_privileges ORDER BY 1, 2, 3, 4, 5",
+    "SELECT roleid::regrole::text, member::regrole::text, inherit_option, set_option "
+    "FROM pg_auth_members ORDER BY 1, 2",
+)
+
+
+def _privileges(name: str) -> list[list[tuple[object, ...]]]:
+    with psycopg.connect(_conninfo(name)) as conn:
+        return [conn.execute(query).fetchall() for query in PRIVILEGES]
+
+
+def test_migration_0007_changes_no_owner_grant_or_policy(db: TestDb) -> None:
+    """Only the function's body changes, up and down."""
+    name = f"assay_test_{uuid.uuid4().hex[:12]}"
+    _create_database(name)
+    try:
+        _bootstrap_as_master(name)
+        _migrate(name, "0006")
+        before = _privileges(name)
+        assert before[0] == [("auth_event_recorder", before[0][0][1], True, before[0][0][3])]
+        _migrate(name, "0007")
+        assert _privileges(name) == before
+        _migrate(name, "0006", down=True)
+        assert _privileges(name) == before
+    finally:
+        _drop_database(name)
 
 
 def test_a_repeated_event_is_recorded_once(db: TestDb, tenant_user: tuple[uuid.UUID, str]) -> None:
