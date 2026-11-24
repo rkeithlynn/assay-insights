@@ -92,9 +92,22 @@ export const ERROR_TEXT: Record<string, string> = {
   pipeline_error: "Processing failed.",
 };
 
+const STEP_FAILED = /^([a-z0-9]+)_failed$/;
+
+/** Plain words for a code. A pipeline step's failure (`fingerprint_failed`) names the step. */
 export function errorText(code: string | null | undefined): string {
   if (!code) return "";
-  return ERROR_TEXT[code] ?? code.replaceAll("_", " ");
+  const known = ERROR_TEXT[code];
+  if (known) return known;
+  const step = STEP_FAILED.exec(code)?.[1];
+  const name = step === undefined ? undefined : STEP_TEXT[step];
+  if (name) return `The ${name.toLowerCase()} step failed.`;
+  return code.replaceAll("_", " ");
+}
+
+/** For master admins: the code itself, and a failed step's error type (an error's name). */
+export function errorCodeText(code: string | null | undefined, errorType?: string | null): string {
+  return [code, errorType].filter(Boolean).join(" · ");
 }
 
 /** A pipeline step's name, for the step list. */

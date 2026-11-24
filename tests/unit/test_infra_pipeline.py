@@ -218,7 +218,24 @@ def test_the_state_machine_never_logs_execution_data_and_only_runs_its_steps() -
             s.get("Resource") for s in definition["States"].values() if s["Type"] == "Task"
         }
         assert resources == {"arn:aws:states:::lambda:invoke"}
-        assert definition["States"]["Fingerprint"]["Catch"][0]["Next"] == "Failed"
+        states = definition["States"]
+        # A failure names its step (fixed text), and passes the error's name, never its Cause.
+        assert states["Fingerprint"]["Catch"][0]["Next"] == "FingerprintFailed"
+        assert states["FingerprintFailed"] == {
+            "Type": "Pass",
+            "Result": "fingerprint",
+            "ResultPath": "$.failed_step",
+            "Next": "Failed",
+        }
+        payload = states["Failed"]["Parameters"]["Payload"]
+        assert payload["failed_step.$"] == "$.failed_step"
+        assert payload["error_type.$"] == "$.error.Error"
+        assert not any("Cause" in str(v) or v == "$.error" for v in payload.values())
+        # Every task's catch goes through a Pass state that names it.
+        for name, state in states.items():
+            for catch in state.get("Catch", []):
+                assert states[catch["Next"]]["Type"] == "Pass", name
+                assert states[catch["Next"]]["Next"] == "Failed", name
         policy = json.loads(
             _one("aws:iam/rolePolicy:RolePolicy", "pl6-pipeline-sfn-policy")["policy"]
         )

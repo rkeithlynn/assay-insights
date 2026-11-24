@@ -40,7 +40,7 @@ import {
   Steps,
   useRefreshWhile,
 } from "./Ingestion";
-import { anyInProgress, errorText, formatBytes, formatDuration, formatShortTime, shortId } from "./ingestionFormat";
+import { anyInProgress, errorCodeText, errorText, formatBytes, formatDuration, formatShortTime, shortId } from "./ingestionFormat";
 
 type Sort = NonNullable<NonNullable<paths["/api/admin/ingestion"]["get"]["parameters"]["query"]>["sort"]>;
 
@@ -105,7 +105,19 @@ function StepsPanel({ row, onDismiss }: { row: IngestionRow | null; onDismiss: (
             items={[
               { label: "Tenant", value: row.tenant_name },
               { label: "Status", value: <StatusCell status={row.status} /> },
-              { label: "Problem", value: errorText(row.error_code) || "-" },
+              {
+                label: "Problem",
+                value: row.error_code ? (
+                  <>
+                    {errorText(row.error_code)}
+                    <Box variant="code" display="block" fontSize="body-s">
+                      {errorCodeText(row.error_code)}
+                    </Box>
+                  </>
+                ) : (
+                  "-"
+                ),
+              },
               { label: "Document ID", value: <span style={ID_STYLE}>{row.document_id}</span> },
               { label: "Batch ID", value: <span style={ID_STYLE}>{row.batch_id}</span> },
               { label: "Received", value: new Date(row.received_at).toLocaleString() },
@@ -117,7 +129,7 @@ function StepsPanel({ row, onDismiss }: { row: IngestionRow | null; onDismiss: (
             ]}
           />
           {error && <Alert type="error">{error}</Alert>}
-          {!detail && !error ? <StatusIndicator type="loading">Loading</StatusIndicator> : <Steps events={detail?.events ?? []} />}
+          {!detail && !error ? <StatusIndicator type="loading">Loading</StatusIndicator> : <Steps events={detail?.events ?? []} showCodes />}
         </SpaceBetween>
       )}
     </Modal>

@@ -232,7 +232,10 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
   if (/^\/api\/admin\/ingestion\/[^/]+$/.test(path)) {
     return {
       document_id: MASTER_ROWS[0]?.document_id,
-      events: EVENTS.map((e) => ({ step: e.step, status: e.status, at: e.at, error_code: e.error_code })),
+      events: [
+        ...EVENTS.map((e) => ({ step: e.step, status: e.status, at: e.at, error_code: e.error_code, error_type: null })),
+        { step: "failed", status: "failed", at: "2026-11-24T15:03:40Z", error_code: "fingerprint_failed", error_type: "Lambda.TooManyRequestsException" },
+      ],
     };
   }
   if (path === "/api/admin/audit") {

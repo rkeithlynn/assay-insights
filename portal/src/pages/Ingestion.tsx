@@ -40,6 +40,7 @@ import { type ColumnChoice, useColumnDisplay } from "./columns";
 import {
   anyInProgress,
   DOCUMENT_STATUS,
+  errorCodeText,
   errorText,
   formatBytes,
   formatDuration,
@@ -102,7 +103,18 @@ export async function downloadCsv(fetch: () => Promise<{ data?: unknown; respons
   URL.revokeObjectURL(url);
 }
 
-export function Steps({ events }: { events: { step: string; status: string; at: string; error_code: string | null }[] }) {
+interface StepEvent {
+  step: string;
+  status: string;
+  at: string;
+  error_code: string | null;
+  // The master view only: a failed step's error type.
+  error_type?: string | null;
+}
+
+/** A document's pipeline steps. `showCodes` (master admins only) adds each error's code and
+ * error type under its plain words; tenant users see the plain words alone. */
+export function Steps({ events, showCodes = false }: { events: StepEvent[]; showCodes?: boolean }) {
   return (
     <Table
       variant="embedded"
@@ -114,7 +126,24 @@ export function Steps({ events }: { events: { step: string; status: string; at: 
         { id: "step", header: "Step", cell: (e) => stepText(e.step) },
         { id: "status", header: "Result", cell: (e) => e.status.replaceAll("_", " ") },
         { id: "at", header: "Time", cell: (e) => <span style={ONE_LINE}>{new Date(e.at).toLocaleString()}</span> },
-        { id: "error", header: "Error", cell: (e) => errorText(e.error_code) || "-" },
+        {
+          id: "error",
+          header: "Error",
+          cell: (e) => {
+            const words = errorText(e.error_code) || "-";
+            const codes = showCodes ? errorCodeText(e.error_code, e.error_type) : "";
+            return codes ? (
+              <>
+                {words}
+                <Box variant="code" display="block" fontSize="body-s">
+                  {codes}
+                </Box>
+              </>
+            ) : (
+              words
+            );
+          },
+        },
       ]}
     />
   );

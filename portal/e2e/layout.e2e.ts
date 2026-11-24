@@ -88,7 +88,7 @@ const SCREENS: Screen[] = [
     ready: "Northwind Credit",
     setup: async (page) => {
       await page.getByRole("row").nth(1).click();
-      await page.getByRole("dialog").getByText("Fingerprint").waitFor();
+      await page.getByRole("dialog").getByText("Fingerprint", { exact: true }).waitFor();
     },
   },
   { id: "master-user-tenants", persona: "master-user", path: "/tenants", ready: "Northwind Credit" },

@@ -1254,6 +1254,17 @@
             ],
             "title": "Error Code"
           },
+          "error_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Type"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -1267,7 +1278,8 @@
           "step",
           "status",
           "at",
-          "error_code"
+          "error_code",
+          "error_type"
         ],
         "title": "IngestionEvent",
         "type": "object"

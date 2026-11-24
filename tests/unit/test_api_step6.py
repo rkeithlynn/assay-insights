@@ -8,6 +8,7 @@ and the tests read the signature's scope from the URL.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -395,6 +396,34 @@ def test_the_master_view_shows_metadata_only(w: World, ready_doc: dict[str, Any]
     detail = w.req("GET", f"/api/admin/ingestion/{ready_doc['id']}", "m-user").json()
     steps_seen = [e["step"] for e in detail["events"]]
     assert "fingerprint" in steps_seen and "viewed" not in steps_seen
+
+
+def test_a_failed_step_shows_its_error_type_to_master_admins_only(
+    w: World, ready_doc: dict[str, Any]
+) -> None:
+    """Tenant users see the step-level code; master admins also see the error's name."""
+    doc_id = uuid.UUID(ready_doc["id"])
+    w.db.execute(
+        "INSERT INTO assay.document_events (tenant_id, document_id, step, status, detail) "
+        "VALUES (%s, %s, 'failed', 'failed', %s)",
+        w.db.tenants["a"],
+        doc_id,
+        json.dumps({"error": "fingerprint_failed", "error_type": "AccessDenied"}),
+    )
+    for sub in ("m-admin", "m-user"):
+        master = w.req("GET", f"/api/admin/ingestion/{doc_id}", sub).json()
+        [failed] = [e for e in master["events"] if e["step"] == "failed"]
+        assert (failed["error_code"], failed["error_type"]) == (
+            "fingerprint_failed",
+            "AccessDenied",
+        )
+    for sub in ("a-admin", "a-user"):
+        response = w.req("GET", f"/api/documents/{doc_id}", sub)
+        assert response.status_code == 200, response.text
+        [failed] = [e for e in response.json()["events"] if e["step"] == "failed"]
+        assert failed["error_code"] == "fingerprint_failed"
+        assert "error_type" not in failed
+        assert "AccessDenied" not in response.text
 
 
 def test_the_master_view_filters_by_tenant(w: World, ready_doc: dict[str, Any]) -> None:

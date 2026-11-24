@@ -318,9 +318,19 @@ def state_machine_definition(*, steps_function: str) -> str:
     """Input: an ingest job, `{"tenant_id", "document_id"}` (assay_schemas.pipeline.IngestJob).
 
     First half of build step 6: fingerprint only. The second half adds steps 5 to 10 after
-    `Continue`. Any error goes to `Failed`, which records it on the document (a short code,
-    never the error's text) and fails the execution.
+    `Continue`. A step's error goes to its own Pass state, which sets `failed_step` to that
+    step's name (fixed text from this definition, never from the error), then to `Failed`.
+    `Failed` gets the step's name and the error's name (`$.error.Error`) only, never its
+    `Cause` (a message or stack trace), records them on the document and fails the execution.
     """
+
+    def caught(step: str) -> dict[str, object]:
+        return {
+            "Type": "Pass",
+            "Result": step,
+            "ResultPath": "$.failed_step",
+            "Next": "Failed",
+        }
 
     def invoke(step: str, extra: Mapping[str, object] | None = None) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -351,10 +361,15 @@ def state_machine_definition(*, steps_function: str) -> str:
                     "TimeoutSeconds": FUNCTIONS["steps"].timeout + 60,
                     "Retry": [LAMBDA_RETRY, STEP_RETRY],
                     "Catch": [
-                        {"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Failed"}
+                        {
+                            "ErrorEquals": ["States.ALL"],
+                            "ResultPath": "$.error",
+                            "Next": "FingerprintFailed",
+                        }
                     ],
                     "Next": "Outcome",
                 },
+                "FingerprintFailed": caught("fingerprint"),
                 "Outcome": {
                     "Type": "Choice",
                     "Choices": [
@@ -380,7 +395,10 @@ def state_machine_definition(*, steps_function: str) -> str:
                     "Cause": "The reserved isolation-test document ID is never processed.",
                 },
                 "Failed": {
-                    **invoke("failed", {"error.$": "$.error"}),
+                    **invoke(
+                        "failed",
+                        {"failed_step.$": "$.failed_step", "error_type.$": "$.error.Error"},
+                    ),
                     "TimeoutSeconds": FUNCTIONS["steps"].timeout + 60,
                     "Next": "FailedEnd",
                 },

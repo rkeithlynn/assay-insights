@@ -15,8 +15,11 @@ come from the execution's input, which is the ingest job (section 6, rule 4).
     `originals/`, the document's key, size and page count are set, and processing goes on.
   The PDF itself is never modified. A repeat of the step finds its own `fingerprint` event
   and returns the same outcome without doing anything again.
-- `failed`: the state machine's catch. The document becomes `failed` with a short code from
-  a fixed list, never the error's own text.
+- `failed`: the state machine's catch. The document becomes `failed` with `{step}_failed`
+  (the step from the state machine's definition, checked against `PIPELINE_STEPS`), which is
+  all a tenant user sees. Its `failed` event also keeps the error's name (`error_type`,
+  checked against `ERROR_TYPE`) for the master view. The error's message and stack trace
+  never reach this step.
 
 The reserved isolation-test document ID is refused by both: no row read or written, no
 object touched.
@@ -25,6 +28,7 @@ object touched.
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -54,13 +58,13 @@ CONTINUE, DUPLICATE, ON_HOLD, FAILED, REFUSED = (
     "failed",
     "refused",
 )
-# Error names from Step Functions -> the short code stored on the document.
-FAILURE_CODES = {
-    "States.Timeout": "timeout",
-    "States.HeartbeatTimeout": "timeout",
-    "Lambda.TooManyRequestsException": "throttled",
-}
+# The steps a failure can name (the state machine's `failed_step`). The document's code is
+# `{step}_failed`; anything else is `pipeline_error`. The second half adds steps 5 to 10.
+PIPELINE_STEPS = frozenset({"fingerprint"})
 DEFAULT_FAILURE = "pipeline_error"
+# The error's name as Step Functions gives it: an exception type, an AWS error code or a
+# `States.*` name. Kept only if it matches; never its message or stack trace.
+ERROR_TYPE = re.compile(r"[A-Za-z0-9_.]{1,64}")
 
 
 class Refused(Exception):
@@ -273,11 +277,26 @@ def fingerprint(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
     return {"outcome": CONTINUE}
 
 
+def failure_code(step: object) -> str:
+    """`{step}_failed` for a known step, else `pipeline_error`."""
+    return f"{step}_failed" if isinstance(step, str) and step in PIPELINE_STEPS else DEFAULT_FAILURE
+
+
+def error_type(event: dict[str, Any]) -> str | None:
+    """The error's name, if it is one. An execution started before the definition passed
+    only the error's name gave the whole error object (`error`); its name is read from it."""
+    value = event.get("error_type")
+    if value is None and isinstance(event.get("error"), dict):
+        value = event["error"].get("Error")
+    if isinstance(value, str) and ERROR_TYPE.fullmatch(value):
+        return value
+    return None
+
+
 def failed(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
     tenant_id, document_id = _ids(event)
-    error = event.get("error") or {}
-    name = str(error.get("Error", "")) if isinstance(error, dict) else ""
-    code = FAILURE_CODES.get(name, DEFAULT_FAILURE)
+    code = failure_code(event.get("failed_step"))
+    name = error_type(event)
     with tenant_tx(deps.engine, tenant_id) as conn:
         changed = conn.execute(
             text(
@@ -293,13 +312,17 @@ def failed(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
                 document_id=document_id,
                 step="failed",
                 status="failed",
-                detail={"error": code},
+                detail={"error": code, "error_type": name},
             )
-    # The error's own name is logged (it names a state or an exception type, never content);
-    # its cause is not.
+    # The error's name is logged (an exception type or a state's error, never content).
     log.error(
         "document failed",
-        extra={"tenant_id": str(tenant_id), "document_id": str(document_id), "error": name[:100]},
+        extra={
+            "tenant_id": str(tenant_id),
+            "document_id": str(document_id),
+            "error": code,
+            "error_type": name,
+        },
     )
     return {"outcome": FAILED, "error": code}
 

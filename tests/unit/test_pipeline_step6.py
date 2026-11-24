@@ -660,23 +660,74 @@ def test_the_steps_refuse_the_reserved_id_and_touch_nothing(w: World) -> None:
     ) == (0,)
 
 
-def test_the_failure_step_stores_a_code_never_the_error_text(w: World) -> None:
-    doc_id, b = eligible_document(w, "a", "a-admin", "boom.pdf")
+def _fail(w: World, name: str, **event: Any) -> tuple[uuid.UUID, dict[str, Any]]:
+    doc_id, b = eligible_document(w, "a", "a-admin", name)
     result = steps.handle(
-        {
-            "step": "failed",
-            "tenant_id": str(b.tenant_id),
-            "document_id": str(doc_id),
-            "error": {"Error": "States.Timeout", "Cause": "page text: Jane Smith, SSN ..."},
-        },
+        {"step": "failed", "tenant_id": str(b.tenant_id), "document_id": str(doc_id), **event},
         w.steps_deps(),
     )
-    assert result == {"outcome": "failed", "error": "timeout"}
-    assert doc(w, doc_id)[:2] == ("failed", "timeout")
-    details = w.db.rows(
-        "SELECT detail::text FROM assay.document_events WHERE document_id = %s", doc_id
+    return doc_id, result
+
+
+def _failed_detail(w: World, doc_id: uuid.UUID) -> dict[str, Any]:
+    row = w.db.row(
+        "SELECT detail FROM assay.document_events WHERE document_id = %s AND step = 'failed'",
+        doc_id,
     )
-    assert all("Jane" not in (d or "") for (d,) in details)
+    assert row is not None and isinstance(row[0], dict)
+    return row[0]
+
+
+def test_the_failure_step_stores_the_step_and_the_errors_name_only(w: World) -> None:
+    """The document's code names the step; the event keeps the error's name for the master
+    view. The state machine passes no message, and none is stored."""
+    doc_id, result = _fail(w, "boom.pdf", failed_step="fingerprint", error_type="AccessDenied")
+    assert result == {"outcome": "failed", "error": "fingerprint_failed"}
+    assert doc(w, doc_id)[:2] == ("failed", "fingerprint_failed")
+    assert _failed_detail(w, doc_id) == {
+        "error": "fingerprint_failed",
+        "error_type": "AccessDenied",
+    }
+
+
+@pytest.mark.parametrize(
+    ("event", "code", "kept"),
+    [
+        # A step not in PIPELINE_STEPS, or none: the generic code.
+        (
+            {"failed_step": "Fingerprint", "error_type": "States.Timeout"},
+            "pipeline_error",
+            "States.Timeout",
+        ),
+        ({"failed_step": "../x", "error_type": "x"}, "pipeline_error", "x"),
+        ({}, "pipeline_error", None),
+        # Anything that is not a name is dropped, whatever the step.
+        (
+            {"failed_step": "fingerprint", "error_type": "Access Denied: s3://x"},
+            "fingerprint_failed",
+            None,
+        ),
+        ({"failed_step": "fingerprint", "error_type": "A" * 65}, "fingerprint_failed", None),
+        ({"failed_step": "fingerprint", "error_type": ""}, "fingerprint_failed", None),
+        ({"failed_step": "fingerprint", "error_type": 7}, "fingerprint_failed", None),
+        ({"failed_step": "fingerprint", "error_type": "x\nJane Smith"}, "fingerprint_failed", None),
+        # An execution started under the old definition passed the whole error: only its name.
+        (
+            {"error": {"Error": "States.Timeout", "Cause": "page text: Jane Smith, SSN ..."}},
+            "pipeline_error",
+            "States.Timeout",
+        ),
+    ],
+)
+def test_the_failure_step_keeps_only_known_steps_and_plain_names(
+    w: World, event: dict[str, Any], code: str, kept: str | None
+) -> None:
+    doc_id, result = _fail(w, "bad.pdf", **event)
+    assert result == {"outcome": "failed", "error": code}
+    assert doc(w, doc_id)[:2] == ("failed", code)
+    detail = _failed_detail(w, doc_id)
+    assert detail == {"error": code, "error_type": kept}
+    assert "Jane" not in json.dumps(detail)
 
 
 # --- The sweeper -----------------------------------------------------------------------------

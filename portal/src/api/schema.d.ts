@@ -938,6 +938,8 @@ export interface components {
             at: string;
             /** Error Code */
             error_code: string | null;
+            /** Error Type */
+            error_type: string | null;
             /** Status */
             status: string;
             /** Step */

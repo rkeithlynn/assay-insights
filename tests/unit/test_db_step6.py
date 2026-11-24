@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import psycopg
@@ -9,7 +10,16 @@ import pytest
 from psycopg import errors
 
 from assay_db.roles import APP_TENANT, PIPELINE_LOOKUP, PLATFORM_READER, PLATFORM_WRITER
-from tests.unit.pgtest import TestDb, as_role, requires_db
+from tests.unit.pgtest import (
+    TestDb,
+    _bootstrap_as_master,
+    _conninfo,
+    _create_database,
+    _drop_database,
+    _migrate,
+    as_role,
+    requires_db,
+)
 
 pytestmark = requires_db
 
@@ -150,8 +160,104 @@ def test_the_master_step_view_has_no_viewer_and_no_detail(db: TestDb) -> None:
         ).fetchall()
         with pytest.raises(errors.InsufficientPrivilege):
             conn.execute("SELECT * FROM assay.document_events")
-    assert columns == ["document_id", "tenant_id", "step", "status", "at", "error_code"]
+    assert columns == [
+        "document_id",
+        "tenant_id",
+        "step",
+        "status",
+        "at",
+        "error_code",
+        "error_type",
+    ]
     assert ("viewed",) not in rows and ("scan",) in rows
+
+
+@pytest.mark.parametrize(
+    ("stored", "shown"),
+    [
+        ("AccessDenied", "AccessDenied"),
+        ("States.Timeout", "States.Timeout"),
+        ("Lambda.TooManyRequestsException", "Lambda.TooManyRequestsException"),
+        # Anything that is not a plain name is never shown, whatever wrote it.
+        ("Access Denied: s3://bucket/originals/x.pdf", None),
+        ("x\nJane Smith", None),
+        ("A" * 65, None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_the_master_step_view_shows_only_a_plain_error_type(
+    db: TestDb, stored: str | None, shown: str | None
+) -> None:
+    """Migration 0009: one more value from `detail`, and only if it is a name."""
+    s = db.seed
+    with psycopg.connect(db.url) as conn:
+        conn.execute("DELETE FROM assay.document_events WHERE step = 'failed'")
+        conn.execute(
+            "INSERT INTO assay.document_events (tenant_id, document_id, step, status, detail) "
+            "VALUES (%s, %s, 'failed', 'failed', %s)",
+            (
+                s.tenant_a,
+                s.doc_a,
+                json.dumps({"error": "fingerprint_failed", "error_type": stored}),
+            ),
+        )
+    with as_role(db, PLATFORM_READER) as conn:
+        row = conn.execute(
+            "SELECT error_code, error_type FROM platform.ingestion_events_v "
+            "WHERE document_id = %s AND step = 'failed'",
+            (s.doc_a,),
+        ).fetchone()
+    assert row == ("fingerprint_failed", shown)
+
+
+# Everything that says who may read what, except the view's own column list.
+PRIVILEGES = {
+    "view": "SELECT pg_get_userbyid(c.relowner), c.relacl::text, c.reloptions::text "
+    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'platform' AND c.relname = 'ingestion_events_v'",
+    "policies": "SELECT schemaname, tablename, policyname, roles::text, cmd, qual, with_check "
+    "FROM pg_policies ORDER BY 1, 2, 3",
+    "tables": "SELECT grantee, table_schema, table_name, privilege_type FROM "
+    "information_schema.role_table_grants ORDER BY 1, 2, 3, 4",
+    "columns": "SELECT grantee, table_schema, table_name, column_name, privilege_type FROM "
+    "information_schema.column_privileges ORDER BY 1, 2, 3, 4, 5",
+    "members": "SELECT roleid::regrole::text, member::regrole::text, inherit_option, "
+    "set_option FROM pg_auth_members ORDER BY 1, 2",
+}
+
+
+def _privileges(name: str) -> dict[str, list[tuple[object, ...]]]:
+    with psycopg.connect(_conninfo(name)) as conn:
+        return {key: conn.execute(query).fetchall() for key, query in PRIVILEGES.items()}
+
+
+def test_migration_0009_adds_one_column_and_changes_no_owner_grant_or_policy(db: TestDb) -> None:
+    """Up and down: the view keeps its owner, options and grants; the only new column
+    privileges are on `error_type` of that view."""
+    name = f"assay_test_{uuid.uuid4().hex[:12]}"
+    _create_database(name)
+    try:
+        _bootstrap_as_master(name)
+        _migrate(name, "0008")
+        before = _privileges(name)
+        assert before["view"][0][0] == "platform_view_owner"
+        _migrate(name, "0009")
+        after = _privileges(name)
+        assert {k: v for k, v in after.items() if k != "columns"} == {
+            k: v for k, v in before.items() if k != "columns"
+        }
+        added = set(after["columns"]) - set(before["columns"])
+        assert set(before["columns"]) <= set(after["columns"])
+        assert added and all(
+            row[1:4] == ("platform", "ingestion_events_v", "error_type")
+            and row[0] in {"platform_reader", "platform_view_owner"}
+            for row in added
+        ), added
+        _migrate(name, "0008", down=True)
+        assert _privileges(name) == before
+    finally:
+        _drop_database(name)
 
 
 def test_discarded_is_a_document_status(db: TestDb) -> None:

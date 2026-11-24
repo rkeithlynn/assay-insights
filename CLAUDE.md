@@ -189,7 +189,7 @@ Still open:
   chooses.
 - **Titan Text Embeddings V2 (owner decisions 1 and 2):** called by model ID in us-east-1 (it
   has no `us.` profile; a named exception to section 2), with an `ai_models` row (job
-  `embed`, migration `0009`) and its price left blank for the owner. Arrives with the second
+  `embed`, migration `0010`; `0009` is the master view's `error_type`) and its price left blank for the owner. Arrives with the second
   half, when the catalog changes; `seed.py` refuses a catalog with a blank price.
 - **Portal:** add every new screen to `SCREENS` in `portal/e2e/layout.e2e.ts` (and its data
   to `e2e/fixtures.ts`); use `RowActions` for any row menu. The navigation is now 218 px
@@ -1242,16 +1242,53 @@ How it works (first half):
 Deploy order (owner): `pulumi up`; `uv run scripts/migrate.py` (bootstrap creates
 `pipeline_lookup`, then 0008); `uv run scripts/update_tenants.py` (CORS, malware plan
 prefix: needed before any browser upload); `uv run scripts/run_isolation.py ...`; browser
-checks.
+checks. After the copy and error-code fixes: `pulumi up`, then `uv run scripts/migrate.py`
+(0009) straight away. Until 0009 is in, the admin route's query names a column the view
+does not have, so the master view's step panel fails (the tenant view is unaffected).
 
 Notes:
 
-- **Not yet verified in AWS:** a browser PUT through the presigned link into a bucket with
-  Object Lock default retention (the signed `x-amz-checksum-sha256` should satisfy Object
-  Lock's integrity requirement); that the scan event's `versionId` names the version
-  scanned (AWS's example has it; it does not say so in words); that S3 cites
-  `s3:GetObject` (or `s3:GetObjectVersion`) for a session-policy refusal of an object that
-  exists (the inbox fixture checks it on the next isolation run).
+- **Verified by the first browser upload** (Infinity Loans, 2026-11-24 21:32 UTC): the
+  presigned PUT with the signed `x-amz-checksum-sha256` is accepted under Object Lock default
+  retention, and the scan event maps to the registered upload.
+- **Not yet verified in AWS:** that the scan event's `versionId` names the version scanned
+  (AWS's example has it; it does not say so in words); that S3 cites `s3:GetObject` (or
+  `s3:GetObjectVersion`) for a session-policy refusal of an object that exists (the inbox
+  fixture checks it on the next isolation run); that a copy with `TaggingDirective`
+  `REPLACE` and no tags passes with the tenant role's permissions (next bullet).
+- **Pipeline copies take no tags** (owner-approved fix, 2026-11-24). The first browser
+  upload failed at fingerprint: `CopyObject` from `inbox/` to `originals/` was refused
+  (`AccessDenied`, generic message) on all three attempts. GuardDuty tags every object it
+  scans (the plan's tagging is on), and `CopyObject` copies the source's tags by default.
+  That needs `s3:PutObjectTagging` (a `CopyObject` dependent action in the Service
+  Authorization Reference) and reading the source's tags. The policy simulator
+  (2026-11-24) shows `s3:GetObjectVersionTagging` and `s3:PutObjectTagging` as
+  `implicitDeny` in the deployed tenant role's policy and in the PIPELINE session policy, and
+  `explicitDeny` in the tenant bucket policy (as the program writes it), while
+  `GetObjectVersion`, `PutObject` and `GetObjectTagging` are allowed in all three. Every
+  copy (`runtime.S3Objects.copy`: fingerprint's originals and the scan step's quarantine)
+  now sends `TaggingDirective=REPLACE` with no tags. No permission changed. **If S3 still
+  refuses, stop:** the alternative is a widening the owner must approve first (both actions
+  for the tenant role, in its policy, the PIPELINE session policy and every tenant's bucket
+  policy).
+- **A failed step names itself** (owner decision, 2026-11-24). Each step's catch goes through
+  a Pass state that sets `failed_step` to that step's name (fixed text in the definition);
+  `Failed` receives only that and the error's name (`$.error.Error`), never its `Cause`. The
+  document's code is `{step}_failed` (`steps.PIPELINE_STEPS`; anything else is
+  `pipeline_error`), which is all a tenant user sees ("The fingerprint step failed."). The
+  `failed` event also keeps `error_type`, the error's name, if it matches
+  `^[A-Za-z0-9_.]{1,64}$`. Master admins see the code and the error type: migration `0009`
+  adds `error_type` to `platform.ingestion_events_v` (a read widening for
+  `platform_reader`), and the view shows it only if it matches the same pattern. The
+  tenant's document detail reads only `detail.error`. **Second half: add every new step to
+  `PIPELINE_STEPS` and give it its own Pass state** (`test_infra_pipeline.py` checks every
+  catch goes through one).
+- **A failed document cannot be re-run; upload the file again.** Nothing restarts a `failed`
+  document (the sweeper requeues only `processing` documents with no execution), and Step
+  Functions does not reuse a Standard execution's name, which is the document ID, for 90
+  days. A re-upload is a new document and an original: the duplicate check and the
+  per-tenant unique index both skip `failed`. Reprocessing (for extraction changes) is to be
+  proposed in the second-half plan.
 - **S3 refuses a missing key for `s3:ListBucket`** (first isolation run after the step 6
   deploy, 2026-11-24). Its AccessDenied message to a READ or UPLOAD session reading a key
   that was never written was "not authorized to perform: s3:ListBucket ... because no
