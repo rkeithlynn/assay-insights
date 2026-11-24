@@ -33,7 +33,7 @@ change. Where this file and the spec differ, the spec wins.
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
-| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | Next. Not started |
+| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half built** on `build-step-5`; `pulumi preview` reviewed, waiting for the owner's `pulumi up`. Second half (Audit history, Models) after sign-in, Users, Tenants and seed are verified |
 | 6–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -108,6 +108,21 @@ Step 4 was verified on 2026-11-23:
   account before step 6; step 6 must follow the two "For step 6" notes below (no file
   names in keys, and the reserved fixture document ID).
 - CI on the `build-step-4` pull request (#3) must pass before `main` is fast-forwarded.
+
+## Known limits (owner decisions, build step 5)
+
+- **A suspended tenant's users can still complete managed login** (D10). Cognito is not
+  changed when a tenant is suspended; every API request is refused with `tenant_suspended`
+  and the portal says so. Reactivating needs no Cognito change either.
+- **Failed sign-ins are not audited** (section 7a). Only successful sign-ins
+  (post-authentication trigger), password resets (post-confirmation), sign-outs and password
+  changes (reported by the portal) are recorded.
+- **A password change made outside the portal leaves no audit row** (D3): the portal calls
+  Cognito's `ChangePassword` directly, then reports it. CloudTrail still records
+  `ChangePassword` (it is in the user pool actions CloudTrail logs).
+- **Cognito sign-in rows have no IP address or browser**: the post-authentication event
+  carries neither (without threat protection). Rows the API writes take the viewer's IP
+  from `CloudFront-Viewer-Address`.
 
 ## Fixed facts (BUILD_SPEC.md section 2)
 
@@ -706,3 +721,95 @@ assets/     Logo and favicon SVGs
     `kms:Decrypt` as well (see the provisioning role's bullet above).
   `run_isolation.py` then checks the result: a principal whose IAM policy allows it is
   still refused when it lists a tenant's vectors.
+
+### Step 5 (portal shell, sign-in, Tenants and Users, `scripts/seed.py`)
+
+Owner decisions (2026-11-23), D1 to D11 of the step 5 plan:
+
+- **Auth events (D1).** One trigger Lambda on both pools (post-authentication and
+  post-confirmation, `api/assay_api/cognito_auth_trigger.py`) runs in the VPC and only sends
+  `{event_id, user_pool_id, sub, action, at}` to SQS through the `sqs` endpoint. It never
+  raises: a failed send is logged at ERROR, which a metric filter turns into an alarm. The
+  consumer (`auth_event_consumer.py`, in the VPC, as `audit_writer`) calls
+  `auth_events.record()` (migration 0004): SECURITY DEFINER owned by the NOLOGIN role
+  `auth_event_recorder`, `search_path = pg_catalog, pg_temp`, actions `sign_in` and
+  `password_reset` only. It finds the tenant, user, email and role in `users` (never from
+  the event) and uses the event ID as the audit row's ID (a redelivery is recorded once).
+  An unknown user, an unknown pool or a bad message fails the message: after 5 receives it
+  is in the dead-letter queue, whose depth raises an alarm. Nothing is dropped.
+- **Last sign-in (D2)**: `auth_events.record()` sets `last_sign_in_at` and moves `invited` to
+  `active`.
+- **Change password (D3)** goes from the browser straight to Cognito; the portal then calls
+  `POST /api/auth/password-changed`. **MFA setup (D4)** is a portal screen
+  (`AssociateSoftwareToken`, `VerifySoftwareToken`, `SetUserMFAPreference`): AWS documents
+  that managed login "doesn't prompt users to set up MFA" when MFA is optional (the tenant
+  pool), and prompts for it when MFA is required (the platform pool).
+- **Sessions revoked (D5).** `users.sessions_revoked_at` is set by an MFA reset and by
+  disabling a user; the account check refuses a token whose `auth_time` is not later
+  (`session_revoked`). Global sign-out alone revokes only refresh tokens.
+- **MFA reset** is `AdminDeleteSoftwareToken` plus `AdminUserGlobalSignOut`, not
+  `AdminSetUserMFAPreference` (which "doesn't reset an existing TOTP MFA"). With the device
+  gone, the platform pool returns `MFA_SETUP` at the next sign-in; a tenant-admin sees the
+  portal's MFA screen. Check both in a real run.
+- **D8.** `platform_view_owner`'s policy on `users` is `true`; it stays NOLOGIN with
+  column-level SELECT only, and every view filters for itself. `test_db_step5.py` checks
+  that no view in schema `platform` shows a business tenant's non-admin user.
+- **D9.** The catalog is loaded as `migrator` through the migration Lambda
+  (`seed_models`); no application role writes `ai_models`. New tenants get the defaults
+  (stack config `defaultIngestModel`, `defaultQueryModel`) in `activate`, in the same
+  transaction. **The `aiModels` prices in `Pulumi.dev.yaml` are blank on purpose: the owner
+  fills them in; `seed.py` refuses to load the catalog until then.**
+
+Security conditions (owner, 2026-11-23):
+
+1. **Client write attributes.** Both portal app clients may write `name` only
+   (`CLIENT_WRITE_ATTRIBUTES`); checked by `test_infra_auth_api.py` and, against Cognito, by
+   `tests/isolation/cognito_clients.py` (run by `run_isolation.py` on the owner's machine,
+   because Cognito cannot be reached from the VPC). The portal clients allow no
+   programmatic sign-in and a sign-in on the real tenant pool would fire the audit trigger
+   for an unknown user, so the attempt runs on a throwaway replica pool with the tenant
+   pool's immutable `custom:tenant_id` and a client with the deployed client's attributes.
+   It is created and deleted by the run.
+2. **`cognito-admin-api` checks its target.** Every tenant-pool operation needs a
+   `tenant_id`; the Lambda reads the user and refuses (`user_not_found`) unless its
+   `custom:tenant_id` and `sub` match. Platform pool: `reset_mfa` of a `master-user` only.
+   It is a second function on the step 4 image, with `OPERATIONS` limiting what each
+   function serves (`invite` only on the provisioning role's).
+3. **ALB ingress** comes from `CloudFront-VPCOrigins-Service-SG`, looked up after the VPC
+   origin exists (so a preview shows the rule's source as unknown). If CloudFront has not
+   created the group yet when `pulumi up` gets there, the lookup fails; run `pulumi up`
+   again.
+4. **SQS endpoint.** It existed since step 2 with the default allow-all policy. It now allows
+   only the trigger's role to send to the auth-events queue. **Step 6's pipeline queues must
+   be added to `sqs_endpoint_policy`.**
+5. **Portal.** Tokens in sessionStorage only (oidc-client-ts `userStore` and `stateStore`;
+   `auth.test.ts` checks localStorage stays empty). Exact versions, resolved with
+   `npm install --before=<two weeks ago>` in the pinned Node container, `npm ci
+   --ignore-scripts` everywhere. HSTS without preload.
+
+Notes:
+
+- **Yield dependencies need `scope="function"`.** FastAPI's default runs a yield
+  dependency's exit after the response is sent, so a write could be reported and then fail to
+  commit. Every dependency in `assay_api.security` sets it.
+- **Endpoint policies are never moved or recreated**: deleting a `VpcEndpointPolicy`
+  resets the endpoint to allow everything. The `lambda` endpoint's policy keeps its step 4
+  name and parent (`Provisioning.lambda_endpoint_access`).
+- **A security group's description cannot change** without replacing the group (the first
+  step 5 preview replaced the ALB's). Keep descriptions as they are.
+- **Portal build.** `scripts/build_portal.py` (a Pulumi command, keyed on a hash of
+  `portal/` and `assets/`) builds `portal/Dockerfile` (type check, tests, `vite build`)
+  and uploads the files; `config.json` is written by Pulumi. After changing a route, run
+  `uv run scripts/export_openapi.py` and `npm run gen:api`; `test_openapi.py` and CI
+  check both.
+- **TypeScript stays on 5.9**: `typescript-eslint` and `openapi-typescript` do not support
+  TypeScript 7 yet.
+- **Dev-only npm advisory** (2026-11-23): a moderate ReDoS in `minimatch`, via ESLint and
+  `typescript-eslint`. The fixed releases (ESLint 10.15.0, `typescript-eslint` 8.74.0) are
+  younger than two weeks; bump them after 2026-12-07. CI audits the shipped dependencies
+  (`npm audit --omit=dev`), which are clean.
+- **API errors are short codes** (`detail`); `portal/src/errors.ts` turns them into text.
+- **Not tested in AWS yet:** everything in this step. In particular CloudFront to the ALB over
+  HTTPS (the certificate checked against the forwarded Host header), the Authorization
+  header reaching the API, the triggers on both pools, the MFA reset, and whether CloudTrail
+  shows `ChangePassword`.

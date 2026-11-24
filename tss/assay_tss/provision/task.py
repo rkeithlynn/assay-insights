@@ -206,6 +206,7 @@ class Provisioner:
                 cognito_sub=cognito_sub,
                 first_admin=tenants.FirstAdmin(request.first_admin.name, request.first_admin.email),
                 actor=request.actor.actor(),
+                default_models=self._settings.default_models,
             )
 
     # --- The run --------------------------------------------------------------------------

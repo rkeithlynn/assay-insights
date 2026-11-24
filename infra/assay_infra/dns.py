@@ -31,8 +31,8 @@ class DnsAndCertificate(pulumi.ComponentResource):
 
     The certificate lives in the provider's Region (us-east-1, as CloudFront requires).
     Validation records are written into the zone; ACM issues the certificate once the
-    zone is delegated from the registrar. Waiting for issuance is left to the consumer
-    of the certificate (the edge step), so `pulumi up` never blocks on delegation.
+    zone is delegated from the registrar. `validated()` waits for issuance; it is called
+    once something uses the certificate (the edge, build step 5).
     """
 
     def __init__(
@@ -47,6 +47,7 @@ class DnsAndCertificate(pulumi.ComponentResource):
         if not hosts:
             raise ValueError("at least one host is required")
         child = pulumi.ResourceOptions(parent=self)
+        self._name = name
 
         # Protected: replacing the zone changes its name servers and breaks delegation.
         self.zone = aws.route53.Zone(
@@ -93,3 +94,14 @@ class DnsAndCertificate(pulumi.ComponentResource):
                 "certificate_arn": self.certificate.arn,
             }
         )
+
+    def validated(self) -> aws.acm.CertificateValidation:
+        """Wait until ACM has issued the certificate (build step 5: CloudFront and the load
+        balancer use it). The zone is delegated, so this returns at once on an issued one."""
+        self.validation = aws.acm.CertificateValidation(
+            f"{self._name}-cert-validation",
+            certificate_arn=self.certificate.arn,
+            validation_record_fqdns=[r.fqdn for r in self.validation_records],
+            opts=pulumi.ResourceOptions(parent=self),
+        )
+        return self.validation

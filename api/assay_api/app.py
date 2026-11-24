@@ -9,13 +9,25 @@ from fastapi import FastAPI
 
 from assay_api.auth import TokenVerifier
 from assay_api.database import Databases
-from assay_api.routes import health, me
+from assay_api.routes import admin, auth_events, health, me, users
+from assay_api.services import (
+    CognitoAdmin,
+    LambdaCognitoAdmin,
+    Provisioning,
+    StepFunctionsProvisioning,
+)
 from assay_api.settings import Settings
 
 API_PREFIX = "/api"
 
 
-def create_app(*, verifier: TokenVerifier, databases: Databases) -> FastAPI:
+def create_app(
+    *,
+    verifier: TokenVerifier,
+    databases: Databases,
+    cognito: CognitoAdmin,
+    provisioning: Provisioning,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
@@ -32,13 +44,19 @@ def create_app(*, verifier: TokenVerifier, databases: Databases) -> FastAPI:
     )
     app.state.verifier = verifier
     app.state.databases = databases
-    app.include_router(health.router, prefix=API_PREFIX)
-    app.include_router(me.router, prefix=API_PREFIX)
+    app.state.cognito = cognito
+    app.state.provisioning = provisioning
+    for router in (health.router, me.router, auth_events.router, users.router, admin.router):
+        app.include_router(router, prefix=API_PREFIX)
     return app
 
 
 def app_from_env() -> FastAPI:
     settings = Settings.from_env()
+    region = settings.db.region
     return create_app(
-        verifier=TokenVerifier(settings.pools), databases=Databases.for_target(settings.db)
+        verifier=TokenVerifier(settings.pools),
+        databases=Databases.for_target(settings.db),
+        cognito=LambdaCognitoAdmin(settings.cognito_admin_function, region=region),
+        provisioning=StepFunctionsProvisioning(settings.provisioning_state_machine, region=region),
     )

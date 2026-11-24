@@ -310,11 +310,14 @@ def test_a_tenant_session_cannot_change_other_tags(env: Env, tenant: StorageCont
     )
 
 
-def test_a_tenant_session_cannot_invite_users(env: Env, tenant: StorageContext) -> None:
+@pytest.mark.parametrize("function", ["invite_function", "api_cognito_function"])
+def test_a_tenant_session_cannot_invoke_the_cognito_admin_functions(
+    env: Env, tenant: StorageContext, function: str
+) -> None:
     api = lambda_(tenant.session(), env.region)
     assert_denied(
         lambda: api.invoke(
-            FunctionName=env.invite_function, Payload=json.dumps({"operation": "probe"}).encode()
+            FunctionName=getattr(env, function), Payload=json.dumps({"operation": "probe"}).encode()
         )
     )
 
@@ -394,11 +397,15 @@ def test_the_runner_cannot_read_tenant_vectors(
     )
 
 
-def test_the_runner_cannot_invite_users(env: Env, runner: boto3.Session) -> None:
-    """Only the provisioning role may invoke the Cognito admin Lambda."""
+@pytest.mark.parametrize("function", ["invite_function", "api_cognito_function"])
+def test_the_runner_cannot_invoke_the_cognito_admin_functions(
+    env: Env, runner: boto3.Session, function: str
+) -> None:
+    """Only the provisioning role may invoke the step 4 function; only the API and the seed
+    Lambda the API's (build step 5)."""
     api = lambda_(runner, env.region)
     assert_denied(
         lambda: api.invoke(
-            FunctionName=env.invite_function, Payload=json.dumps({"operation": "probe"}).encode()
+            FunctionName=getattr(env, function), Payload=json.dumps({"operation": "probe"}).encode()
         )
     )

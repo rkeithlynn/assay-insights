@@ -33,3 +33,47 @@ config:
   # Alarm notifications (break-glass use, failed tenant provisioning) are emailed here.
   # SNS sends a confirmation link first; nothing is delivered until it is followed.
   assay-platform:alarmEmail: keith.lynn@pilartech.com
+  # AWS WAF on CloudFront: requests allowed per IP address in any 5-minute window.
+  assay-platform:wafRateLimit: "1000"
+  # The model catalog (ai_models), loaded by scripts/seed.py as migrator through the migration
+  # Lambda. Bedrock `us.` inference profiles only. Prices are US dollars per million tokens;
+  # seed.py refuses to load the catalog while any price is blank.
+  assay-platform:aiModels:
+    - name: Claude Haiku 4.5
+      profileId: us.anthropic.claude-haiku-4-5-20251001-v1:0
+      jobs: [ingest, query]
+      priceIn: ""
+      priceOut: ""
+    - name: Claude Sonnet 4.6
+      profileId: us.anthropic.claude-sonnet-4-6
+      jobs: [ingest, query]
+      priceIn: ""
+      priceOut: ""
+    - name: Claude Opus 4.6
+      profileId: us.anthropic.claude-opus-4-6-v1
+      jobs: [ingest, query]
+      priceIn: ""
+      priceOut: ""
+  # The models every new tenant starts with (section 7b). Must be aiModels profile IDs.
+  assay-platform:defaultIngestModel: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  assay-platform:defaultQueryModel: us.anthropic.claude-sonnet-4-6
+  # scripts/seed.py (section 5). Display names default to the email address.
+  assay-platform:seed:
+    platform:
+      name: Assay Insights, LLC
+      users:
+        - email: keith.lynn@pilartech.com
+          role: master-admin
+        - email: robert@pilartech.com
+          role: master-user
+    tenants:
+      - name: Global Finance, Inc
+        admin: robert@ugafamily.com
+        users:
+          - email: robertreg@ugafamily.com
+            role: tenant-user
+      - name: Infinity Loans
+        admin: me@keithlynn.com
+        users:
+          - email: keith@keithlynn.com
+            role: tenant-user

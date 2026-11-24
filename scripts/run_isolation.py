@@ -14,7 +14,12 @@ here runs on this machine. Two things are started, and the script waits for both
 2. the provisioning task with its `probe` command, which tries, as the provisioning role,
    to read and write the tenants' objects and vectors. It must be refused every time.
 
-Exits 1 unless every test and every probe check passed.
+A third part runs here, with your credentials, because Cognito cannot be reached from the
+VPC: `tests/isolation/cognito_clients.py` checks that neither portal app client may write
+anything but `name`, and that a signed-in user's own token cannot change their
+`custom:tenant_id` or `email` (on a throwaway replica pool it creates and deletes).
+
+Exits 1 unless every test and every check passed.
 """
 
 from __future__ import annotations
@@ -32,6 +37,9 @@ from typing import Any
 
 import boto3
 from botocore.config import Config
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tests.isolation import cognito_clients
 
 INFRA_DIR = Path(__file__).resolve().parent.parent / "infra"
 DEFAULT_STACK = "pilartech/assay-platform/dev"
@@ -186,6 +194,28 @@ def run_probe(session: boto3.Session, stack: str, tenants: tuple[uuid.UUID, uuid
     return report_probe(checks, exit_code)
 
 
+def run_cognito_clients(session: boto3.Session, stack: str) -> bool:
+    print("\nChecking the portal app clients' writable attributes ...", flush=True)
+    checks = cognito_clients.run(
+        session,
+        tenant=(
+            pulumi("stack", "output", "tenant_user_pool_id", stack=stack),
+            pulumi("stack", "output", "tenant_app_client_id", stack=stack),
+        ),
+        platform=(
+            pulumi("stack", "output", "platform_user_pool_id", stack=stack),
+            pulumi("stack", "output", "platform_app_client_id", stack=stack),
+        ),
+        name_prefix=f"assay-{stack.rsplit('/', 1)[-1]}",
+    )
+    for check in checks:
+        mark = "PASS" if check.ok else "FAIL"
+        print(f"{mark}  {check.check} (expected {check.expected}, was {check.outcome})")
+    failed = [c for c in checks if not c.ok]
+    print(f"\n{len(checks) - len(failed)} passed, {len(failed)} failed")
+    return bool(checks) and not failed
+
+
 def run_tests(session: boto3.Session, stack: str, tenants: tuple[uuid.UUID, uuid.UUID]) -> bool:
     function = pulumi("stack", "output", "isolation_function_name", stack=stack)
     # A paused database takes a while to resume; the function's own timeout is 300 seconds.
@@ -232,7 +262,8 @@ def main() -> int:
 
     tests_ok = run_tests(session, args.stack, tenants)
     probe_ok = run_probe(session, args.stack, tenants)
-    if not (tests_ok and probe_ok):
+    clients_ok = run_cognito_clients(session, args.stack)
+    if not (tests_ok and probe_ok and clients_ok):
         print("Isolation tests did not all pass.", file=sys.stderr)
         return 1
     print("Every isolation test passed.")

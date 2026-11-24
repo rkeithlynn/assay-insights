@@ -8,6 +8,8 @@ BUILD_SPEC.md section 4, item 4.
   immutable `custom:tenant_id` that no app client can write. A pre-token-generation trigger
   copies it into the access token, with whether the user has TOTP (`assay_api.claims`).
 - Platform pool: groups master-admin and master-user; TOTP MFA required.
+- Both pools: post-authentication and post-confirmation triggers that queue sign-ins and
+  password resets for `audit_log` (`assay_infra.auth_events`).
 - Managed login (version 2) on a Cognito prefix domain, branded with the logo
   (`assay_infra.branding`, which checks every asset against Cognito's limits); public app
   clients with no secret, authorization code flow with PKCE, access token 60 minutes,
@@ -61,6 +63,8 @@ TEMPORARY_PASSWORD_DAYS = 7
 PASSWORD_MIN_LENGTH = 12
 PASSWORD_HISTORY = 5
 OAUTH_SCOPES = ("openid", "email", "profile", "aws.cognito.signin.user.admin")
+# The only attribute either app client may write (security condition 1, build step 5).
+CLIENT_WRITE_ATTRIBUTES = ("name",)
 
 TRIGGER_DOCKERFILE = "api/pre-token.Dockerfile"
 TRIGGER_SOURCES = (
@@ -162,6 +166,7 @@ class UserPool(pulumi.ComponentResource):
         *,
         spec: PoolSpec,
         repo_root: Path,
+        auth_event_lambda_arn: pulumi.Input[str],
         pre_token_lambda_arn: pulumi.Input[str] | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -183,13 +188,18 @@ class UserPool(pulumi.ComponentResource):
                     ),
                 )
             )
-        lambda_config = None
+        # Section 7a: sign-ins and password resets are queued for audit_log by one trigger
+        # on both pools (assay_infra.auth_events).
+        pre_token = None
         if pre_token_lambda_arn is not None:
-            lambda_config = aws.cognito.UserPoolLambdaConfigArgs(
-                pre_token_generation_config=aws.cognito.UserPoolLambdaConfigPreTokenGenerationConfigArgs(
-                    lambda_arn=pre_token_lambda_arn, lambda_version="V2_0"
-                )
+            pre_token = aws.cognito.UserPoolLambdaConfigPreTokenGenerationConfigArgs(
+                lambda_arn=pre_token_lambda_arn, lambda_version="V2_0"
             )
+        lambda_config = aws.cognito.UserPoolLambdaConfigArgs(
+            pre_token_generation_config=pre_token,
+            post_authentication=auth_event_lambda_arn,
+            post_confirmation=auth_event_lambda_arn,
+        )
 
         self.pool = aws.cognito.UserPool(
             f"{name}-pool",
@@ -280,8 +290,10 @@ class UserPool(pulumi.ComponentResource):
             prevent_user_existence_errors="ENABLED",
             read_attributes=read_attributes,
             # Listed explicitly: an empty list would let the client write every attribute.
-            # custom:tenant_id is never here (it is immutable anyway).
-            write_attributes=["name"],
+            # The access token carries aws.cognito.signin.user.admin, so a user can call
+            # UpdateUserAttributes on themselves: only the display name. Never email (it is
+            # the sign-in name) and never custom:tenant_id (immutable anyway).
+            write_attributes=list(CLIENT_WRITE_ATTRIBUTES),
             opts=child,
         )
 
@@ -406,6 +418,8 @@ class Auth(pulumi.ComponentResource):
         region: str,
         account_id: pulumi.Input[str],
         repo_root: Path,
+        # The post-authentication and post-confirmation trigger (assay_infra.auth_events).
+        auth_event_lambda_arn: pulumi.Input[str],
         aws_profile: str | None = None,
         jwks_fetcher: JwksFetcher = fetch_jwks,
         opts: pulumi.ResourceOptions | None = None,
@@ -432,6 +446,7 @@ class Auth(pulumi.ComponentResource):
                 tenant_attribute=True,
             ),
             repo_root=repo_root,
+            auth_event_lambda_arn=auth_event_lambda_arn,
             pre_token_lambda_arn=self.pre_token.function.arn,
             opts=child,
         )
@@ -447,6 +462,7 @@ class Auth(pulumi.ComponentResource):
                 tenant_attribute=False,
             ),
             repo_root=repo_root,
+            auth_event_lambda_arn=auth_event_lambda_arn,
             opts=child,
         )
 

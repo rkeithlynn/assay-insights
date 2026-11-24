@@ -32,7 +32,9 @@ log = logging.getLogger(__name__)
 
 ALGORITHM = "RS256"
 LEEWAY_SECONDS = 30
-REQUIRED_CLAIMS = ("exp", "iat", "iss", "sub", "token_use", "client_id")
+# auth_time: when the user signed in. The account check refuses a token from a sign-in
+# before the user's sessions were revoked (MFA reset, disabled).
+REQUIRED_CLAIMS = ("exp", "iat", "iss", "sub", "token_use", "client_id", "auth_time")
 GROUPS_CLAIM = "cognito:groups"
 POOL_GROUPS: Mapping[PoolKind, tuple[str, ...]] = {
     "tenant": TENANT_GROUPS,
@@ -56,6 +58,8 @@ class Principal:
     tenant_id: uuid.UUID | None
     # Platform pool: always true, because the pool requires MFA. Tenant pool: the `mfa` claim.
     mfa: bool
+    # When the user signed in (seconds since the epoch). Tokens refreshed later keep it.
+    auth_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -127,8 +131,19 @@ class TokenVerifier:
         if role not in POOL_GROUPS[kind]:
             raise InvalidToken("group does not belong to this pool")
 
+        auth_time = claims["auth_time"]
+        if not isinstance(auth_time, int) or isinstance(auth_time, bool) or auth_time <= 0:
+            raise InvalidToken("auth_time is not a time")
+
         if kind == "platform":
-            return Principal(pool=kind, sub=claims["sub"], role=role, tenant_id=None, mfa=True)
+            return Principal(
+                pool=kind,
+                sub=claims["sub"],
+                role=role,
+                tenant_id=None,
+                mfa=True,
+                auth_time=auth_time,
+            )
 
         try:
             tenant_id = uuid.UUID(str(claims[TENANT_ID_CLAIM]))
@@ -140,4 +155,5 @@ class TokenVerifier:
             role=role,
             tenant_id=tenant_id,
             mfa=claims.get(MFA_CLAIM) is True,
+            auth_time=auth_time,
         )

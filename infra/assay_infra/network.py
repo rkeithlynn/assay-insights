@@ -36,6 +36,8 @@ INTERFACE_ENDPOINT_SERVICES: tuple[str, ...] = (
     "execute-api",
     "lambda",
     "guardduty",
+    # Build step 5: the API and the seed Lambda start tenant provisioning executions.
+    "states",
 )
 
 FLOW_LOG_RETENTION_DAYS = 30
@@ -388,4 +390,26 @@ def s3_gateway_policy(account_id: str, region: str) -> str:
                 },
             ],
         }
+    )
+
+
+def states_endpoint_policy(*, state_machine: str, callers: list[str]) -> str:
+    """Through the VPC's Step Functions endpoint: start one state machine, named callers only."""
+    names = sorted(callers)
+    principal: str | list[str] = names[0] if len(names) == 1 else names
+    return json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "StartTenantProvisioning",
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": "states:StartExecution",
+                    "Resource": state_machine,
+                    "Condition": {"ArnEquals": {"aws:PrincipalArn": principal}},
+                }
+            ],
+        },
+        separators=(",", ":"),
     )

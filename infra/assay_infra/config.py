@@ -73,6 +73,21 @@ class TenancyConfig:
 
 
 @dataclass(frozen=True)
+class EdgeConfig:
+    # AWS WAF rate-based rule: requests per IP address in any 5-minute window.
+    waf_rate_limit: int
+
+
+@dataclass(frozen=True)
+class ModelsConfig:
+    # Bedrock inference profile IDs of the models every new tenant starts with (section 7b).
+    default_ingest_model: str
+    default_query_model: str
+    # Every profile ID in the catalog (aiModels), which scripts/seed.py loads.
+    catalog_profiles: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PlatformConfig:
     region: str
     # Prefix for physical resource names, for example "assay-dev".
@@ -83,6 +98,8 @@ class PlatformConfig:
     auth: AuthConfig
     tenancy: TenancyConfig
     alerts: AlertsConfig
+    edge: EdgeConfig
+    models: ModelsConfig
 
 
 def _within_zone(host: str, zone: str) -> bool:
@@ -153,6 +170,43 @@ def validate_alerts(cfg: AlertsConfig) -> AlertsConfig:
     return cfg
 
 
+# AWS WAF's lowest rate limit is 10; anything under 100 would lock out a normal user.
+WAF_RATE_LIMIT_RANGE = (100, 20_000_000)
+_PROFILE_ID = re.compile(r"^us\.[a-z0-9][a-z0-9.:-]{2,200}$")
+
+
+def validate_edge(cfg: EdgeConfig) -> EdgeConfig:
+    low, high = WAF_RATE_LIMIT_RANGE
+    if not low <= cfg.waf_rate_limit <= high:
+        raise ValueError(f"wafRateLimit must be between {low} and {high}")
+    return cfg
+
+
+def build_models(raw_catalog: object, default_ingest: str, default_query: str) -> ModelsConfig:
+    """Only `us.` inference profiles (section 2), and the defaults must be in the catalog."""
+    if not isinstance(raw_catalog, list) or not raw_catalog:
+        raise ValueError("aiModels must be a non-empty list")
+    profiles: list[str] = []
+    for entry in raw_catalog:
+        profile = str(entry.get("profileId", "")) if isinstance(entry, dict) else ""
+        if not _PROFILE_ID.match(profile):
+            raise ValueError(f"aiModels profileId {profile!r} must be a us. inference profile")
+        profiles.append(profile)
+    if len(set(profiles)) != len(profiles):
+        raise ValueError("aiModels lists a profileId twice")
+    for name, value in (
+        ("defaultIngestModel", default_ingest),
+        ("defaultQueryModel", default_query),
+    ):
+        if value not in profiles:
+            raise ValueError(f"{name} must be one of the aiModels profile IDs")
+    return ModelsConfig(
+        default_ingest_model=default_ingest,
+        default_query_model=default_query,
+        catalog_profiles=tuple(profiles),
+    )
+
+
 def validate_tenancy(cfg: TenancyConfig) -> TenancyConfig:
     if not _ROLE_ARN.match(cfg.break_glass_principal_arn):
         raise ValueError("breakGlassPrincipalArn must be an IAM role ARN")
@@ -207,4 +261,10 @@ def load_config() -> PlatformConfig:
             )
         ),
         alerts=validate_alerts(AlertsConfig(email=conf.require("alarmEmail"))),
+        edge=validate_edge(EdgeConfig(waf_rate_limit=conf.require_int("wafRateLimit"))),
+        models=build_models(
+            conf.require_object("aiModels"),
+            conf.require("defaultIngestModel"),
+            conf.require("defaultQueryModel"),
+        ),
     )

@@ -232,6 +232,9 @@ class User(Base):
     # A master admin invites a tenant's first admin, so this may cross tenants.
     invited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey(f"{SCHEMA}.users.id"))
     last_sign_in_at: Mapped[tstz | None]
+    # Set when the user's MFA is reset or the user is disabled. The API refuses any token
+    # from a sign-in before this time (global sign-out revokes only refresh tokens).
+    sessions_revoked_at: Mapped[tstz | None]
 
 
 # --- Batches and documents -------------------------------------------------------------

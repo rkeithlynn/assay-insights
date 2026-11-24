@@ -34,7 +34,8 @@ from assay_api.security import (
     TenantAdmin,
     TenantMember,
 )
-from assay_db.roles import APP_TENANT, PLATFORM_READER
+from assay_db.roles import APP_TENANT, PLATFORM_READER, PLATFORM_WRITER
+from tests.unit.fakes import FakeCognito, FakeProvisioning
 from tests.unit.pgtest import (
     TestDb,
     _bootstrap_as_master,
@@ -163,9 +164,13 @@ def client(api_db: ApiDb) -> Iterator[TestClient]:
     databases = Databases(
         tenant_engine=_engine(api_db.name, APP_TENANT),
         platform_engine=_engine(api_db.name, PLATFORM_READER),
+        writer_engine=_engine(api_db.name, PLATFORM_WRITER),
     )
     app = create_app(
-        verifier=TokenVerifier([TENANT.settings, PLATFORM.settings]), databases=databases
+        verifier=TokenVerifier([TENANT.settings, PLATFORM.settings]),
+        databases=databases,
+        cognito=FakeCognito(),
+        provisioning=FakeProvisioning(),
     )
     _probe_app(app)
     with TestClient(app) as test_client:
@@ -410,20 +415,21 @@ def _has_account_check(route: APIRoute) -> bool:
 
 
 def api_routes(app: FastAPI) -> dict[str, APIRoute]:
-    """Every endpoint by its full path, including those of included routers."""
+    """Every endpoint by method and full path ("GET /api/users"), included routers too."""
     routes: dict[str, APIRoute] = {}
     for context in iter_route_contexts(app.routes):
         route = context.original_route
         if isinstance(route, APIRoute) and context.path:
-            routes[context.path] = route
+            for method in sorted(route.methods or ()):
+                routes[f"{method} {context.path}"] = route
     return routes
 
 
 def unchecked_routes(app: FastAPI) -> list[str]:
     return sorted(
-        path
-        for path, route in api_routes(app).items()
-        if path not in UNCHECKED_PATHS and not _has_account_check(route)
+        key
+        for key, route in api_routes(app).items()
+        if key.split(" ", 1)[1] not in UNCHECKED_PATHS and not _has_account_check(route)
     )
 
 
@@ -431,10 +437,23 @@ def test_every_api_route_runs_the_account_check() -> None:
     app = create_app(
         verifier=TokenVerifier([TENANT.settings, PLATFORM.settings]),
         databases=Databases(
-            tenant_engine=create_engine("sqlite://"), platform_engine=create_engine("sqlite://")
+            tenant_engine=create_engine("sqlite://"),
+            platform_engine=create_engine("sqlite://"),
+            writer_engine=create_engine("sqlite://"),
         ),
+        cognito=FakeCognito(),
+        provisioning=FakeProvisioning(),
     )
-    assert set(api_routes(app)) >= {"/api/me", "/api/health"}
+    assert set(api_routes(app)) >= {
+        "GET /api/me",
+        "GET /api/health",
+        "GET /api/users",
+        "POST /api/users",
+        "PATCH /api/users/{user_id}",
+        "POST /api/admin/tenants",
+        "POST /api/admin/users/{user_id}/reset-mfa",
+        "POST /api/auth/signed-out",
+    }
     assert unchecked_routes(app) == []
 
 
@@ -445,4 +464,4 @@ def test_the_route_check_notices_a_route_without_it() -> None:
     def unguarded() -> dict[str, str]:
         return {}
 
-    assert unchecked_routes(app) == ["/api/unguarded"]
+    assert unchecked_routes(app) == ["GET /api/unguarded"]

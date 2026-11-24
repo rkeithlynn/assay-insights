@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pulumi
 import pulumi_aws as aws
@@ -174,6 +175,8 @@ TASK_VARIABLES = (
     "INVITE_FUNCTION",
     "VECTOR_DIMENSIONS",
     "DEFAULT_TAGS",
+    "DEFAULT_INGEST_MODEL",
+    "DEFAULT_QUERY_MODEL",
     "DB_HOST",
     "DB_PORT",
     "DB_NAME",
@@ -549,23 +552,40 @@ def invite_role_policy(*, log_group: str, user_pool: str) -> str:
     )
 
 
-def lambda_endpoint_policy(*, invite_function: str, provisioning_role: str) -> str:
-    """Through the VPC's Lambda endpoint: one function, one caller."""
-    return _json(
+# Invoke statements other components add to the `lambda` endpoint's policy:
+# (statement ID, function ARN, the caller role ARNs).
+LambdaGrant = tuple[str, str, Sequence[str]]
+
+
+def lambda_endpoint_policy(
+    *, invite_function: str, provisioning_role: str, grants: Sequence[LambdaGrant] = ()
+) -> str:
+    """Through the VPC's Lambda endpoint: named functions, each for named callers only."""
+    statements: list[dict[str, Any]] = [
         {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Sid": "ProvisioningInvitesTheFirstAdmin",
-                    "Effect": "Allow",
-                    "Principal": "*",
-                    "Action": "lambda:InvokeFunction",
-                    "Resource": invite_function,
-                    "Condition": {"ArnEquals": {"aws:PrincipalArn": provisioning_role}},
-                }
-            ],
+            "Sid": "ProvisioningInvitesTheFirstAdmin",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "lambda:InvokeFunction",
+            "Resource": invite_function,
+            "Condition": {"ArnEquals": {"aws:PrincipalArn": provisioning_role}},
         }
-    )
+    ]
+    for sid, function, callers in grants:
+        names = sorted(callers)
+        # One caller is written as a string, as IAM stores a one-item list.
+        principal: str | list[str] = names[0] if len(names) == 1 else names
+        statements.append(
+            {
+                "Sid": sid,
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "lambda:InvokeFunction",
+                "Resource": function,
+                "Condition": {"ArnEquals": {"aws:PrincipalArn": principal}},
+            }
+        )
+    return _json({"Version": "2012-10-17", "Statement": statements})
 
 
 def state_machine_role_policy(
@@ -782,6 +802,8 @@ class Provisioning(pulumi.ComponentResource):
         storage: TenantStorage,
         vector_dimensions: int,
         default_tags: Mapping[str, str],
+        # Profile IDs of the models a tenant starts with (stack config), set at activation.
+        default_models: tuple[str, str],
         # Every other KMS key the platform stack creates. The provisioning role is denied
         # tagging them (and the state key, which this component adds itself).
         platform_key_arns: Sequence[pulumi.Input[str]],
@@ -958,7 +980,7 @@ class Provisioning(pulumi.ComponentResource):
             memory_size=256,
             timeout=INVITE_TIMEOUT_SECONDS,
             environment=aws.lambda_.FunctionEnvironmentArgs(
-                variables={"TENANT_POOL_ID": auth.tenant.pool.id}
+                variables={"TENANT_POOL_ID": auth.tenant.pool.id, "OPERATIONS": "invite"}
             ),
             logging_config=aws.lambda_.FunctionLoggingConfigArgs(
                 log_format="JSON",
@@ -968,14 +990,10 @@ class Provisioning(pulumi.ComponentResource):
             ),
             opts=pulumi.ResourceOptions(parent=self, depends_on=[invite_policy]),
         )
-        aws.ec2.VpcEndpointPolicy(
-            f"{name}-lambda-endpoint-policy",
-            vpc_endpoint_id=network.interface_endpoints["lambda"].id,
-            policy=pulumi.Output.all(
-                invite_function=self.invite_function.arn, provisioning_role=self.task_role.arn
-            ).apply(lambda a: lambda_endpoint_policy(**a)),
-            opts=child,
-        )
+        # The `lambda` endpoint's policy is written by lambda_endpoint_access(), once every
+        # other function invoked from the VPC exists.
+        self._name = name
+        self._lambda_endpoint = network.interface_endpoints["lambda"]
 
         # --- The task -------------------------------------------------------------------------
         self.task_role_policy = aws.iam.RolePolicy(
@@ -1047,6 +1065,8 @@ class Provisioning(pulumi.ComponentResource):
                 "NAME_PREFIX": name_prefix,
                 "VECTOR_DIMENSIONS": str(vector_dimensions),
                 "DEFAULT_TAGS": json.dumps(dict(sorted(default_tags.items()))),
+                "DEFAULT_INGEST_MODEL": default_models[0],
+                "DEFAULT_QUERY_MODEL": default_models[1],
                 "DB_NAME": database_name,
             }
         )
@@ -1162,3 +1182,33 @@ class Provisioning(pulumi.ComponentResource):
                 "provisioning_role_arn": self.task_role.arn,
             }
         )
+
+    def lambda_endpoint_access(
+        self, grants: Sequence[tuple[str, pulumi.Input[str], Sequence[pulumi.Input[str]]]]
+    ) -> aws.ec2.VpcEndpointPolicy:
+        """The `lambda` endpoint's policy: the first-admin invite plus these grants.
+
+        Created here, with the name and parent it has had since build step 4, so it is the
+        same resource: deleting a VPC endpoint policy resets the endpoint to allow all.
+        """
+        callers = [pulumi.Output.all(*roles) for _, _, roles in grants]
+        functions = [function for _, function, _ in grants]
+        sids = [sid for sid, _, _ in grants]
+        self.lambda_endpoint_policy = aws.ec2.VpcEndpointPolicy(
+            f"{self._name}-lambda-endpoint-policy",
+            vpc_endpoint_id=self._lambda_endpoint.id,
+            policy=pulumi.Output.all(
+                invite_function=self.invite_function.arn,
+                provisioning_role=self.task_role.arn,
+                functions=pulumi.Output.all(*functions),
+                callers=pulumi.Output.all(*callers),
+            ).apply(
+                lambda a: lambda_endpoint_policy(
+                    invite_function=a["invite_function"],
+                    provisioning_role=a["provisioning_role"],
+                    grants=list(zip(sids, a["functions"], a["callers"], strict=True)),
+                )
+            ),
+            opts=pulumi.ResourceOptions(parent=self),
+        )
+        return self.lambda_endpoint_policy

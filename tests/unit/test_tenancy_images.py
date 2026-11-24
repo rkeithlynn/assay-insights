@@ -32,6 +32,7 @@ from tests.unit.test_migrate_image import REQUIRED, _docker_available, docker
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROVISION_DOCKERFILE = REPO_ROOT / "tss" / "provision.Dockerfile"
+COGNITO_ADMIN_SOURCE = REPO_ROOT / "api" / "assay_api" / "cognito_admin.py"
 TASK_USER = "10001:10001"
 LAMBDA_USER = "993:990"
 LAMBDA_PYTHON = "/var/lang/bin/python3"
@@ -81,6 +82,16 @@ def isolation_image() -> Iterator[str]:
 @pytest.fixture(scope="module")
 def cognito_admin_image() -> Iterator[str]:
     yield from _build("api/cognito-admin.Dockerfile")
+
+
+@pytest.fixture(scope="module")
+def ops_image() -> Iterator[str]:
+    yield from _build("api/lambda.Dockerfile")
+
+
+@pytest.fixture(scope="module")
+def auth_trigger_image() -> Iterator[str]:
+    yield from _build("api/auth-trigger.Dockerfile")
 
 
 def last_json(stdout: str) -> Any:
@@ -276,6 +287,8 @@ TASK_ENVIRONMENT = {
     "INVITE_FUNCTION": "invite",
     "VECTOR_DIMENSIONS": "1024",
     "DEFAULT_TAGS": '{"app":"assay-insights"}',
+    "DEFAULT_INGEST_MODEL": "us.example.ingest-v1:0",
+    "DEFAULT_QUERY_MODEL": "us.example.query-v1",
 }
 
 
@@ -375,6 +388,7 @@ def test_isolation_image_collects_the_tests_as_lambdas_user(isolation_image: str
 def test_cognito_admin_image_serves_only_invite(cognito_admin_image: str) -> None:
     code = (
         "import importlib.util, json, os\n"
+        "os.environ['OPERATIONS'] = 'invite'  # as on the provisioning role's function\n"
         "from assay_api import cognito_admin\n"
         "print(json.dumps({'uid': os.getuid(),\n"
         "    'other': cognito_admin.handler({'operation': 'disable'}, None),\n"
@@ -383,10 +397,71 @@ def test_cognito_admin_image_serves_only_invite(cognito_admin_image: str) -> Non
     )
     result = lambda_python(cognito_admin_image, code)
     assert result["uid"] == 993
-    assert result["other"] == {"error": "invalid_request"}
+    assert result["other"] == {"error": "operation_not_allowed"}
     assert [f for f in result["files"] if f.endswith(".py")] == [
         "__init__.py",
         "claims.py",
         "cognito_admin.py",
     ]
     assert result["fastapi"] is False
+
+
+@requires_docker
+def test_cognito_admin_images_boto3_has_every_call_the_lambda_makes(
+    cognito_admin_image: str,
+) -> None:
+    """The image installs nothing: it uses the boto3 bundled in the pinned Lambda base image,
+    not the version in uv.lock. AdminDeleteSoftwareToken (August 2026) is newer than many
+    bundled versions, so every Cognito call in the source must exist in the image's boto3."""
+    calls = sorted(set(re.findall(r"\.(admin_\w+)\(", COGNITO_ADMIN_SOURCE.read_text())))
+    assert "admin_delete_software_token" in calls
+    code = (
+        "import json, boto3\n"
+        "client = boto3.client('cognito-idp', region_name='us-east-1')\n"
+        f"calls = {calls!r}\n"
+        "print(json.dumps({'boto3': boto3.__version__,\n"
+        "    'missing': [c for c in calls if not hasattr(client, c)]}))\n"
+    )
+    result = lambda_python(cognito_admin_image, code)
+    assert result["missing"] == [], f"boto3 {result['boto3']} in the image lacks them"
+
+
+# --- Build step 5: the auth-event trigger, and the consumer and seed image -------------------
+
+
+@requires_docker
+def test_auth_trigger_image_holds_only_the_trigger(auth_trigger_image: str) -> None:
+    code = (
+        "import json, os\n"
+        "from assay_api import cognito_auth_trigger as t\n"
+        "event = {'triggerSource': 'PostAuthentication_Authentication', 'userPoolId': 'p',\n"
+        "         'request': {'userAttributes': {'sub': 's'}}}\n"
+        "print(json.dumps({'uid': os.getuid(),\n"
+        "    'returned': t.handler(event, None) == event,\n"
+        "    'files': sorted(os.listdir(os.path.dirname(t.__file__)))}))\n"
+    )
+    # No network and no QUEUE_URL: the send fails, and the sign-in must still go ahead.
+    result = lambda_python(auth_trigger_image, code)
+    assert result["uid"] == 993
+    assert result["returned"] is True
+    assert [f for f in result["files"] if f.endswith(".py")] == [
+        "__init__.py",
+        "cognito_auth_trigger.py",
+    ]
+
+
+@requires_docker
+def test_ops_image_runs_the_consumer_and_the_seed_without_fastapi(ops_image: str) -> None:
+    code = (
+        "import importlib.util, json, os\n"
+        "import assay_api.auth_event_consumer, assay_api.seed\n"
+        "print(json.dumps({'uid': os.getuid(),\n"
+        "    'bundle': os.access(os.environ['DB_CA_BUNDLE'], os.R_OK),\n"
+        "    'fastapi': importlib.util.find_spec('fastapi') is not None,\n"
+        "    'seed': assay_api.seed.handler({'command': 'nope'}, None)}))\n"
+    )
+    result = lambda_python(ops_image, code)
+    assert result["uid"] == 993
+    assert result["bundle"] is True
+    assert result["fastapi"] is False
+    assert "unknown command" in result["seed"]["error"]

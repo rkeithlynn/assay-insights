@@ -1,0 +1,8 @@
+# Build context is the repository root. The portal build reads only these.
+**
+!portal/**
+!assets/*.svg
+portal/node_modules
+portal/dist
+portal/coverage
+portal/.vite

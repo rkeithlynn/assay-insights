@@ -29,16 +29,33 @@ def tenant_token(**overrides: Any) -> str:
 
 def test_accepts_a_tenant_token() -> None:
     principal = VERIFIER.verify(tenant_token(groups=["tenant-admin"], mfa=True))
+    assert principal.auth_time > 0
     assert principal == Principal(
-        pool="tenant", sub="user-1", role="tenant-admin", tenant_id=TENANT_ID, mfa=True
+        pool="tenant",
+        sub="user-1",
+        role="tenant-admin",
+        tenant_id=TENANT_ID,
+        mfa=True,
+        auth_time=principal.auth_time,
     )
 
 
 def test_accepts_a_platform_token_which_always_passed_mfa() -> None:
     principal = VERIFIER.verify(PLATFORM.mint(sub="m-1", groups=["master-user"]))
     assert principal == Principal(
-        pool="platform", sub="m-1", role="master-user", tenant_id=None, mfa=True
+        pool="platform",
+        sub="m-1",
+        role="master-user",
+        tenant_id=None,
+        mfa=True,
+        auth_time=principal.auth_time,
     )
+
+
+def test_a_token_without_auth_time_is_refused() -> None:
+    """The account check compares it with users.sessions_revoked_at (MFA reset, disable)."""
+    with pytest.raises(InvalidToken):
+        VERIFIER.verify(tenant_token(groups=["tenant-user"], drop=("auth_time",)))
 
 
 def test_platform_token_never_carries_a_tenant() -> None:

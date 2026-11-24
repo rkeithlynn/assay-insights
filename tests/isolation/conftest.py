@@ -48,6 +48,8 @@ class Env:
     service: str
     tenant_role_arn: str
     invite_function: str
+    # The API's Cognito admin function (build step 5).
+    api_cognito_function: str
     tenant_a: uuid.UUID
     tenant_b: uuid.UUID
 
@@ -100,6 +102,7 @@ def env() -> Env:
         service=os.environ["TSS_SERVICE"],
         tenant_role_arn=os.environ["TENANT_ROLE_ARN"],
         invite_function=os.environ["INVITE_FUNCTION"],
+        api_cognito_function=os.environ["API_COGNITO_FUNCTION"],
         tenant_a=tenant_a,
         tenant_b=tenant_b,
     )

@@ -19,6 +19,11 @@ REGION = "us-east-1"
 
 # Every resource registered with the mocks, in order: (type token, name, inputs).
 REGISTERED: list[tuple[str, str, dict[str, Any]]] = []
+# Data-source lookups the tests inspect: (token, arguments).
+CALLS: list[tuple[str, dict[str, Any]]] = []
+# What the mocks answer for CloudFront's VPC origin security group and the ELB log account.
+CLOUDFRONT_VPC_ORIGIN_SG = "sg-cloudfront-vpc-origins"
+ELB_ACCOUNT_ID = "111111111111"
 
 
 def registered(type_token: str, name_prefix: str = "") -> list[tuple[str, dict[str, Any]]]:
@@ -80,6 +85,9 @@ class Mocks(pulumi.runtime.Mocks):
                 outputs["executionArn"] = (
                     f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:{args.name}-id"
                 )
+            case "aws:sqs/queue:Queue":
+                outputs["url"] = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT_ID}/{args.name}"
+                outputs.setdefault("name", args.name)
             case "aws:ecs/cluster:Cluster":
                 arn = f"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:cluster/{args.inputs['name']}"
             case "aws:ecs/taskDefinition:TaskDefinition":
@@ -91,6 +99,15 @@ class Mocks(pulumi.runtime.Mocks):
         match args.token:
             case "aws:index/getCallerIdentity:getCallerIdentity":
                 return {"accountId": ACCOUNT_ID, "arn": "arn", "userId": "user", "id": "id"}, []
+            case "aws:ec2/getSecurityGroup:getSecurityGroup":
+                CALLS.append((args.token, dict(args.args)))
+                return {"id": CLOUDFRONT_VPC_ORIGIN_SG, "vpcId": args.args.get("vpcId")}, []
+            case "aws:cloudfront/getCachePolicy:getCachePolicy":
+                return {"id": f"cache-policy-{args.args['name']}", "name": args.args["name"]}, []
+            case "aws:cloudfront/getOriginRequestPolicy:getOriginRequestPolicy":
+                return {"id": f"origin-policy-{args.args['name']}", "name": args.args["name"]}, []
+            case "aws:elb/getServiceAccount:getServiceAccount":
+                return {"id": ELB_ACCOUNT_ID, "arn": f"arn:aws:iam::{ELB_ACCOUNT_ID}:root"}, []
         return {}, []
 
 

@@ -129,7 +129,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "bandit" },
-    { name = "boto3-stubs", extra = ["cognito-idp", "ecr", "kms", "lambda", "rds", "rekognition", "s3", "s3vectors", "secretsmanager", "stepfunctions", "sts"] },
+    { name = "boto3-stubs", extra = ["bedrock-runtime", "cloudfront", "cognito-idp", "ecr", "kms", "lambda", "rds", "rekognition", "s3", "s3vectors", "secretsmanager", "sqs", "stepfunctions", "sts"] },
     { name = "httpx" },
     { name = "mypy" },
     { name = "pip-audit" },
@@ -148,7 +148,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "bandit", specifier = ">=1.8" },
-    { name = "boto3-stubs", extras = ["cognito-idp", "ecr", "kms", "lambda", "rds", "rekognition", "s3", "s3vectors", "secretsmanager", "stepfunctions", "sts"], specifier = ">=1.40" },
+    { name = "boto3-stubs", extras = ["bedrock-runtime", "cloudfront", "cognito-idp", "ecr", "kms", "lambda", "rds", "rekognition", "s3", "s3vectors", "secretsmanager", "sqs", "stepfunctions", "sts"], specifier = ">=1.40" },
     { name = "httpx", specifier = ">=0.27,<0.29" },
     { name = "mypy", specifier = ">=1.18" },
     { name = "pip-audit", specifier = ">=2.9" },
@@ -307,6 +307,12 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+bedrock-runtime = [
+    { name = "mypy-boto3-bedrock-runtime" },
+]
+cloudfront = [
+    { name = "mypy-boto3-cloudfront" },
+]
 cognito-idp = [
     { name = "mypy-boto3-cognito-idp" },
 ]
@@ -333,6 +339,9 @@ s3vectors = [
 ]
 secretsmanager = [
     { name = "mypy-boto3-secretsmanager" },
+]
+sqs = [
+    { name = "mypy-boto3-sqs" },
 ]
 stepfunctions = [
     { name = "mypy-boto3-stepfunctions" },
@@ -952,6 +961,24 @@ wheels = [
 ]
 
 [[package]]
+name = "mypy-boto3-bedrock-runtime"
+version = "1.44.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/51/2a/94f764c7bc1deb4ecccad92510ddff90cd22b74c0e39bcf3d49ef38c8353/mypy_boto3_bedrock_runtime-1.44.8.tar.gz", hash = "sha256:9096147504c87bff54db7b2508ebee74a48dcee2c97ebbb88e6bb48bff501640", size = 31694, upload-time = "2026-11-20T21:38:31.888Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/4b/04c50838d8cff08be78e6e51d023a082a36d01f370985f05a256831c8265/mypy_boto3_bedrock_runtime-1.44.8-py3-none-any.whl", hash = "sha256:a9e7f480be733a959cba3ffc0857c453d1687a800c32fbf16c90fe063dca72dc", size = 38097, upload-time = "2026-11-20T21:38:30.542Z" },
+]
+
+[[package]]
+name = "mypy-boto3-cloudfront"
+version = "1.44.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/70/37/4f3414f86f8b9393cb765f5df776729e01c7f8205305fb3b09654a01e31e/mypy_boto3_cloudfront-1.44.8.tar.gz", hash = "sha256:32b21feb61d45e8c842bb8e23aea31114f45780dc2edc3cf38669e0bb71e88c8", size = 67061, upload-time = "2026-11-20T21:38:34.224Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a2/06/23b94f3b16c6a00d85d09a50126e957ce929b92a5be11f7bb6ce2909ae8b/mypy_boto3_cloudfront-1.44.8-py3-none-any.whl", hash = "sha256:63eb21d2dc53797eb19cf918ede5f5f3ac820b0998a4f2e3a7eb5e5436409a2b", size = 75045, upload-time = "2026-11-20T21:38:31.086Z" },
+]
+
+[[package]]
 name = "mypy-boto3-cognito-idp"
 version = "1.44.7"
 source = { registry = "https://pypi.org/simple" }
@@ -1030,6 +1057,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a7/a1/dd89735f1d78c49f22df2b3c44861d09aae1cf66d8e7ecc2da18b8881e87/mypy_boto3_secretsmanager-1.44.2.tar.gz", hash = "sha256:298bcffdbff85bf5dbe02ff7b444f2aff46110e0d7ffe5729ce8a2f33c56cfa5", size = 20905, upload-time = "2026-11-13T00:33:11.064Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/4c/9239424d9cd8377bb965727aaf4372c1462651aff025e802cd039e49a425/mypy_boto3_secretsmanager-1.44.2-py3-none-any.whl", hash = "sha256:a75e82a888171020ccc6c9011cb5b4c0212788d6b29fbe57d0f7af3c0614113e", size = 28995, upload-time = "2026-11-13T00:33:08.031Z" },
+]
+
+[[package]]
+name = "mypy-boto3-sqs"
+version = "1.44.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/ab/b4980ce6108fdc8f3a1ba5c870eddbcb250ba325aa06a42cc32a6aefeebf/mypy_boto3_sqs-1.44.0.tar.gz", hash = "sha256:8225fff746c9e69e5067d3aa9f1918b6ade07e5da9eac5f77f3f8f38fb5bb969", size = 23605, upload-time = "2026-11-10T21:58:34.485Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/79/6d97bfb301a231739068fe6fcf09f0d58205f43bda5792b45479a7e56a0f/mypy_boto3_sqs-1.44.0-py3-none-any.whl", hash = "sha256:a25966f8db3018b367fdb4f27a39b2abe674276f3272795959e50a15056e12f7", size = 33764, upload-time = "2026-11-10T21:58:32.247Z" },
 ]
 
 [[package]]

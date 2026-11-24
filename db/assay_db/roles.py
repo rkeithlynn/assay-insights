@@ -38,6 +38,9 @@ TSS = "tss"  # Tenant Storage Service: the only reader of tenant_storage.
 # Cannot sign in. Owns the views in schema `platform`, so platform_reader can read them
 # without any privilege on the tables behind them.
 PLATFORM_VIEW_OWNER = "platform_view_owner"
+# Cannot sign in. Owns auth_events.record(), the SECURITY DEFINER function audit_writer
+# calls to record a sign-in or password reset (migration 0004).
+AUTH_EVENT_RECORDER = "auth_event_recorder"
 
 LOGIN_ROLES: tuple[str, ...] = (
     MIGRATOR,
@@ -47,7 +50,9 @@ LOGIN_ROLES: tuple[str, ...] = (
     AUDIT_WRITER,
     TSS,
 )
-NOLOGIN_ROLES: tuple[str, ...] = (PLATFORM_VIEW_OWNER,)
+NOLOGIN_ROLES: tuple[str, ...] = (PLATFORM_VIEW_OWNER, AUTH_EVENT_RECORDER)
+# Roles migrator may hand objects to (ALTER ... OWNER TO), without inheriting anything.
+OWNER_ROLES: tuple[str, ...] = NOLOGIN_ROLES
 ALL_ROLES: tuple[str, ...] = LOGIN_ROLES + NOLOGIN_ROLES
 
 # Granting this RDS-provided role turns on IAM database authentication for a login role.
@@ -56,8 +61,8 @@ RDS_IAM = "rds_iam"
 # The only role memberships our roles may have: (member, granted role) -> (inherit, set).
 EXPECTED_MEMBERSHIPS: dict[tuple[str, str], tuple[bool, bool]] = {
     **{(role, RDS_IAM): (True, True) for role in LOGIN_ROLES},
-    # migrator may hand objects to the view owner, but inherits none of its privileges.
-    (MIGRATOR, PLATFORM_VIEW_OWNER): (False, True),
+    # migrator may hand objects to the owner roles, but inherits none of their privileges.
+    **{(MIGRATOR, owner): (False, True) for owner in OWNER_ROLES},
 }
 
 
@@ -169,13 +174,14 @@ def bootstrap(conn: psycopg.Connection, database: str) -> BootstrapResult:
                 sql.SQL("GRANT {} TO {}").format(sql.Identifier(RDS_IAM), sql.Identifier(role))
             )
 
-        # migrator may hand objects to the view owner (ALTER VIEW ... OWNER TO), but does not
-        # inherit its privileges or its row-level security policies.
-        conn.execute(
-            sql.SQL("GRANT {} TO {} WITH INHERIT FALSE, SET TRUE").format(
-                sql.Identifier(PLATFORM_VIEW_OWNER), sql.Identifier(MIGRATOR)
+        # migrator may hand objects to the owner roles (ALTER ... OWNER TO), but does not
+        # inherit their privileges or their row-level security policies.
+        for owner in OWNER_ROLES:
+            conn.execute(
+                sql.SQL("GRANT {} TO {} WITH INHERIT FALSE, SET TRUE").format(
+                    sql.Identifier(owner), sql.Identifier(MIGRATOR)
+                )
             )
-        )
 
         # The master user owns the database (RDS creates it), so it may manage these grants.
         db = sql.Identifier(database)

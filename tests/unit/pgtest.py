@@ -56,7 +56,7 @@ requires_db = pytest.mark.skipif(
 )
 
 # The Alembic head every test database is migrated to.
-HEAD_REVISION = "0003"
+HEAD_REVISION = "0004"
 
 # Stands in for the Aurora master user (rds_superuser member, not a superuser).
 MASTER = "rds_master_test"

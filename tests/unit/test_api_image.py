@@ -70,6 +70,8 @@ def _environment() -> dict[str, str]:
         "DB_HOST": "db.invalid",
         "DB_PORT": "5432",
         "DB_NAME": "assay",
+        "COGNITO_ADMIN_FUNCTION": "cognito-admin-api",
+        "PROVISIONING_STATE_MACHINE_ARN": "arn:aws:states:us-east-1:000000000000:stateMachine:p",
     }
     for kind in ("tenant", "platform"):
         settings = make_issuer(kind).settings

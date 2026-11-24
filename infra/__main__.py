@@ -1,8 +1,9 @@
 """assay-platform Pulumi program.
 
 Build order follows BUILD_SPEC.md section 4. Implemented so far: 1 (DNS and certificate),
-2 (network), 3 (database, with the migration Lambda), 4 (Cognito), 5 (the Tenant Storage
-Service, with tenant provisioning) and 6 (the API).
+2 (network), 3 (database, with the migration Lambda), 4 (Cognito, with the audit triggers),
+5 (the Tenant Storage Service, with tenant provisioning), 6 (the API), 7 (the edge) and the
+alarms of 9.
 """
 
 from pathlib import Path
@@ -13,85 +14,120 @@ import pulumi_aws as aws
 from assay_infra.alerts import Alerts
 from assay_infra.api import ApiService
 from assay_infra.auth import Auth
+from assay_infra.auth_events import AuthEvents
+from assay_infra.cognito_admin import CognitoAdminApi
 from assay_infra.config import load_config
 from assay_infra.database import Database
 from assay_infra.dns import DnsAndCertificate
+from assay_infra.edge import Edge, EdgeLogs
+from assay_infra.images import WORKSPACE_MANIFESTS, ContainerImage
 from assay_infra.isolation import SERVICE_NAME as ISOLATION_SERVICE
 from assay_infra.isolation import IsolationRunner, runner_role
 from assay_infra.migrations import MigrationRunner
-from assay_infra.network import Network
+from assay_infra.network import Network, states_endpoint_policy
 from assay_infra.provisioning import Provisioning
+from assay_infra.seed import SeedFunction
 from assay_infra.tss import TenantStorage
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# The in-VPC Lambda image for the auth-event consumer and the seed function.
+OPS_DOCKERFILE = "api/lambda.Dockerfile"
+OPS_SOURCES = (
+    "api/assay_api/__init__.py",
+    "api/assay_api/auth_event_consumer.py",
+    "api/assay_api/seed.py",
+    "api/assay_api/services.py",
+    "api/assay_api/tenants.py",
+    "api/assay_api/users.py",
+)
+
 config = load_config()
+prefix = config.name_prefix
 account_id = aws.get_caller_identity_output().account_id
 aws_profile = pulumi.Config("aws").get("profile")
+default_models = (config.models.default_ingest_model, config.models.default_query_model)
 
 edge_dns = DnsAndCertificate("edge", zone_name=config.dns.hosted_zone, hosts=config.dns.hosts)
+certificate = edge_dns.validated()
 
-network = Network(
-    config.name_prefix, cfg=config.network, region=config.region, account_id=account_id
-)
+network = Network(prefix, cfg=config.network, region=config.region, account_id=account_id)
 
-database = Database(
-    f"{config.name_prefix}-db", cfg=config.database, network=network, account_id=account_id
-)
+database = Database(f"{prefix}-db", cfg=config.database, network=network, account_id=account_id)
 
 migrations = MigrationRunner(
-    f"{config.name_prefix}-db-migrate",
+    f"{prefix}-db-migrate",
     repo_root=REPO_ROOT,
     region=config.region,
     account_id=account_id,
     network=network,
     database=database,
     database_name=config.database.database_name,
-    aws_profile=aws_profile,
-)
-
-auth = Auth(
-    f"{config.name_prefix}-auth",
-    cfg=config.auth,
-    dns=config.dns,
-    region=config.region,
-    account_id=account_id,
-    repo_root=REPO_ROOT,
-    aws_profile=aws_profile,
-)
-
-api = ApiService(
-    f"{config.name_prefix}-api",
-    repo_root=REPO_ROOT,
-    region=config.region,
-    account_id=account_id,
-    network=network,
-    database=database,
-    database_name=config.database.database_name,
-    auth=auth,
     aws_profile=aws_profile,
 )
 
 alerts = Alerts(
-    f"{config.name_prefix}-alarms",
+    f"{prefix}-alarms",
     email=config.alerts.email,
     region=config.region,
     account_id=account_id,
 )
 
+# Sign-ins and password resets (section 7a). The trigger exists before the pools name it.
+auth_events = AuthEvents(
+    f"{prefix}-auth-events",
+    repo_root=REPO_ROOT,
+    region=config.region,
+    account_id=account_id,
+    network=network,
+    alarm_topic_arn=alerts.topic.arn,
+    aws_profile=aws_profile,
+)
+
+auth = Auth(
+    f"{prefix}-auth",
+    cfg=config.auth,
+    dns=config.dns,
+    region=config.region,
+    account_id=account_id,
+    repo_root=REPO_ROOT,
+    auth_event_lambda_arn=auth_events.trigger_function.arn,
+    aws_profile=aws_profile,
+)
+auth_events.attach(f"{prefix}-auth-events-tenant", auth.tenant.pool, account_id)
+auth_events.attach(f"{prefix}-auth-events-platform", auth.platform.pool, account_id)
+
+ops_image = ContainerImage(
+    f"{prefix}-ops",
+    repo_root=REPO_ROOT,
+    dockerfile=OPS_DOCKERFILE,
+    files=(*WORKSPACE_MANIFESTS, *OPS_SOURCES),
+    trees=("db/assay_db",),
+    region=config.region,
+    account_id=account_id,
+    lambda_pull=True,
+    aws_profile=aws_profile,
+)
+auth_events.add_consumer(
+    image_uri=ops_image.image_uri,
+    database=database,
+    database_name=config.database.database_name,
+    pool_ids=(auth.tenant.pool.id, auth.platform.pool.id),
+)
+
 # The isolation test runner (development stacks only) is a TSS caller, so its role exists
 # before the TSS does.
-isolation_name = f"{config.name_prefix}-isolation-tests"
+isolation_name = f"{prefix}-isolation-tests"
 tss_callers: dict[str, aws.iam.Role] = {}
 if config.tenancy.isolation_tests:
     tss_callers[ISOLATION_SERVICE] = runner_role(isolation_name, account_id)
 
 storage = TenantStorage(
-    f"{config.name_prefix}-tss",
+    f"{prefix}-tss",
     repo_root=REPO_ROOT,
     region=config.region,
     account_id=account_id,
-    name_prefix=config.name_prefix,
+    name_prefix=prefix,
     network=network,
     database=database,
     database_name=config.database.database_name,
@@ -102,11 +138,11 @@ storage = TenantStorage(
 )
 
 provisioning = Provisioning(
-    f"{config.name_prefix}-provision",
+    f"{prefix}-provision",
     repo_root=REPO_ROOT,
     region=config.region,
     account_id=account_id,
-    name_prefix=config.name_prefix,
+    name_prefix=prefix,
     network=network,
     database=database,
     database_name=config.database.database_name,
@@ -114,10 +150,92 @@ provisioning = Provisioning(
     storage=storage,
     vector_dimensions=config.tenancy.vector_dimensions,
     default_tags=config.tenancy.default_tags,
+    default_models=default_models,
     # Every KMS key this program creates outside the provisioning component. Add a new
     # one here: the provisioning role is denied tagging the keys in this list.
     platform_key_arns=[database.key.arn, alerts.key.arn],
     alarm_topic_arn=alerts.topic.arn,
+    aws_profile=aws_profile,
+)
+
+# The API's Cognito admin function: the step 4 image, its own role and operations.
+cognito_admin_api = CognitoAdminApi(
+    f"{prefix}-cognito-admin-api",
+    image_uri=provisioning.invite_image.image_uri,
+    auth=auth,
+    account_id=account_id,
+)
+
+edge_logs = EdgeLogs(f"{prefix}-edge-logs", region=config.region, account_id=account_id)
+
+api = ApiService(
+    f"{prefix}-api",
+    repo_root=REPO_ROOT,
+    region=config.region,
+    account_id=account_id,
+    network=network,
+    database=database,
+    database_name=config.database.database_name,
+    auth=auth,
+    cognito_admin_function_arn=cognito_admin_api.function.arn,
+    state_machine_arn=provisioning.state_machine.arn,
+    certificate_arn=certificate.certificate_arn,
+    access_logs_bucket=edge_logs.bucket.bucket,
+    access_logs_ready=edge_logs.policy,
+    alarm_topic_arn=alerts.topic.arn,
+    aws_profile=aws_profile,
+)
+
+seed = SeedFunction(
+    f"{prefix}-seed",
+    image_uri=ops_image.image_uri,
+    region=config.region,
+    account_id=account_id,
+    network=network,
+    database=database,
+    database_name=config.database.database_name,
+    cognito_admin_function=cognito_admin_api.function,
+    state_machine=provisioning.state_machine,
+    default_models=default_models,
+)
+
+# What may be called through the VPC's endpoints, by whom.
+provisioning.lambda_endpoint_access(
+    [
+        (
+            "ApiAndSeedManageTenantUsers",
+            cognito_admin_api.function.arn,
+            [api.task_role.arn, seed.role.arn],
+        )
+    ]
+)
+aws.ec2.VpcEndpointPolicy(
+    f"{prefix}-states-endpoint-policy",
+    vpc_endpoint_id=network.interface_endpoints["states"].id,
+    policy=pulumi.Output.all(
+        state_machine=provisioning.state_machine.arn,
+        api=api.task_role.arn,
+        seed=seed.role.arn,
+    ).apply(
+        lambda a: states_endpoint_policy(
+            state_machine=a["state_machine"], callers=[a["api"], a["seed"]]
+        )
+    ),
+)
+
+edge = Edge(
+    f"{prefix}-edge",
+    repo_root=REPO_ROOT,
+    region=config.region,
+    dns=config.dns,
+    zone_id=edge_dns.zone.zone_id,
+    certificate_arn=certificate.certificate_arn,
+    network=network,
+    auth=auth,
+    load_balancer=api.load_balancer,
+    load_balancer_security_group=api.alb_security_group,
+    logs=edge_logs,
+    waf_rate_limit=config.edge.waf_rate_limit,
     aws_profile=aws_profile,
 )
 
@@ -128,13 +246,14 @@ if config.tenancy.isolation_tests:
         repo_root=REPO_ROOT,
         region=config.region,
         account_id=account_id,
-        name_prefix=config.name_prefix,
+        name_prefix=prefix,
         network=network,
         database=database,
         database_name=config.database.database_name,
         tss_endpoint_url=storage.endpoint_url,
         tenant_role_arn=storage.tenant_role.arn,
         invite_function_arn=provisioning.invite_function.arn,
+        api_cognito_function_arn=cognito_admin_api.function.arn,
         aws_profile=aws_profile,
     )
     pulumi.export("isolation_function_name", isolation.function.name)
@@ -155,6 +274,8 @@ pulumi.export("platform_user_pool_id", auth.platform.pool.id)
 pulumi.export("platform_app_client_id", auth.platform.client.id)
 pulumi.export("platform_login_domain", auth.platform.domain.domain)
 pulumi.export("pre_token_function_name", auth.pre_token.function.name)
+pulumi.export("auth_events_queue_url", auth_events.queue.url)
+pulumi.export("auth_events_dlq_url", auth_events.dead_letter_queue.url)
 pulumi.export("api_load_balancer_dns_name", api.load_balancer.dns_name)
 pulumi.export("api_target_group_arn", api.target_group.arn)
 pulumi.export("api_cluster_name", api.cluster.name)
@@ -168,6 +289,11 @@ pulumi.export("provisioning_state_machine_arn", provisioning.state_machine.arn)
 pulumi.export("provisioning_role_arn", provisioning.task_role.arn)
 pulumi.export("tenant_state_bucket", provisioning.state_bucket.bucket)
 pulumi.export("cognito_admin_function_name", provisioning.invite_function.name)
+pulumi.export("cognito_admin_api_function_name", cognito_admin_api.function.name)
+pulumi.export("seed_function_name", seed.function.name)
+pulumi.export("portal_bucket", edge.portal_bucket.bucket)
+pulumi.export("distribution_id", edge.distribution.id)
+pulumi.export("distribution_domain", edge.distribution.domain_name)
 # Read by scripts/run_isolation.py, which runs the provisioning task's probe command.
 pulumi.export("provisioning_cluster_name", provisioning.cluster.name)
 pulumi.export("provisioning_task_definition_arn", provisioning.task_definition.arn)

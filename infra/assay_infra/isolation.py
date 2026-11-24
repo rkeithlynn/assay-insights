@@ -149,6 +149,8 @@ class IsolationRunner(pulumi.ComponentResource):
         tss_endpoint_url: pulumi.Input[str],
         tenant_role_arn: pulumi.Input[str],
         invite_function_arn: pulumi.Input[str],
+        # The API's Cognito admin function (build step 5): refused to the runner too.
+        api_cognito_function_arn: pulumi.Input[str],
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -210,6 +212,7 @@ class IsolationRunner(pulumi.ComponentResource):
                     "TSS_SERVICE": SERVICE_NAME,
                     "TENANT_ROLE_ARN": tenant_role_arn,
                     "INVITE_FUNCTION": invite_function_arn,
+                    "API_COGNITO_FUNCTION": api_cognito_function_arn,
                     "AWS_STS_REGIONAL_ENDPOINTS": "regional",
                 }
             ),

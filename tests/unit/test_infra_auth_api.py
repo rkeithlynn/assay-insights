@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pulumi
+import pulumi_aws as aws
 import pytest
 
 from assay_infra.api import (
@@ -18,13 +19,19 @@ from assay_infra.api import (
     container_definitions,
     task_role_policy,
 )
-from assay_infra.auth import Auth, canonical_jwks, jwks_url
+from assay_infra.auth import CLIENT_WRITE_ATTRIBUTES, Auth, canonical_jwks, jwks_url
 from assay_infra.branding import Asset, asset_problems
 from assay_infra.config import AuthConfig, build_dns, validate_auth
 from assay_infra.database import Database
 from assay_infra.network import Network
 from tests.unit.conftest import ACCOUNT_ID, REGION, registered
 from tests.unit.test_infra_data import DB, NET
+
+AUTH_EVENT_TRIGGER = f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:auth-event-trigger"
+COGNITO_ADMIN_API = f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:cognito-admin-api"
+STATE_MACHINE = f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:provision"
+CERTIFICATE = f"arn:aws:acm:{REGION}:{ACCOUNT_ID}:certificate/validated"
+ALARM_TOPIC = f"arn:aws:sns:{REGION}:{ACCOUNT_ID}:alarms"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DNS = build_dns("example.test", "example.test", "admin.example.test")
@@ -50,8 +57,10 @@ def _stack(prefix: str) -> tuple[Auth, ApiService, list[tuple[str, str]]]:
         region=REGION,
         account_id=ACCOUNT_ID,
         repo_root=REPO_ROOT,
+        auth_event_lambda_arn=AUTH_EVENT_TRIGGER,
         jwks_fetcher=fake_fetch,
     )
+    logs = aws.s3.Bucket(f"{prefix}-logs-standin")
     api = ApiService(
         f"{prefix}-api",
         repo_root=REPO_ROOT,
@@ -61,6 +70,12 @@ def _stack(prefix: str) -> tuple[Auth, ApiService, list[tuple[str, str]]]:
         database=database,
         database_name=DB.database_name,
         auth=auth,
+        cognito_admin_function_arn=COGNITO_ADMIN_API,
+        state_machine_arn=STATE_MACHINE,
+        certificate_arn=CERTIFICATE,
+        access_logs_bucket=logs.bucket,
+        access_logs_ready=logs,
+        alarm_topic_arn=ALARM_TOPIC,
     )
     return auth, api, fetched
 
@@ -135,7 +150,8 @@ def test_platform_pool_requires_mfa_and_has_no_tenant_attribute() -> Any:
         assert pool["emailConfiguration"] == {"emailSendingAccount": "COGNITO_DEFAULT"}
         _assert_no_custom_templates(pool)
         assert not pool.get("schemas")
-        assert not pool.get("lambdaConfig")
+        # No pre-token trigger: only the audit triggers both pools share.
+        assert "preTokenGenerationConfig" not in pool["lambdaConfig"]
         groups = sorted(
             i["name"] for n, i in registered("aws:cognito/userGroup:UserGroup", "c2-auth-platform-")
         )
@@ -305,7 +321,7 @@ def test_api_task_is_x86_fargate_non_root_and_read_only() -> Any:
 
 
 @pulumi.runtime.test
-def test_load_balancer_is_internal_and_unreachable_until_the_edge() -> Any:
+def test_load_balancer_is_internal_https_only_and_reached_only_through_the_edge() -> Any:
     auth, api, _ = _stack("a2")
 
     def check(_: list[Any]) -> None:
@@ -314,7 +330,15 @@ def test_load_balancer_is_internal_and_unreachable_until_the_edge() -> Any:
         assert alb["loadBalancerType"] == "application"
         assert sorted(alb["subnets"]) == ["a2-app-use1-az2-id", "a2-app-use1-az4-id"]
         assert alb["dropInvalidHeaderFields"] is True
-        # No inbound rule on the load balancer's group: CloudFront's VPC origin adds it.
+        assert alb["accessLogs"]["enabled"] is True
+        assert alb["accessLogs"]["prefix"] == "alb"
+        # HTTPS only, with the validated certificate; no plain-HTTP listener.
+        [(name, listener)] = registered("aws:lb/listener:Listener", "a2-")
+        assert name == "a2-api-https"
+        assert (listener["port"], listener["protocol"]) == (443, "HTTPS")
+        assert listener["certificateArn"] == CERTIFICATE
+        assert listener["sslPolicy"] == "ELBSecurityPolicy-TLS13-1-2-2021-06"
+        # No inbound rule on the load balancer's group here: the edge adds CloudFront's.
         ingress = registered("aws:vpc/securityGroupIngressRule:SecurityGroupIngressRule", "a2-")
         alb_ingress = [i for _, i in ingress if i["securityGroupId"] == "a2-api-alb-sg-id"]
         assert alb_ingress == []
@@ -335,15 +359,74 @@ def test_load_balancer_is_internal_and_unreachable_until_the_edge() -> Any:
 
 
 @pulumi.runtime.test
-def test_task_role_may_only_sign_in_as_the_two_api_roles() -> Any:
+def test_task_role_has_exactly_its_three_permissions() -> Any:
     auth, api, _ = _stack("a3")
 
     def check(_: list[Any]) -> None:
         policy = json.loads(_one("aws:iam/rolePolicy:RolePolicy", "a3-api-task-policy")["policy"])
-        [statement] = policy["Statement"]
-        assert statement["Action"] == "rds-db:connect"
+        connect, cognito, provision = policy["Statement"]
+        assert connect["Action"] == "rds-db:connect"
         prefix = f"arn:aws:rds-db:{REGION}:{ACCOUNT_ID}:dbuser:cluster-MOCKRESOURCEID/"
-        assert statement["Resource"] == [f"{prefix}app_tenant", f"{prefix}platform_reader"]
+        assert connect["Resource"] == [
+            f"{prefix}app_tenant",
+            f"{prefix}platform_reader",
+            f"{prefix}platform_writer",
+        ]
+        assert (cognito["Action"], cognito["Resource"]) == (
+            "lambda:InvokeFunction",
+            COGNITO_ADMIN_API,
+        )
+        assert (provision["Action"], provision["Resource"]) == (
+            "states:StartExecution",
+            STATE_MACHINE,
+        )
+        assert {s["Effect"] for s in policy["Statement"]} == {"Allow"}
+
+    return _after_everything(auth, api).apply(check)
+
+
+@pulumi.runtime.test
+def test_app_clients_may_write_only_the_display_name() -> Any:
+    """Owner condition 1: the access token carries aws.cognito.signin.user.admin, so a user
+    can call UpdateUserAttributes on themselves. Neither client may write email or
+    custom:tenant_id; tests/isolation/cognito_clients.py tries it against Cognito."""
+    auth, api, _ = _stack("c7")
+
+    def check(_: list[Any]) -> None:
+        assert CLIENT_WRITE_ATTRIBUTES == ("name",)
+        for kind in ("tenant", "platform"):
+            client = _one("aws:cognito/userPoolClient:UserPoolClient", f"c7-auth-{kind}-client")
+            assert client["writeAttributes"] == ["name"], kind
+            assert "aws.cognito.signin.user.admin" in client["allowedOauthScopes"]
+
+    return _after_everything(auth, api).apply(check)
+
+
+@pulumi.runtime.test
+def test_both_pools_queue_sign_ins_and_password_resets() -> Any:
+    auth, api, _ = _stack("c8")
+
+    def check(_: list[Any]) -> None:
+        for kind in ("tenant", "platform"):
+            pool = _one("aws:cognito/userPool:UserPool", f"c8-auth-{kind}-pool")
+            config = pool["lambdaConfig"]
+            assert config["postAuthentication"] == AUTH_EVENT_TRIGGER, kind
+            assert config["postConfirmation"] == AUTH_EVENT_TRIGGER, kind
+        platform = _one("aws:cognito/userPool:UserPool", "c8-auth-platform-pool")
+        assert "preTokenGenerationConfig" not in platform["lambdaConfig"]
+
+    return _after_everything(auth, api).apply(check)
+
+
+@pulumi.runtime.test
+def test_api_5xx_alarm_notifies_the_topic() -> Any:
+    auth, api, _ = _stack("a4")
+
+    def check(_: list[Any]) -> None:
+        alarm = _one("aws:cloudwatch/metricAlarm:MetricAlarm", "a4-api-5xx-alarm")
+        assert alarm["alarmActions"] == [ALARM_TOPIC]
+        metrics = {q["metric"]["metricName"] for q in alarm["metricQueries"] if q.get("metric")}
+        assert metrics == {"HTTPCode_Target_5XX_Count", "HTTPCode_ELB_5XX_Count"}
 
     return _after_everything(auth, api).apply(check)
 
@@ -413,7 +496,7 @@ def test_a_complete_environment_passes() -> None:
 
 
 def test_task_role_policy_sorts_resources() -> None:
-    policy = json.loads(task_role_policy(["b", "a"]))
+    policy = json.loads(task_role_policy(["b", "a"], cognito_admin_function="f", state_machine="m"))
     assert policy["Statement"][0]["Resource"] == ["a", "b"]
 
 

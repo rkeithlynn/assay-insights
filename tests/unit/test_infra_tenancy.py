@@ -14,6 +14,8 @@ import pytest
 from assay_infra import alerts, isolation, provisioning, tss
 from assay_infra.alerts import Alerts
 from assay_infra.auth import Auth
+from assay_infra.auth_events import AuthEvents
+from assay_infra.cognito_admin import CognitoAdminApi
 from assay_infra.config import (
     AlertsConfig,
     TenancyConfig,
@@ -36,6 +38,12 @@ BREAK_GLASS_PRINCIPAL = f"arn:aws:iam::{ACCOUNT_ID}:role/aws-reserved/sso.amazon
 TAGS = {"app": "assay-insights", "env": "dev"}
 ROLE = f"arn:aws:iam::{ACCOUNT_ID}:role"
 ALARM_EMAIL = "alarms@example.test"
+DEFAULT_MODELS = ("us.example.ingest-v1:0", "us.example.query-v1")
+# The callers the platform stack adds to the API's Cognito admin function (assay_infra/__main__).
+API_COGNITO_CALLERS = [
+    f"arn:aws:iam::{ACCOUNT_ID}:role/api-task",
+    f"arn:aws:iam::{ACCOUNT_ID}:role/seed",
+]
 PLATFORM_KEYS = [
     f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/database",
     f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/state",
@@ -120,6 +128,17 @@ class Stack:
         self.database = Database(
             f"{prefix}-db", cfg=DB, network=self.network, account_id=ACCOUNT_ID
         )
+        self.alerts = Alerts(
+            f"{prefix}-alarms", email=ALARM_EMAIL, region=REGION, account_id=ACCOUNT_ID
+        )
+        self.auth_events = AuthEvents(
+            f"{prefix}-auth-events",
+            repo_root=REPO_ROOT,
+            region=REGION,
+            account_id=ACCOUNT_ID,
+            network=self.network,
+            alarm_topic_arn=self.alerts.topic.arn,
+        )
         self.auth = Auth(
             f"{prefix}-auth",
             cfg=AUTH,
@@ -127,10 +146,8 @@ class Stack:
             region=REGION,
             account_id=ACCOUNT_ID,
             repo_root=REPO_ROOT,
+            auth_event_lambda_arn=self.auth_events.trigger_function.arn,
             jwks_fetcher=lambda region, pool_id: FAKE_JWKS,
-        )
-        self.alerts = Alerts(
-            f"{prefix}-alarms", email=ALARM_EMAIL, region=REGION, account_id=ACCOUNT_ID
         )
         callers = {}
         if with_runner:
@@ -161,8 +178,24 @@ class Stack:
             storage=self.storage,
             vector_dimensions=1024,
             default_tags=TAGS,
+            default_models=DEFAULT_MODELS,
             platform_key_arns=[self.database.key.arn, self.alerts.key.arn],
             alarm_topic_arn=self.alerts.topic.arn,
+        )
+        self.cognito_admin_api = CognitoAdminApi(
+            f"{self.name_prefix}-cognito-admin-api",
+            image_uri=self.provisioning.invite_image.image_uri,
+            auth=self.auth,
+            account_id=ACCOUNT_ID,
+        )
+        self.lambda_endpoint_policy = self.provisioning.lambda_endpoint_access(
+            [
+                (
+                    "ApiAndSeedManageTenantUsers",
+                    self.cognito_admin_api.function.arn,
+                    API_COGNITO_CALLERS,
+                )
+            ]
         )
         self.runner: IsolationRunner | None = None
         if with_runner:
@@ -179,6 +212,7 @@ class Stack:
                 tss_endpoint_url=self.storage.endpoint_url,
                 tenant_role_arn=self.storage.tenant_role.arn,
                 invite_function_arn=self.provisioning.invite_function.arn,
+                api_cognito_function_arn=self.cognito_admin_api.function.arn,
             )
 
     def ready(self) -> pulumi.Output[list[Any]]:
@@ -194,6 +228,9 @@ class Stack:
             self.provisioning.task_role_policy.policy,
             self.provisioning.failure_alarm.id,
             self.provisioning.invite_function.id,
+            self.cognito_admin_api.function.id,
+            self.cognito_admin_api.role_policy.policy,
+            self.lambda_endpoint_policy.policy,
         ]
         if self.runner is not None:
             outputs.append(self.runner.function.id)
@@ -782,16 +819,34 @@ def test_state_key_is_used_only_by_the_provisioning_role() -> None:
 # --- The Cognito admin Lambda: only the provisioning role -------------------------------------
 
 
-def test_lambda_endpoint_allows_one_function_and_one_caller() -> None:
+def test_lambda_endpoint_allows_named_functions_for_named_callers_only() -> None:
     policy = json.loads(
         provisioning.lambda_endpoint_policy(
-            invite_function="arn:fn", provisioning_role=f"{ROLE}/provisioning"
+            invite_function="arn:fn",
+            provisioning_role=f"{ROLE}/provisioning",
+            grants=[("ApiManagesUsers", "arn:api-fn", [f"{ROLE}/seed", f"{ROLE}/api"])],
         )
     )
-    [statement] = policy["Statement"]
-    assert statement["Action"] == "lambda:InvokeFunction"
-    assert statement["Resource"] == "arn:fn"
-    assert statement["Condition"] == {"ArnEquals": {"aws:PrincipalArn": f"{ROLE}/provisioning"}}
+    invite, api = policy["Statement"]
+    assert invite["Action"] == "lambda:InvokeFunction"
+    assert invite["Resource"] == "arn:fn"
+    assert invite["Condition"] == {"ArnEquals": {"aws:PrincipalArn": f"{ROLE}/provisioning"}}
+    assert api["Sid"] == "ApiManagesUsers"
+    assert api["Resource"] == "arn:api-fn"
+    assert api["Condition"] == {"ArnEquals": {"aws:PrincipalArn": [f"{ROLE}/api", f"{ROLE}/seed"]}}
+    assert {s["Effect"] for s in policy["Statement"]} == {"Allow"}
+
+
+def test_one_caller_is_written_as_a_string() -> None:
+    """As IAM stores a one-item list, so an unchanged stack previews no difference."""
+    policy = json.loads(
+        provisioning.lambda_endpoint_policy(
+            invite_function="arn:fn",
+            provisioning_role=f"{ROLE}/provisioning",
+            grants=[("One", "arn:api-fn", [f"{ROLE}/api"])],
+        )
+    )
+    assert policy["Statement"][1]["Condition"] == {"ArnEquals": {"aws:PrincipalArn": f"{ROLE}/api"}}
 
 
 @pulumi.runtime.test
@@ -802,7 +857,8 @@ def test_only_the_provisioning_role_may_invoke_the_cognito_admin_lambda() -> Any
         function = _one("aws:lambda/function:Function", f"{stack.name_prefix}-cognito-admin-fn")
         assert "vpcConfig" not in function  # outside the VPC: it must reach Cognito
         assert function["architectures"] == ["x86_64"]
-        assert set(function["environment"]["variables"]) == {"TENANT_POOL_ID"}
+        assert function["environment"]["variables"]["OPERATIONS"] == "invite"
+        assert set(function["environment"]["variables"]) == {"TENANT_POOL_ID", "OPERATIONS"}
 
         invokers = sorted(
             name
@@ -834,10 +890,72 @@ def test_only_the_provisioning_role_may_invoke_the_cognito_admin_lambda() -> Any
         }
         assert "tenant" in cognito["Resource"]
 
+        # Same name and parent as in build step 4: the same resource, never replaced (a
+        # deleted endpoint policy resets the endpoint to allow everything).
         endpoint_policy = _one(
             "aws:ec2/vpcEndpointPolicy:VpcEndpointPolicy", "p1-provision-lambda-endpoint-policy"
         )
         assert endpoint_policy["vpcEndpointId"] == "p1-lambda-id"
+        statements = json.loads(endpoint_policy["policy"])["Statement"]
+        assert [s["Sid"] for s in statements] == [
+            "ProvisioningInvitesTheFirstAdmin",
+            "ApiAndSeedManageTenantUsers",
+        ]
+        assert statements[0]["Resource"].endswith(f"{stack.name_prefix}-cognito-admin-fn")
+        assert statements[1]["Resource"].endswith(f"{stack.name_prefix}-cognito-admin-api-fn")
+        assert statements[1]["Condition"]["ArnEquals"]["aws:PrincipalArn"] == sorted(
+            API_COGNITO_CALLERS
+        )
+
+    return stack.ready().apply(check)
+
+
+@pulumi.runtime.test
+def test_the_apis_cognito_admin_function() -> Any:
+    """Its own role, its own operations; platform pool for MFA resets only (build step 5)."""
+    stack = Stack("p6")
+
+    def check(_: list[Any]) -> None:
+        name = f"{stack.name_prefix}-cognito-admin-api"
+        function = _one("aws:lambda/function:Function", f"{name}-fn")
+        assert "vpcConfig" not in function
+        variables = function["environment"]["variables"]
+        assert set(variables["OPERATIONS"].split(",")) == {
+            "invite",
+            "resend_invite",
+            "reset_password",
+            "disable",
+            "enable",
+            "set_role",
+            "reset_mfa",
+        }
+        assert set(variables) == {"TENANT_POOL_ID", "PLATFORM_POOL_ID", "OPERATIONS"}
+        # The same image as the provisioning function.
+        invite = _one("aws:lambda/function:Function", f"{stack.name_prefix}-cognito-admin-fn")
+        assert function["imageUri"] == invite["imageUri"]
+        permissions = [
+            inputs
+            for _, inputs in registered("aws:lambda/permission:Permission")
+            if name in str(inputs["function"])
+        ]
+        assert permissions == []
+
+        policy = _one("aws:iam/rolePolicy:RolePolicy", f"{name}-policy")["policy"]
+        tenant = by_sid(policy, "TenantPoolUserAdministration")
+        assert "p6-auth-tenant-pool" in tenant["Resource"]
+        assert "cognito-idp:AdminDeleteSoftwareToken" in tenant["Action"]
+        assert "cognito-idp:AdminSetUserMFAPreference" not in tenant["Action"]
+        platform = by_sid(policy, "PlatformPoolMfaResetOnly")
+        assert "p6-auth-platform-pool" in platform["Resource"]
+        assert set(platform["Action"]) == {
+            "cognito-idp:AdminGetUser",
+            "cognito-idp:AdminListGroupsForUser",
+            "cognito-idp:AdminDeleteSoftwareToken",
+            "cognito-idp:AdminUserGlobalSignOut",
+        }
+        statements = json.loads(policy)["Statement"]
+        assert {s["Effect"] for s in statements} == {"Allow"}
+        assert not any("*" in str(s["Action"]) for s in statements)
 
     return stack.ready().apply(check)
 
@@ -1398,26 +1516,27 @@ def test_alarm_topic_key_lets_cloudwatch_publish() -> None:
 
 @pulumi.runtime.test
 def test_alarm_topic_is_encrypted_and_emails_the_configured_address() -> Any:
-    stack = Stack("a1")
+    stack = Stack("al1")
 
     def check(_: list[Any]) -> None:
-        topic = _one("aws:sns/topic:Topic", "a1-alarms-topic")
-        assert topic["name"] == "a1-alarms"
-        assert topic["kmsMasterKeyId"] == "a1-alarms-key-key-id"
-        key = _one("aws:kms/key:Key", "a1-alarms-key")
+        topic = _one("aws:sns/topic:Topic", "al1-alarms-topic")
+        assert topic["name"] == "al1-alarms"
+        assert topic["kmsMasterKeyId"] == "al1-alarms-key-key-id"
+        key = _one("aws:kms/key:Key", "al1-alarms-key")
         assert key["enableKeyRotation"] is True
-        subscription = _one("aws:sns/topicSubscription:TopicSubscription", "a1-alarms-email")
+        subscription = _one("aws:sns/topicSubscription:TopicSubscription", "al1-alarms-email")
         assert (subscription["protocol"], subscription["endpoint"]) == ("email", ALARM_EMAIL)
         assert subscription["topic"] == stack.topic_arn()
-        policy = _one("aws:sns/topicPolicy:TopicPolicy", "a1-alarms-topic-policy")
+        policy = _one("aws:sns/topicPolicy:TopicPolicy", "al1-alarms-topic-policy")
         assert policy["arn"] == stack.topic_arn()
         # Every alarm in the stack notifies the topic.
         alarms = [
             (name, inputs)
             for name, inputs in registered("aws:cloudwatch/metricAlarm:MetricAlarm")
-            if name.startswith(("a1-", "assay-a1-"))
+            if name.startswith(("al1-", "assay-al1-"))
         ]
-        assert len(alarms) == 2
+        # Break glass, provisioning failures, and the auth-event trigger's three.
+        assert len(alarms) == 5
         for name, inputs in alarms:
             assert inputs.get("alarmActions") == [stack.topic_arn()], name
 

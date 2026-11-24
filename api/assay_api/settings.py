@@ -23,6 +23,13 @@ class SettingsError(ValueError):
     """The API cannot start. Raised at startup, so the task never becomes healthy."""
 
 
+def _required(env: Mapping[str, str], name: str) -> str:
+    value = env.get(name, "")
+    if not value:
+        raise SettingsError(f"{name} is not set")
+    return value
+
+
 def _jwks(env: Mapping[str, str], name: str) -> Mapping[str, Any]:
     """A JWKS with at least one key. An empty or missing one stops the API at startup."""
     raw = env.get(name, "")
@@ -52,6 +59,10 @@ class PoolSettings:
 class Settings:
     pools: tuple[PoolSettings, ...]
     db: DbTarget
+    # The Cognito admin Lambda for the API's user operations (outside the VPC, invoked
+    # through the `lambda` endpoint) and the tenant provisioning state machine.
+    cognito_admin_function: str
+    provisioning_state_machine: str
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -74,4 +85,9 @@ class Settings:
             region=region,
             ca_bundle=env["DB_CA_BUNDLE"],
         )
-        return cls(pools=pools, db=db)
+        return cls(
+            pools=pools,
+            db=db,
+            cognito_admin_function=_required(env, "COGNITO_ADMIN_FUNCTION"),
+            provisioning_state_machine=_required(env, "PROVISIONING_STATE_MACHINE_ARN"),
+        )

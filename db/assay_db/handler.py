@@ -10,6 +10,9 @@ Commands (the event's "command" field):
   other attribute or membership it must not have (roles.verify_roles).
 - `current`: report the current Alembic revision.
 - `maintain`: create any missing audit_log partitions (the monthly schedule).
+- `seed_models`: as `migrator`, insert or update the model catalog (`ai_models`) from the
+  event's `models` (stack config `aiModels`, sent by `scripts/seed.py`). No application role
+  may write the catalog.
 
 The result never includes credentials or row data.
 """
@@ -23,7 +26,7 @@ from typing import Any
 import psycopg
 from sqlalchemy import Connection, text
 
-from assay_db import runner
+from assay_db import catalog, runner
 from assay_db.checks import verify_rls
 from assay_db.connect import DbTarget, iam_engine, master_connection
 from assay_db.roles import MIGRATOR, bootstrap, verify_roles
@@ -31,7 +34,7 @@ from assay_db.roles import MIGRATOR, bootstrap, verify_roles
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-COMMANDS = frozenset({"upgrade", "verify", "current", "maintain"})
+COMMANDS = frozenset({"upgrade", "verify", "current", "maintain", "seed_models"})
 
 
 def _driver_connection(conn: Connection) -> psycopg.Connection:
@@ -55,6 +58,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     command = event.get("command", "current")
     if command not in COMMANDS:
         raise ValueError(f"unknown command {command!r}; expected one of {sorted(COMMANDS)}")
+    # Validated before anything connects, so a bad entry changes nothing.
+    models = catalog.parse_models(event.get("models")) if command == "seed_models" else []
     target = DbTarget.from_env()
     result: dict[str, Any] = {"command": command}
 
@@ -76,6 +81,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             runner.upgrade(conn)
         if command in {"upgrade", "maintain"}:
             result["partitions_created"] = runner.ensure_audit_partitions(conn)
+        if command == "seed_models":
+            result["models"] = catalog.seed_models(conn, models)
         if command in {"upgrade", "verify"}:
             _verify(conn, result)
         result["revision_after"] = runner.current_revision(conn)

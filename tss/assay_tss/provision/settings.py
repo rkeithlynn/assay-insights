@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from assay_db.catalog import DefaultModels
 from assay_tss import naming
 from assay_tss.policies import Principals
 
@@ -35,6 +36,10 @@ class ProvisionSettings:
     default_tags: Mapping[str, str]
     # Scratch space for the Pulumi workspace; the task's only writable directory.
     work_dir: Path
+    # The models a tenant starts with (stack config defaultIngestModel, defaultQueryModel),
+    # set when the tenant is activated. Always set in the task; None only in tests that
+    # never activate a tenant.
+    default_models: DefaultModels | None = None
     # Extra arguments for the AWS provider. Empty in the task; the image test uses it to
     # run a preview with no network.
     provider_args: Mapping[str, Any] = field(default_factory=dict)
@@ -72,4 +77,7 @@ class ProvisionSettings:
             vector_dimensions=int(env["VECTOR_DIMENSIONS"]),
             default_tags={str(k): str(v) for k, v in tags.items()},
             work_dir=Path(env["WORK_DIR"]),
+            default_models=DefaultModels(
+                ingest=env["DEFAULT_INGEST_MODEL"], query=env["DEFAULT_QUERY_MODEL"]
+            ),
         )

@@ -23,6 +23,8 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from assay_db.catalog import DefaultModels, ensure_default_models
+
 KIND_BUSINESS = "business"
 STATUS_PROVISIONING = "provisioning"
 STATUS_ACTIVE = "active"
@@ -247,8 +249,14 @@ def activate(
     cognito_sub: str,
     first_admin: FirstAdmin,
     actor: Actor,
+    default_models: DefaultModels | None = None,
 ) -> uuid.UUID:
-    """The first admin's user row, tenant `active`, and both audit rows. Returns the user ID."""
+    """The first admin's user row, the default models, tenant `active`, and the audit rows.
+
+    Returns the first admin's user ID. With `default_models`, a tenant that has no model
+    selection yet gets the defaults in the same transaction (assay_db.catalog), so an active
+    tenant always has one available and one selected model per job.
+    """
     tenant = lock_tenant(conn, tenant_id)
     if tenant is None or tenant.status != STATUS_PROVISIONING:
         state = "missing" if tenant is None else tenant.status
@@ -284,6 +292,8 @@ def activate(
             target_label=email,
             detail={"after": {"name": name, "email": email, "role": FIRST_ADMIN_ROLE}},
         )
+    if default_models is not None:
+        ensure_default_models(conn, tenant_id=tenant_id, defaults=default_models)
     conn.execute(
         text("UPDATE assay.tenants SET status = :new WHERE id = :id"),
         {"id": tenant_id, "new": STATUS_ACTIVE},

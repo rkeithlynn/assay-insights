@@ -21,6 +21,7 @@ from assay_db.roles import (
     ALL_ROLES,
     APP_TENANT,
     AUDIT_WRITER,
+    AUTH_EVENT_RECORDER,
     LOGIN_ROLES,
     MIGRATOR,
     PLATFORM_READER,
@@ -81,6 +82,8 @@ EXPECTED_PRIVILEGES: dict[str, dict[str, set[str]]] = {
     AUDIT_WRITER: {"audit_log": {INS}},
     TSS: {"tenant_storage": {SEL}},
     PLATFORM_VIEW_OWNER: {},
+    # Owns auth_events.record() (migration 0004); column-level SELECT and UPDATE on users.
+    AUTH_EVENT_RECORDER: {"audit_log": {INS}},
     MIGRATOR: {},  # owner; checked separately
 }
 
@@ -439,6 +442,7 @@ PLATFORM_USERS_VIEW_COLUMNS = [
     "name",
     "role",
     "status",
+    "sessions_revoked_at",
 ]
 
 
@@ -486,17 +490,31 @@ def test_platform_users_view_shape_and_owner(db: TestDb) -> None:
         }
     assert columns == PLATFORM_USERS_VIEW_COLUMNS
     assert owner == (PLATFORM_VIEW_OWNER,)
-    assert readable == {"id", "tenant_id", "cognito_sub", "email", "name", "role", "status"}
+    assert readable == {
+        "id",
+        "tenant_id",
+        "cognito_sub",
+        "email",
+        "name",
+        "role",
+        "status",
+        "sessions_revoked_at",
+    }
     assert grantees == {PLATFORM_VIEW_OWNER, PLATFORM_READER}
 
 
-def test_view_owner_policy_hides_business_tenant_users(db: TestDb) -> None:
-    """The users policy itself, not only the view's WHERE clause, limits the view owner."""
+def test_view_owner_reads_users_only_through_its_column_grants(db: TestDb) -> None:
+    """Owner decision D8 (build step 5): the view owner's policy on users is `true` and each
+    view filters for itself. It still cannot sign in and holds column-level SELECT only.
+    Whether any view shows a business tenant's non-admin users: tests/unit/test_db_step5.py.
+    """
     with psycopg.connect(db.url) as conn:
-        conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(PLATFORM_VIEW_OWNER)))
-        rows = conn.execute("SELECT tenant_id FROM assay.users").fetchall()
-        conn.rollback()
-    assert rows == [(db.seed.platform,)]
+        row = conn.execute(
+            "SELECT rolcanlogin, has_table_privilege(rolname, 'assay.users', 'SELECT') "
+            "FROM pg_roles WHERE rolname = %s",
+            (PLATFORM_VIEW_OWNER,),
+        ).fetchone()
+    assert row == (False, False)
 
 
 @pytest.mark.parametrize("role", [APP_TENANT, PLATFORM_READER, PLATFORM_WRITER, AUDIT_WRITER])

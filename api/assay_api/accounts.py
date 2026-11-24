@@ -8,11 +8,15 @@ disabled or its tenant suspended. So every request also requires that:
 - that user is not disabled;
 - the user's tenant is `active` (a suspended tenant's users are refused, section 10, and so
   are users of a tenant that is still provisioning or failed);
-- the token's group equals `users.role`, so a role change takes effect on the next request.
+- the token's group equals `users.role`, so a role change takes effect on the next request;
+- the token comes from a sign-in after `users.sessions_revoked_at`. Resetting a user's MFA or
+  disabling them sets it, so every token they already hold stops working at once (global
+  sign-out revokes only refresh tokens, and the API verifies access tokens itself).
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import enum
 import uuid
 from dataclasses import dataclass
@@ -35,6 +39,7 @@ PLATFORM_USERS = table(
     column("name"),
     column("role"),
     column("status"),
+    column("sessions_revoked_at"),
     schema="platform",
 )
 
@@ -47,6 +52,7 @@ class Refusal(enum.StrEnum):
     TENANT_SUSPENDED = "tenant_suspended"
     TENANT_NOT_ACTIVE = "tenant_not_active"
     ROLE_MISMATCH = "role_mismatch"
+    SESSION_REVOKED = "session_revoked"
 
 
 class AccountRefused(Exception):
@@ -82,6 +88,7 @@ def _tenant_row(conn: Connection, principal: Principal) -> Row[Any] | None:
             User.name,
             User.role,
             User.status,
+            User.sessions_revoked_at,
         )
         .join(Tenant, Tenant.id == User.tenant_id)
         .where(User.cognito_sub == principal.sub, User.tenant_id == principal.tenant_id)
@@ -100,6 +107,7 @@ def _platform_row(conn: Connection, principal: Principal) -> Row[Any] | None:
         v.name,
         v.role,
         v.status,
+        v.sessions_revoked_at,
     ).where(v.cognito_sub == principal.sub)
     return conn.execute(query).one_or_none()
 
@@ -112,9 +120,11 @@ def load_account(conn: Connection, principal: Principal) -> Account:
         row = _platform_row(conn, principal)
     if row is None:
         raise AccountRefused(Refusal.ACCOUNT_NOT_FOUND)
-    user_id, tenant_id, tenant_name, tenant_status, email, name, role, status = row
+    user_id, tenant_id, tenant_name, tenant_status, email, name, role, status, revoked = row
     if status == "disabled":
         raise AccountRefused(Refusal.USER_DISABLED)
+    if revoked is not None and _signed_in_at(principal) <= revoked:
+        raise AccountRefused(Refusal.SESSION_REVOKED)
     if tenant_status == "suspended":
         raise AccountRefused(Refusal.TENANT_SUSPENDED)
     if tenant_status != "active":
@@ -131,3 +141,7 @@ def load_account(conn: Connection, principal: Principal) -> Account:
         role=str(role),
         status=str(status),
     )
+
+
+def _signed_in_at(principal: Principal) -> dt.datetime:
+    return dt.datetime.fromtimestamp(principal.auth_time, dt.UTC)

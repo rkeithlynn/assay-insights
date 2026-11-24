@@ -12,6 +12,11 @@ skips it.
 - 403 `mfa_required`: a tenant-admin whose session did not pass MFA. Only `GET /me` lets
   them through, and it reports `mfa_required` so the portal can set MFA up.
 - 403 with an `assay_api.accounts.Refusal` code: the account check failed.
+
+Every dependency has `scope="function"`: its transaction commits (or rolls back on an
+error) when the route function returns, before the response is sent. With FastAPI's default
+scope the commit would run after the response, so a route could report a change that then
+failed to commit.
 """
 
 from __future__ import annotations
@@ -122,14 +127,19 @@ AnySignedIn = Annotated[
             pools=_TENANT | _PLATFORM,
             roles=frozenset(TENANT_GROUPS + PLATFORM_GROUPS),
             allow_without_mfa=True,
-        )
+        ),
+        scope="function",
     ),
 ]
-TenantMember = Annotated[Caller, Depends(require(pools=_TENANT, roles=frozenset(TENANT_GROUPS)))]
-TenantAdmin = Annotated[Caller, Depends(require(pools=_TENANT, roles=frozenset({TENANT_ADMIN})))]
+TenantMember = Annotated[
+    Caller, Depends(require(pools=_TENANT, roles=frozenset(TENANT_GROUPS)), scope="function")
+]
+TenantAdmin = Annotated[
+    Caller, Depends(require(pools=_TENANT, roles=frozenset({TENANT_ADMIN})), scope="function")
+]
 PlatformMember = Annotated[
-    Caller, Depends(require(pools=_PLATFORM, roles=frozenset(PLATFORM_GROUPS)))
+    Caller, Depends(require(pools=_PLATFORM, roles=frozenset(PLATFORM_GROUPS)), scope="function")
 ]
 MasterAdmin = Annotated[
-    Caller, Depends(require(pools=_PLATFORM, roles=frozenset({"master-admin"})))
+    Caller, Depends(require(pools=_PLATFORM, roles=frozenset({"master-admin"})), scope="function")
 ]

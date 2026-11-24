@@ -4,12 +4,14 @@ BUILD_SPEC.md section 4, item 6. One task (0.5 vCPU, 1 GB, X86_64) in the worklo
 running as a non-root user with a read-only root filesystem. The load balancer spans the two
 app subnets (it needs two zones).
 
-The load balancer's security group has no inbound rule yet: nothing can reach the API until
-the edge (build step 5) adds CloudFront's VPC origin, which must then use HTTPS to the load
-balancer. Until then the listener is plain HTTP and unreachable.
+The load balancer listens on HTTPS only, with the portal hosts' certificate, and its security
+group admits only CloudFront's VPC origin (the rule is added by `assay_infra.edge`). Its
+access logs go to the edge's logging bucket.
 
 The task signs in to Aurora with IAM database authentication as `app_tenant` (tenant
-routes) and `platform_reader` (admin routes), and has no other AWS permission.
+routes), `platform_reader` (admin reads) and `platform_writer` (admin changes). Its only other
+AWS permissions: invoke the API's Cognito admin function, and start the tenant provisioning
+state machine. Both calls go through interface endpoints whose policies name this role.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ from assay_infra.network import Network
 
 APP_TENANT_DB_USER = "app_tenant"  # assay_db.roles.APP_TENANT
 PLATFORM_READER_DB_USER = "platform_reader"  # assay_db.roles.PLATFORM_READER
-API_DB_USERS = (APP_TENANT_DB_USER, PLATFORM_READER_DB_USER)
+PLATFORM_WRITER_DB_USER = "platform_writer"  # assay_db.roles.PLATFORM_WRITER
+API_DB_USERS = (APP_TENANT_DB_USER, PLATFORM_READER_DB_USER, PLATFORM_WRITER_DB_USER)
 
 DOCKERFILE = "api/Dockerfile"
 IMAGE_TREES = ("db/assay_db", "api/assay_api")
@@ -39,6 +42,10 @@ CONTAINER_USER = "10001:10001"  # api/Dockerfile
 TASK_CPU = "512"
 TASK_MEMORY = "1024"
 HEALTH_PATH = "/api/health"
+TLS_POLICY = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+ACCESS_LOG_PREFIX = "alb"
+# API 5xx alarm: this many server errors (target or load balancer) in five minutes.
+SERVER_ERRORS_THRESHOLD = 5
 
 # The variables assay_api.settings.Settings.from_env reads (DB_CA_BUNDLE is in the image).
 JWKS_VARIABLES = ("COGNITO_TENANT_JWKS", "COGNITO_PLATFORM_JWKS")
@@ -51,6 +58,8 @@ TASK_VARIABLES = (
     "COGNITO_TENANT_CLIENT_ID",
     "COGNITO_PLATFORM_POOL_ID",
     "COGNITO_PLATFORM_CLIENT_ID",
+    "COGNITO_ADMIN_FUNCTION",
+    "PROVISIONING_STATE_MACHINE_ARN",
     *JWKS_VARIABLES,
 )
 LOG_RETENTION_DAYS = 30
@@ -112,7 +121,9 @@ def execution_role_policy(*, repository: str, log_group: str) -> str:
     )
 
 
-def task_role_policy(db_users: list[str]) -> str:
+def task_role_policy(
+    db_users: list[str], *, cognito_admin_function: str, state_machine: str
+) -> str:
     return _json(
         {
             "Version": "2012-10-17",
@@ -122,7 +133,19 @@ def task_role_policy(db_users: list[str]) -> str:
                     "Effect": "Allow",
                     "Action": "rds-db:connect",
                     "Resource": sorted(db_users),
-                }
+                },
+                {
+                    "Sid": "CognitoAdminForUserChanges",
+                    "Effect": "Allow",
+                    "Action": "lambda:InvokeFunction",
+                    "Resource": cognito_admin_function,
+                },
+                {
+                    "Sid": "StartTenantProvisioning",
+                    "Effect": "Allow",
+                    "Action": "states:StartExecution",
+                    "Resource": state_machine,
+                },
             ],
         }
     )
@@ -206,6 +229,13 @@ class ApiService(pulumi.ComponentResource):
         database: Database,
         database_name: str,
         auth: Auth,
+        cognito_admin_function_arn: pulumi.Input[str],
+        state_machine_arn: pulumi.Input[str],
+        # The validated certificate for the portal hosts, and the edge's logging bucket.
+        certificate_arn: pulumi.Input[str],
+        access_logs_bucket: pulumi.Input[str],
+        access_logs_ready: pulumi.Resource,
+        alarm_topic_arn: pulumi.Input[str],
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -250,7 +280,7 @@ class ApiService(pulumi.ComponentResource):
         )
         self.task_role = aws.iam.Role(
             f"{name}-task-role",
-            description="API task: IAM database sign-in as app_tenant and platform_reader",
+            description="API task: database sign-in, Cognito admin calls, tenant provisioning",
             assume_role_policy=trust,
             opts=child,
         )
@@ -258,11 +288,21 @@ class ApiService(pulumi.ComponentResource):
             f"{name}-task-policy",
             role=self.task_role.id,
             policy=pulumi.Output.all(
-                *[
-                    db_user_arn(region, account_id, database.cluster_resource_id, user)
-                    for user in API_DB_USERS
-                ]
-            ).apply(task_role_policy),
+                db_users=pulumi.Output.all(
+                    *[
+                        db_user_arn(region, account_id, database.cluster_resource_id, user)
+                        for user in API_DB_USERS
+                    ]
+                ),
+                cognito_admin_function=cognito_admin_function_arn,
+                state_machine=state_machine_arn,
+            ).apply(
+                lambda a: task_role_policy(
+                    list(a["db_users"]),
+                    cognito_admin_function=a["cognito_admin_function"],
+                    state_machine=a["state_machine"],
+                )
+            ),
             opts=child,
         )
 
@@ -270,6 +310,9 @@ class ApiService(pulumi.ComponentResource):
         self.alb_security_group = aws.ec2.SecurityGroup(
             f"{name}-alb-sg",
             vpc_id=network.vpc.id,
+            # A security group's description cannot change without replacing the group, so
+            # this one keeps its build step 3 text. Its only inbound rule now admits CloudFront's
+            # VPC origin (assay_infra.edge).
             description="API load balancer: no inbound until the CloudFront VPC origin exists",
             tags={"Name": f"{name}-alb"},
             opts=child,
@@ -315,7 +358,10 @@ class ApiService(pulumi.ComponentResource):
             drop_invalid_header_fields=True,
             enable_deletion_protection=True,
             idle_timeout=120,
-            opts=child,
+            access_logs=aws.lb.LoadBalancerAccessLogsArgs(
+                bucket=access_logs_bucket, prefix=ACCESS_LOG_PREFIX, enabled=True
+            ),
+            opts=pulumi.ResourceOptions(parent=self, depends_on=[access_logs_ready]),
         )
         self.target_group = aws.lb.TargetGroup(
             f"{name}-tg",
@@ -336,11 +382,15 @@ class ApiService(pulumi.ComponentResource):
             ),
             opts=child,
         )
+        # HTTPS only. CloudFront checks the certificate against the viewer's Host header,
+        # which the /api/* behaviour forwards; the certificate covers both portal hosts.
         self.listener = aws.lb.Listener(
-            f"{name}-http",
+            f"{name}-https",
             load_balancer_arn=self.load_balancer.arn,
-            port=80,
-            protocol="HTTP",
+            port=443,
+            protocol="HTTPS",
+            ssl_policy=TLS_POLICY,
+            certificate_arn=certificate_arn,
             default_actions=[
                 aws.lb.ListenerDefaultActionArgs(
                     type="forward", target_group_arn=self.target_group.arn
@@ -365,6 +415,8 @@ class ApiService(pulumi.ComponentResource):
             COGNITO_PLATFORM_POOL_ID=auth.platform.pool.id,
             COGNITO_PLATFORM_CLIENT_ID=auth.platform.client.id,
             COGNITO_PLATFORM_JWKS=auth.platform_jwks,
+            COGNITO_ADMIN_FUNCTION=cognito_admin_function_arn,
+            PROVISIONING_STATE_MACHINE_ARN=state_machine_arn,
         ).apply(lambda env: {**env, "AWS_REGION": region, "DB_NAME": database_name})
         self.task_definition = aws.ecs.TaskDefinition(
             f"{name}-task",
@@ -415,6 +467,43 @@ class ApiService(pulumi.ComponentResource):
             opts=pulumi.ResourceOptions(
                 parent=self, depends_on=[self.listener, self.task_role_policy]
             ),
+        )
+
+        # Section 4, item 9: alarm on the API's server errors.
+        self.server_errors_alarm = aws.cloudwatch.MetricAlarm(
+            f"{name}-5xx-alarm",
+            name=f"{name}-5xx",
+            alarm_description="The API returned server errors (5xx) through its load balancer.",
+            alarm_actions=[alarm_topic_arn],
+            metric_queries=[
+                aws.cloudwatch.MetricAlarmMetricQueryArgs(
+                    id="errors",
+                    expression="FILL(target, 0) + FILL(balancer, 0)",
+                    label="API 5xx responses",
+                    return_data=True,
+                ),
+                *[
+                    aws.cloudwatch.MetricAlarmMetricQueryArgs(
+                        id=query_id,
+                        metric=aws.cloudwatch.MetricAlarmMetricQueryMetricArgs(
+                            namespace="AWS/ApplicationELB",
+                            metric_name=metric,
+                            dimensions={"LoadBalancer": self.load_balancer.arn_suffix},
+                            stat="Sum",
+                            period=300,
+                        ),
+                    )
+                    for query_id, metric in (
+                        ("target", "HTTPCode_Target_5XX_Count"),
+                        ("balancer", "HTTPCode_ELB_5XX_Count"),
+                    )
+                ],
+            ],
+            evaluation_periods=1,
+            threshold=SERVER_ERRORS_THRESHOLD,
+            comparison_operator="GreaterThanOrEqualToThreshold",
+            treat_missing_data="notBreaching",
+            opts=child,
         )
 
         self.register_outputs(

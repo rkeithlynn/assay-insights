@@ -20,6 +20,8 @@ def environment(**overrides: str) -> dict[str, str]:
         "DB_PORT": "5432",
         "DB_NAME": "assay",
         "DB_CA_BUNDLE": "/opt/rds-ca/global-bundle.pem",
+        "COGNITO_ADMIN_FUNCTION": "arn:aws:lambda:us-east-1:000000000000:function:cognito-admin",
+        "PROVISIONING_STATE_MACHINE_ARN": "arn:aws:states:us-east-1:000000000000:stateMachine:p",
     }
     for kind in ("tenant", "platform"):
         settings = make_issuer(kind).settings
