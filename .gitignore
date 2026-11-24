@@ -28,3 +28,6 @@ portal/dist/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Rendered portal checks (scripts/check_portal_render.py)
+.portal-render/

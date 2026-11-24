@@ -329,7 +329,9 @@ assets/     Logo and favicon SVGs
   - Prefer a release that has been out for at least a couple of weeks over one that is
     only days old. setup-uv is on v10.3.3 rather than v10.4.0 for this reason.
 - Run the checks locally with `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy` and `uv run pytest`.
+  `uv run mypy` and `uv run pytest`. After any portal change that shows on screen, also
+  `uv run scripts/check_portal_render.py` (Docker), and look at the screenshots it writes to
+  `.portal-render/results/screens/`.
 - The database tests (`tests/unit/test_db_security.py`) need a throwaway PostgreSQL 17;
   without one they skip locally, and CI (`ASSAY_REQUIRE_DB_TESTS=1`) fails instead:
   `docker run -d --name assay-pg-test -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1:55432:5432 postgres:17`
@@ -870,6 +872,37 @@ Notes:
   and uploads the files; `config.json` is written by Pulumi. After changing a route, run
   `uv run scripts/export_openapi.py` and `npm run gen:api`; `test_openapi.py` and CI
   check both.
+- **Rendered checks (portal/e2e).** Component tests run in jsdom, which has no layout. Three
+  defects passed them and were seen only in a browser (owner, 2026-11-24, at 1800 px in
+  Chrome): the banner's product name cut to "Assay Insi..." with a mark too small to read, a
+  row-action menu clipped by its table's scrolling container, and a 280 px navigation for
+  three short items. So the production build is now rendered in headless Chromium at 1280
+  and 1800 px (`portal/e2e/layout.e2e.ts`, Playwright 1.64.1 in its digest-pinned image),
+  for every screen of both hosts, signed in with a stored oidc-client-ts user and a stand-in
+  API (`e2e/fixtures.ts`; nothing reaches AWS). On every screen it checks the banner (full
+  name, no ellipsis; a 32 px logo whose drawing stands out from the banner), the navigation
+  (no item cut off or under the collapse button, at most 90 px wider than its widest item),
+  and every dropdown (opened, first and last items hit-tested where they are drawn, so a
+  clipping container fails it). Each failed on the old build. CI job `portal-render` and
+  `uv run scripts/check_portal_render.py` run it the same way; `test_portal_render.py`
+  keeps the image and `@playwright/test` on one version. Not covered: the CloudFront CSP
+  (`vite preview` sends none) and real tokens.
+  - **The banner has its own mark**, `assets/assay-insights-mark-banner.svg`: the favicon's
+    navy tile is the banner's colour (`#14213D`) and vanished into it, leaving a small glyph,
+    so the banner version is the artwork alone, cropped to the logo height. It declares
+    `width` and `height`; Cloudscape sizes the identity from the image's intrinsic width,
+    and without one it cut the name. The favicon mark is unchanged, because Cognito's
+    managed login branding uses it.
+  - **Every table row-action menu is a `RowActions`** (`portal/src/components/RowActions.tsx`),
+    a ButtonDropdown with `expandToViewport`, so the menu is drawn against the window and
+    not inside the table's scrolling container. Never use a bare ButtonDropdown in a table.
+  - **The navigation's width comes from its items** (`navigationWidth` in
+    `portal/src/navigation.ts`: the longest title at 7.5 px a character plus 90 px, between
+    150 and 280 px). Tenant portal 150 px, admin portal 188 px. New screens in steps 6 to 8
+    widen it as needed; the rendered check catches a title that no longer fits.
+  - Seen, not changed: at 1280 px the Audit history table is wider than its container and
+    scrolls sideways (the last column, Outcome, starts off screen). Headless Chromium hides
+    scrollbars, so the screenshot does not show the scrollbar a browser does.
 - **TypeScript stays on 5.9**: `typescript-eslint` and `openapi-typescript` do not support
   TypeScript 7 yet.
 - **Dev-only npm advisory** (2026-11-23): a moderate ReDoS in `minimatch`, via ESLint and

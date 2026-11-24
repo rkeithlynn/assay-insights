@@ -7,7 +7,7 @@
 import Alert from "@cloudscape-design/components/alert";
 import Box from "@cloudscape-design/components/box";
 import Button from "@cloudscape-design/components/button";
-import ButtonDropdown, { type ButtonDropdownProps } from "@cloudscape-design/components/button-dropdown";
+import type { ButtonDropdownProps } from "@cloudscape-design/components/button-dropdown";
 import ContentLayout from "@cloudscape-design/components/content-layout";
 import Form from "@cloudscape-design/components/form";
 import FormField from "@cloudscape-design/components/form-field";
@@ -22,6 +22,7 @@ import { useCallback, useState } from "react";
 
 import { call, type UserOut } from "../api/client";
 import { Confirm, type ConfirmRequest } from "../components/Confirm";
+import { RowActions } from "../components/RowActions";
 import { messageFor } from "../errors";
 import { useSession } from "../session";
 import { useLoad } from "../useLoad";
@@ -284,12 +285,11 @@ export function Users() {
                 cell: (u) => {
                   const items = actionsFor(u, me.user.id);
                   return items.length ? (
-                    <ButtonDropdown
+                    <RowActions
                       items={items}
-                      variant="inline-icon"
                       ariaLabel={`Actions for ${u.name}`}
                       disabled={busy}
-                      onItemClick={({ detail }) => onAction(u, detail.id)}
+                      onItemClick={(id) => onAction(u, id)}
                     />
                   ) : null;
                 },

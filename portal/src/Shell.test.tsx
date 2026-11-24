@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router";
 import { describe, expect, it } from "vitest";
 
-import markUrl from "@assets/assay-insights-mark.svg";
+import markUrl from "@assets/assay-insights-mark-banner.svg";
 
 import type { Me } from "./api/client";
 import { type Session, SessionContext } from "./session";

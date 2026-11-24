@@ -110,3 +110,34 @@ jobs:
 
       - name: Dependency audit (what ships in the portal)
         run: npm audit --omit=dev --audit-level=low
+
+  # The built portal rendered in headless Chromium at 1280 and 1800 px wide (portal/e2e):
+  # banner, navigation and every dropdown on every screen of both hosts. jsdom has no layout,
+  # so the unit tests above cannot see these. Same image and steps as
+  # `uv run scripts/check_portal_render.py`.
+  portal-render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      # Playwright v1.64.1-noble (Node 26). Its version must equal @playwright/test in
+      # portal/package.json (tests/unit/test_portal_render.py).
+      image: mcr.microsoft.com/playwright@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: portal
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install (locked, no install scripts)
+        run: npm ci --ignore-scripts --no-fund --no-audit
+
+      - name: Production build
+        run: npx vite build --logLevel warn
+
+      - name: Rendered layout checks
+        run: npx playwright test
+        env:
+          PORTAL_RENDER_OUT: ${{ runner.temp }}/portal-render

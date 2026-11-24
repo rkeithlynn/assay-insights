@@ -2,11 +2,17 @@
  * The shell (BUILD_SPEC.md section 11): Cloudscape app layout. Top bar with the logo, the
  * tenant name, a "Development" tag and the user menu (Change password, Sign out).
  *
- * The banner's logo is the square mark next to the product name, both in one link to the
- * role's home screen. The mark is imported, so Vite bundles it with the portal (served from
- * the portal's own origin or inlined as a data: URL, both already in the CSP's img-src).
- * Cloudscape draws the logo at most 32 px high (24 px on a narrow screen); the mark is drawn
- * for favicon sizes, so it stays legible there. The full wordmark would be too small.
+ * The banner's logo is the mark next to the product name, both in one link to the role's
+ * home screen. It is the banner's own version of the mark (`assay-insights-mark-banner.svg`):
+ * the favicon's navy tile is the banner's colour and would vanish into it, so the banner
+ * version is the artwork alone, cropped to fill Cloudscape's 32 px logo height (24 px on a
+ * narrow screen). It declares its width and height: without them Cloudscape sizes the
+ * identity as if the image had no width, and cuts the product name to "Assay Insi...".
+ * Imported, so Vite bundles it with the portal (served from the portal's own origin or
+ * inlined as a data: URL, both already in the CSP's img-src).
+ *
+ * The navigation is as wide as the role's own items need (`navigationWidth`), not
+ * Cloudscape's 280 px: room for the longest title and the collapse button, no more.
  */
 
 import AppLayout from "@cloudscape-design/components/app-layout";
@@ -15,9 +21,9 @@ import TopNavigation from "@cloudscape-design/components/top-navigation";
 import { type ReactNode, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 
-import markUrl from "@assets/assay-insights-mark.svg";
+import markUrl from "@assets/assay-insights-mark-banner.svg";
 
-import { screensFor } from "./navigation";
+import { navigationWidth, screensFor } from "./navigation";
 import { ChangePassword } from "./pages/ChangePassword";
 import { useSession } from "./session";
 
@@ -73,6 +79,7 @@ export function Shell({ children }: { children: ReactNode }) {
       </div>
       <AppLayout
         headerSelector="#top-nav"
+        navigationWidth={navigationWidth(screens)}
         toolsHide
         navigation={
           <SideNavigation

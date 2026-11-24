@@ -37,6 +37,21 @@ export function screensFor(role: string): Screen[] {
   return isRole(role) ? BY_ROLE[role].map((id) => SCREENS[id]) : [];
 }
 
+// The navigation's width (px) for a list of screens: room for the longest title, the
+// panel's padding and the collapse button, no more. Cloudscape's default is 280 px. The
+// estimate per character suits Open Sans at 14 px; the rendered checks (portal/e2e) verify
+// that no title is cut off or runs under the collapse button.
+const NAV_PX_PER_CHAR = 7.5;
+const NAV_CHROME_PX = 90;
+const NAV_MIN_PX = 150;
+const NAV_MAX_PX = 280;
+
+export function navigationWidth(screens: Screen[]): number {
+  const longest = Math.max(0, ...screens.map((screen) => screen.title.length));
+  const width = Math.ceil(longest * NAV_PX_PER_CHAR + NAV_CHROME_PX);
+  return Math.min(NAV_MAX_PX, Math.max(NAV_MIN_PX, width));
+}
+
 /** Where a role lands after sign-in. */
 export function landingFor(role: string): string {
   return screensFor(role)[0]?.path ?? "/";
