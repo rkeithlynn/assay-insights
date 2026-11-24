@@ -45,7 +45,21 @@ export function formatTime(value: string | null | undefined): string {
   return new Date(value).toLocaleString();
 }
 
-/** The actions a tenant-admin may take on this user (the API enforces each one). */
+// Cognito's temporary passwords last 7 days in both pools (TEMPORARY_PASSWORD_DAYS in
+// infra/assay_infra/auth.py).
+export const TEMPORARY_PASSWORD_DAYS = 7;
+// Shown under "Resend invitation" (one line in the menu, so short). The notice after a resend
+// says how long the new temporary password lasts.
+export const RESEND_EXPLANATION = "Forgot password can't reach them until they first sign in.";
+
+/**
+ * The actions a tenant-admin may take on this user (the API enforces each one).
+ *
+ * An invited user has never finished a first sign-in (Cognito's FORCE_CHANGE_PASSWORD): a
+ * password reset cannot reach them (Cognito refuses it, and Forgot password on the sign-in
+ * page sends no email), so they are offered a resent invitation instead, which is a new
+ * temporary password.
+ */
 export function actionsFor(user: UserOut, selfId: string): ButtonDropdownProps.Item[] {
   const self = user.id === selfId;
   const items: ButtonDropdownProps.Item[] = [];
@@ -57,7 +71,9 @@ export function actionsFor(user: UserOut, selfId: string): ButtonDropdownProps.I
     );
     items.push(user.status === "disabled" ? { id: "enable", text: "Enable" } : { id: "disable", text: "Disable" });
   }
-  if (user.status === "invited") items.push({ id: "resend", text: "Resend invitation" });
+  if (user.status === "invited") {
+    items.push({ id: "resend", text: "Resend invitation", secondaryText: RESEND_EXPLANATION });
+  }
   if (user.status === "active" && !self) items.push({ id: "reset-password", text: "Reset password" });
   if (user.role === "tenant-user") items.push({ id: "reset-mfa", text: "Reset MFA" });
   return items;
@@ -137,7 +153,7 @@ function InviteDialog({
           </FormField>
           <FormField
             label="Email"
-            description="Cognito emails the invitation with a temporary password, valid for 7 days."
+            description={`Cognito emails the invitation with a temporary password, valid for ${TEMPORARY_PASSWORD_DAYS} days.`}
             errorText={email && !emailValid ? "Enter an email address." : undefined}
           >
             <Input type="email" value={email} onChange={({ detail }) => setEmail(detail.value)} />
@@ -213,7 +229,10 @@ export function Users() {
         void run(() => call(api.PATCH("/api/users/{user_id}", { ...path, body: { status: "active" } })), "User enabled.");
         return;
       case "resend":
-        void run(() => call(api.POST("/api/users/{user_id}/resend-invite", path)), "Invitation sent again.");
+        void run(
+          () => call(api.POST("/api/users/{user_id}/resend-invite", path)),
+          `Invitation sent again to ${user.email}, with a new temporary password valid for ${TEMPORARY_PASSWORD_DAYS} days.`,
+        );
         return;
       case "reset-password":
         setConfirm({

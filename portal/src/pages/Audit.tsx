@@ -25,7 +25,7 @@ import Select, { type SelectProps } from "@cloudscape-design/components/select";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import StatusIndicator from "@cloudscape-design/components/status-indicator";
 import Table, { type TableProps } from "@cloudscape-design/components/table";
-import { useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 
 import { type AuditEvent, type AuditPage, call, errorFrom } from "../api/client";
 import { messageFor } from "../errors";
@@ -55,6 +55,28 @@ const CATEGORIES: SelectProps.Option[] = [
 
 type Category = "auth" | "user" | "tenant" | "audit";
 type Sort = "at" | "-at" | "tenant" | "-tenant" | "actor" | "-actor" | "action" | "-action" | "category" | "-category";
+
+// The table fits the screen at 1280 px and wider (rendered check: portal/e2e/layout.e2e.ts):
+// lines wrap, except Time and Actor, which stay on one line; Target wraps anywhere (an email
+// address has no spaces to wrap at); Outcome stays on one line and takes only what it needs.
+const ONE_LINE = { whiteSpace: "nowrap" } as const;
+const WRAP_ANYWHERE = { overflowWrap: "anywhere", wordBreak: "break-word" } as const;
+const TARGET_MIN_WIDTH = 120;
+
+/** An action name that may break after each underscore; copying it still gives the name. */
+export function breakableAction(action: string) {
+  const parts = action.split("_");
+  return parts.map((part, i) => (
+    <Fragment key={i}>
+      {part}
+      {i < parts.length - 1 && (
+        <>
+          _<wbr />
+        </>
+      )}
+    </Fragment>
+  ));
+}
 
 const UNIT_MS: Record<DateRangePickerProps.TimeUnit, number> = {
   second: 1000,
@@ -230,9 +252,20 @@ export function Audit() {
 
   const sortField = sort.replace(/^-/, "");
   const columns: TableProps.ColumnDefinition<AuditEvent>[] = [
-    { id: "at", header: "Time", sortingField: "at", cell: (e) => new Date(e.at).toLocaleString(), isRowHeader: true },
+    {
+      id: "at",
+      header: "Time",
+      sortingField: "at",
+      cell: (e) => <span style={ONE_LINE}>{new Date(e.at).toLocaleString()}</span>,
+      isRowHeader: true,
+    },
     { id: "tenant", header: "Tenant", sortingField: "tenant", cell: (e) => e.tenant_name },
-    { id: "actor", header: "Actor", sortingField: "actor", cell: (e) => e.actor_email ?? "System" },
+    {
+      id: "actor",
+      header: "Actor",
+      sortingField: "actor",
+      cell: (e) => <span style={ONE_LINE}>{e.actor_email ?? "System"}</span>,
+    },
     { id: "role", header: "Role", cell: (e) => e.actor_role ?? "-" },
     {
       id: "action",
@@ -246,16 +279,23 @@ export function Audit() {
           }}
           href="#"
         >
-          {e.action}
+          {breakableAction(e.action)}
         </Link>
       ),
     },
-    { id: "target", header: "Target", cell: (e) => e.target_label ?? e.target_id ?? "-" },
+    {
+      id: "target",
+      header: "Target",
+      cell: (e) => <span style={WRAP_ANYWHERE}>{e.target_label ?? e.target_id ?? "-"}</span>,
+      minWidth: TARGET_MIN_WIDTH,
+    },
     {
       id: "outcome",
       header: "Outcome",
       cell: (e) => (
-        <StatusIndicator type={e.outcome === "success" ? "success" : "error"}>{e.outcome}</StatusIndicator>
+        <span style={ONE_LINE}>
+          <StatusIndicator type={e.outcome === "success" ? "success" : "error"}>{e.outcome}</StatusIndicator>
+        </span>
       ),
     },
   ];
@@ -294,6 +334,7 @@ export function Audit() {
           loadingText="Loading audit history"
           items={data?.events ?? []}
           trackBy="id"
+          wrapLines
           columnDefinitions={columns}
           sortingColumn={{ sortingField: SORT_FIELDS[sortField] ?? "at" }}
           sortingDescending={sort.startsWith("-")}

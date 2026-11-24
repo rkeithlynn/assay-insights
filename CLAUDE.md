@@ -159,6 +159,26 @@ views, not to the audit record.
 - **A suspended tenant's users can still complete managed login** (D10). Cognito is not
   changed when a tenant is suspended; every API request is refused with `tenant_suspended`
   and the portal says so. Reactivating needs no Cognito change either.
+- **A user who has never finished a first sign-in cannot reset their password**
+  (observed by the owner, 2026-11-24). While Cognito has them in `FORCE_CHANGE_PASSWORD`,
+  "Forgot password" on the managed login page sends no email, and an admin's reset is refused
+  (`cognito-admin-api` answers `wrong_state`). The AWS pages read on 2026-11-24 do not
+  describe this case. The way back is a new invitation (`AdminCreateUser` with `RESEND`),
+  which "resend[s] the invitation message ... and reset[s] the temporary-password duration
+  with a new temporary password" (AdminCreateUser API reference). So the Users screen offers
+  an Invited user "Resend invitation", explained in the menu, never "Reset password".
+  - **Temporary passwords last 7 days in both pools** (`TemporaryPasswordValidityDays: 7`,
+    `TEMPORARY_PASSWORD_DAYS` in `infra/assay_infra/auth.py`; checked with
+    `describe-user-pool` on 2026-11-24). After that the user cannot sign in until an admin
+    resends the invitation. A temporary password is good for one sign-in. The platform pool
+    has no resend in the portal: its users are created by `scripts/seed.py` with the owner's
+    credentials, and re-running it finds them without resending. An expired platform
+    invitation is resent by hand (`aws cognito-idp admin-create-user --message-action
+    RESEND`, owner's credentials).
+  - **Gap (owner to decide):** `temporary_password_accepted` moves `invited` to `active`
+    (migration 0006, as a sign-in did before). A user who enters the temporary password and
+    abandons the new-password form is shown Active, is offered "Reset password", which fails
+    with `wrong_state`, and is not offered a resend.
 - **Failed sign-ins are not audited** (section 7a). Only successful sign-ins
   (post-authentication trigger), password resets (post-confirmation), sign-outs and password
   changes (reported by the portal) are recorded.
@@ -900,9 +920,17 @@ Notes:
     `portal/src/navigation.ts`: the longest title at 7.5 px a character plus 90 px, between
     150 and 280 px). Tenant portal 150 px, admin portal 188 px. New screens in steps 6 to 8
     widen it as needed; the rendered check catches a title that no longer fits.
-  - Seen, not changed: at 1280 px the Audit history table is wider than its container and
-    scrolls sideways (the last column, Outcome, starts off screen). Headless Chromium hides
-    scrollbars, so the screenshot does not show the scrollbar a browser does.
+  - **Every table fits its container** at 1280 and 1800 px (`checkTables`: no column starts
+    or ends off screen, nothing scrolls sideways). Headless Chromium hides scrollbars, so a
+    screenshot never shows the scrollbar a browser would; the check measures instead.
+  - **Audit history fits at 1280 px** (owner, 2026-11-24): lines wrap; Time, Actor and Outcome
+    stay on one line (checked); Target wraps anywhere, with a 120 px minimum; action names
+    may break after an underscore (`<wbr>`, so a copy is still the exact name). The limit is
+    the Actor address, kept on one line: about 245 px of text, roughly 33 characters, fits at
+    1280 px. A longer address still shows in full, and the table then scrolls sideways at
+    that width. The rendered check's longest actor is 33 characters (`e2e/fixtures.ts`).
+    Outcome cannot go below about 104 px (its header and "success"); pinning it narrower made
+    the word break into "succe / ss", which the one-line check now catches.
 - **TypeScript stays on 5.9**: `typescript-eslint` and `openapi-typescript` do not support
   TypeScript 7 yet.
 - **Dev-only npm advisory** (2026-11-23): a moderate ReDoS in `minimatch`, via ESLint and

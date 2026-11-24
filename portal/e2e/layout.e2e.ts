@@ -26,6 +26,8 @@ interface Screen {
   setup?: (page: Page) => Promise<void>;
   /** The screen has the shell (banner and navigation). */
   shell?: boolean;
+  /** The Audit history table: Time and Actor on one line. */
+  audit?: boolean;
 }
 
 const SCREENS: Screen[] = [
@@ -64,9 +66,9 @@ const SCREENS: Screen[] = [
       await page.getByRole("dialog").waitFor();
     },
   },
-  { id: "master-admin-audit", persona: "master-admin", path: "/audit", ready: "session_started" },
+  { id: "master-admin-audit", persona: "master-admin", path: "/audit", ready: "session_started", audit: true },
   { id: "master-user-tenants", persona: "master-user", path: "/tenants", ready: "Northwind Credit" },
-  { id: "master-user-audit", persona: "master-user", path: "/audit", ready: "session_started" },
+  { id: "master-user-audit", persona: "master-user", path: "/audit", ready: "session_started", audit: true },
 ];
 
 // Cloudscape draws the banner logo at most 32 px high (24 px below 688 px wide).
@@ -223,6 +225,60 @@ async function checkPopups(page: Page): Promise<number> {
   return opened;
 }
 
+/** Every table on the screen fits its container: no column starts off screen. */
+async function checkTables(page: Page): Promise<number> {
+  const tables = page.locator("table").filter({ visible: true });
+  const count = await tables.count();
+  for (let i = 0; i < count; i++) {
+    const facts = await tables.nth(i).evaluate((table) => {
+      // The container that scrolls the table sideways when it is too wide.
+      let box: HTMLElement | null = table.parentElement;
+      while (box && !["auto", "scroll"].includes(getComputedStyle(box).overflowX)) box = box.parentElement;
+      const frame = (box ?? document.documentElement).getBoundingClientRect();
+      const headers = [...table.querySelectorAll("thead th")].map((th) => ({
+        text: th.textContent.trim(),
+        right: th.getBoundingClientRect().right,
+      }));
+      return {
+        overflow: box ? box.scrollWidth - box.clientWidth : 0,
+        frameRight: frame.right,
+        offscreen: headers.filter((h) => h.right > frame.right + 1).map((h) => h.text),
+        headers: headers.map((h) => h.text),
+      };
+    });
+    expect.soft(facts.offscreen, `no column of [${facts.headers.join(", ")}] starts or ends off screen`).toEqual([]);
+    expect.soft(facts.overflow, `the table [${facts.headers.join(", ")}] does not scroll sideways`).toBeLessThanOrEqual(1);
+  }
+  return count;
+}
+
+/** Audit history: Time, Actor and Outcome stay on one line in every row. */
+async function checkAuditLines(page: Page): Promise<void> {
+  const wrapped = await page.locator("table").filter({ visible: true }).first().evaluate((table) => {
+    const names = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+    const columns = ["Time", "Actor", "Outcome"].map((name) => names.findIndex((n) => n.startsWith(name)));
+    const out: string[] = [];
+    for (const row of table.querySelectorAll("tbody tr")) {
+      for (const index of columns) {
+        const cell = row.children[index];
+        if (!cell) continue;
+        // The lines the text itself occupies (not the boxes around it).
+        const tops = new Set<number>();
+        const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          if (!node.textContent?.trim()) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          for (const r of range.getClientRects()) if (r.width > 0) tops.add(Math.round(r.top));
+        }
+        if (tops.size > 1) out.push(cell.textContent.trim());
+      }
+    }
+    return out;
+  });
+  expect.soft(wrapped, "Time, Actor and Outcome each fit on one line").toEqual([]);
+}
+
 for (const screen of SCREENS) {
   test(screen.id, async ({ page, context }, info) => {
     await signIn(context, screen.persona);
@@ -232,6 +288,8 @@ for (const screen of SCREENS) {
       await checkBanner(page);
       await checkNavigation(page);
     }
+    await checkTables(page);
+    if (screen.audit) await checkAuditLines(page);
     const opened = await checkPopups(page);
     // Outside a dialog every screen has at least the banner's user menu; a dialog may have none.
     if (!screen.setup || !(await page.getByRole("dialog").filter({ visible: true }).count())) {
@@ -279,4 +337,18 @@ test("mfa-setup and sign-in screens render", async ({ browser }, info) => {
   await outPage.getByRole("button", { name: "Sign in" }).waitFor();
   await outPage.screenshot({ path: shot(info, `${info.project.name}-start.png`), animations: "disabled" });
   await out.close();
+});
+
+test("tenant-admin-users: an invited user's menu offers a resent invitation, with its reason", async ({ page, context }, info) => {
+  await signIn(context, "tenant-admin");
+  await waitForScreen(page, SCREENS[1] as Screen);
+  // User Number 3 is invited (fixtures.ts).
+  await page.getByRole("button", { name: "Actions for User Number 3" }).click();
+  const resend = page.getByRole("menuitem", { name: /Resend invitation/ });
+  await expect(resend).toBeVisible();
+  await expect(resend).toContainText("Forgot password can't reach them until they first sign in.");
+  await expect(page.getByRole("menuitem", { name: /Reset password/ })).toHaveCount(0);
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: shot(info, `${info.project.name}-users-invited-menu.png`), animations: "disabled" });
+  expect(await unreachable(resend)).toBeNull();
 });

@@ -72,18 +72,27 @@ const CATALOG = [
   { id: OPUS, name: "Claude Opus", profile_id: "us.example.opus", jobs: ["query"], price_in: "15.000000", price_out: "75.000000" },
 ];
 
+// Long, realistic addresses and the longest action names: the table must still fit at 1280 px.
+// Actor addresses up to about 33 characters (the longest here) fit at 1280 px on one line; a longer
+// target wraps.
+const ACTORS = ["compliance@northwindcredit.com", "alexandra.richardson@infinity.com", "ada@example.test"];
+const LONG_EMAILS = [
+  "alexandra.richardson-whitfield@infinityloans.example",
+  "operations.compliance.team@northwindcredit.example",
+  "ada@example.test",
+];
 const AUDIT_EVENTS = Array.from({ length: 12 }, (_, i) => ({
   id: `00000000-0000-4000-8000-0000000002${String(i).padStart(2, "0")}`,
   at: new Date(Date.UTC(2026, 10, 24, 15, 59 - i)).toISOString(),
   tenant_id: TENANT_ID,
-  tenant_name: "Infinity Loans",
-  actor_email: `user${(i % 9) + 1}@example.test`,
-  actor_role: "tenant-admin",
-  category: "auth",
-  action: ["sign_in", "session_started", "sign_out", "mfa_enabled"][i % 4],
+  tenant_name: i % 3 === 1 ? "Assay Insights, LLC" : "Infinity Loans",
+  actor_email: i % 5 === 4 ? null : (ACTORS[i % 3] ?? null),
+  actor_role: i % 5 === 4 ? null : "tenant-admin",
+  category: i % 2 ? "auth" : "user",
+  action: ["temporary_password_accepted", "session_started", "models_available_changed", "mfa_enabled"][i % 4],
   target_type: "user",
   target_id: USERS[i % 9]?.id ?? null,
-  target_label: `user${(i % 9) + 1}@example.test`,
+  target_label: LONG_EMAILS[(i + 1) % 3] ?? null,
   outcome: "success",
   detail: { pool: "tenant" },
   ip_address: "198.51.100.7",

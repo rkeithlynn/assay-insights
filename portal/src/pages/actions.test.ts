@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { TenantOut, UserOut } from "../api/client";
 import { tenantActions } from "./Tenants";
-import { actionsFor } from "./Users";
+import { actionsFor, RESEND_EXPLANATION } from "./Users";
 
 function user(overrides: Partial<UserOut>): UserOut {
   return {
@@ -48,6 +48,16 @@ describe("user actions", () => {
     expect(ids(actionsFor(user({ status: "invited" }), "me"))).not.toContain("reset-password");
     expect(ids(actionsFor(user({ status: "active" }), "me"))).toContain("reset-password");
     expect(ids(actionsFor(user({ status: "disabled" }), "me"))).toContain("enable");
+  });
+});
+
+describe("invited users", () => {
+  it("are offered a resent invitation with its reason, never a password reset", () => {
+    const items = actionsFor(user({ status: "invited" }), "me");
+    expect(ids(items)).not.toContain("reset-password");
+    const resend = items.find((i) => "id" in i && i.id === "resend");
+    expect(resend).toMatchObject({ text: "Resend invitation", secondaryText: RESEND_EXPLANATION });
+    expect(RESEND_EXPLANATION).toMatch(/Forgot password can't reach them until they first sign in/);
   });
 });
 
