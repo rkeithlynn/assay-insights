@@ -6,6 +6,11 @@
  * After a sign-in redirect only (not a reload, not a token refresh), it reports the session's
  * start, so the audit trail has the sign-in's IP address and browser, which Cognito's
  * trigger never sees. The API keeps one row per sign-in, however often this is called.
+ *
+ * Signing out in one tab signs out the portal's other open tabs in this browser
+ * (`signout.ts`): each revokes its own refresh token, clears its tokens and shows the
+ * sign-in screen. Only the tab where the user signed out records the sign-out and goes to
+ * Cognito's logout endpoint.
  */
 
 import Alert from "@cloudscape-design/components/alert";
@@ -20,10 +25,11 @@ import { useCallback, useEffect, useState } from "react";
 
 import { type Api, ApiError, apiClient, call, type Me } from "./api/client";
 import { App } from "./App";
-import { accessToken, CALLBACK_PATH, logoutUrl, userManager } from "./auth";
+import { accessToken, CALLBACK_PATH, logoutUrl, redirectTo, userManager } from "./auth";
 import { type ActivePool, loadConfig, poolFor } from "./config";
 import { messageFor, SIGN_IN_AGAIN } from "./errors";
 import { type Session, SessionContext } from "./session";
+import { type SignOutChannel, signOutChannel } from "./signout";
 import logoUrl from "@assets/assay-insights-logo.svg";
 
 type Phase =
@@ -46,6 +52,8 @@ function Page({ children }: { children: React.ReactNode }) {
   );
 }
 
+export const SIGNED_OUT_ELSEWHERE = "You signed out in another tab.";
+
 /** Report a session's start. Never blocks or fails the sign-in. */
 export async function reportSessionStart(client: Api): Promise<void> {
   await client.POST("/api/auth/session-started").catch(() => undefined);
@@ -60,6 +68,7 @@ const api = apiClient(token);
 interface Started {
   pool: ActivePool;
   manager: UserManager;
+  channel: SignOutChannel;
 }
 
 export function Root() {
@@ -90,6 +99,7 @@ export function Root() {
   useEffect(() => {
     const run = { cancelled: false };
     const cancelled = () => run.cancelled;
+    let channel: SignOutChannel | null = null;
     void (async () => {
       try {
         const config = await loadConfig();
@@ -99,7 +109,17 @@ export function Root() {
           currentUser = user;
         });
         if (cancelled()) return;
-        setStarted({ pool: active, manager });
+        // Another tab signed out: end this tab's session too, without a second audit row
+        // and without leaving the portal.
+        channel = signOutChannel(() => {
+          void (async () => {
+            await manager.revokeTokens(["refresh_token"]).catch(() => undefined);
+            await manager.removeUser().catch(() => undefined);
+            currentUser = null;
+            if (!cancelled()) setPhase({ kind: "signed-out", note: SIGNED_OUT_ELSEWHERE });
+          })();
+        });
+        setStarted({ pool: active, manager, channel });
         let user: User | null;
         const justSignedIn = window.location.pathname === CALLBACK_PATH;
         if (justSignedIn) {
@@ -123,6 +143,7 @@ export function Root() {
     })();
     return () => {
       run.cancelled = true;
+      channel?.close();
     };
   }, [loadMe]);
 
@@ -132,13 +153,14 @@ export function Root() {
 
   const signOut = useCallback(async () => {
     if (!started) return;
-    const { manager, pool } = started;
+    const { manager, pool, channel } = started;
     // Recorded first, while the token is still valid. A failure must not keep anyone in.
     await api.POST("/api/auth/signed-out").catch(() => undefined);
+    channel.announce();
     await manager.revokeTokens(["refresh_token"]).catch(() => undefined);
     await manager.removeUser();
     currentUser = null;
-    window.location.assign(logoutUrl(pool));
+    redirectTo(logoutUrl(pool));
   }, [started]);
 
   const reloadMe = useCallback(async () => {

@@ -169,6 +169,12 @@ views, not to the audit record.
   carries neither (without threat protection). Rows the API writes take the viewer's IP
   from `CloudFront-Viewer-Address`. The portal's `session_started` row, written right after
   the sign-in, carries both; the trigger's `sign_in` row stays the record of the sign-in.
+- **A portal tab that is closed or offline when the user signs out in another tab keeps its
+  refresh token** until it expires or is revoked by an admin action (a disable or an MFA
+  reset, which also ends its sessions through `sessions_revoked_at`). Sign-out signals only
+  the tabs open in that browser at the time (BroadcastChannel). An offline tab misses the
+  message and can refresh once it is back; a closed tab that the browser restores (reopen
+  closed tab, session restore) brings its sessionStorage back, refresh token included.
 - **Platform-pool MFA enrolment is not recorded** (owner decision, 2026-11-24). Platform
   users set up TOTP in managed login, and no Cognito trigger runs for it (post-authentication
   did not run after MFA setup either). Only CloudTrail sees it (`VerifySoftwareToken`, with
@@ -922,9 +928,20 @@ Audit-trail follow-ups (owner decisions and conditions, 2026-11-24):
   - Sign-out works on both pools. Every one of the 17 sign-ins after a portal sign-out on
     the same pool (14 tenant, 3 platform) asked for the password. The portal's sign-out
     revokes its own refresh token and sends the browser to Cognito's `/logout`, which ends
-    the managed login session. It does not end the session of another tab still open: at
-    04:45:07 such a tab refreshed its token (`Token_POST` with a refresh token) after a
-    sign-out in another tab.
+    the managed login session. Before the cross-tab sign-out below it did not end another
+    open tab's session: at 04:45:07 such a tab refreshed its token (`Token_POST` with a
+    refresh token) after a sign-out in another tab.
+- **Sign-out reaches the portal's other tabs in the same browser** (owner decision,
+  2026-11-24; not `GlobalSignOut`, which would end every device's sessions). The tab that
+  signs out records `sign_out`, posts `{type: "signed-out"}` on the BroadcastChannel
+  `assay-portal-sign-out` (`portal/src/signout.ts`), revokes its refresh token and goes to
+  Cognito's `/logout`. Every other open tab of the same portal (same origin, so the tenant
+  and admin portals never hear each other) revokes its own refresh token, clears its tokens
+  and shows the sign-in screen ("You signed out in another tab."), with no second audit row.
+  Other browsers and devices are unaffected. No storage-event fallback: that event crosses
+  tabs only for localStorage, which the portal never uses, and BroadcastChannel is in every
+  browser the build targets; without it a tab signs out alone. Tested in `Root.test.tsx`
+  and `signout.test.ts`.
 - **`temporary_password_accepted`** (item 2). The trigger sends it instead of `sign_in` when
   the event's `cognito:user_status` is `FORCE_CHANGE_PASSWORD`, and logs the status it saw
   (`auth event queued`, `user_status`), never queues it. Any other status, or none, stays

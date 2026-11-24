@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -19,18 +20,34 @@ vi.mock("./api/client", async (actual) => ({
   ...(await actual<typeof import("./api/client")>()),
   apiClient: () => api,
 }));
+const redirectTo = vi.hoisted(() => vi.fn());
 vi.mock("./auth", async (actual) => ({
   ...(await actual<typeof import("./auth")>()),
   userManager: () => manager,
+  redirectTo,
 }));
 vi.mock("./config", async (actual) => ({
   ...(await actual<typeof import("./config")>()),
   loadConfig: () => Promise.resolve({}),
   poolFor: () => ({ kind: "tenant", region: "us-east-1", host: "portal.example.test" }),
 }));
-vi.mock("./App", () => ({ App: () => <p>signed in</p> }));
+vi.mock("./App", async () => {
+  const { useSession } = await import("./session");
+  return {
+    App: () => {
+      const { signOut } = useSession();
+      return (
+        <>
+          <p>signed in</p>
+          <button onClick={() => void signOut()}>Sign out</button>
+        </>
+      );
+    },
+  };
+});
 
-import { Root } from "./Root";
+import { Root, SIGNED_OUT_ELSEWHERE } from "./Root";
+import { SIGN_OUT_CHANNEL } from "./signout";
 
 const ME = {
   mfa_required: false,
@@ -44,17 +61,30 @@ const ok = (data: unknown) => Promise.resolve({ data, response: { ok: true, stat
 
 const sessionStarts = () => api.POST.mock.calls.filter(([path]) => path === "/api/auth/session-started");
 
+// Another tab of the same portal, as the browser would see it.
+let otherTab: BroadcastChannel;
+let heardByOtherTab: unknown[];
+
 beforeEach(() => {
   api.GET.mockImplementation(() => ok(ME));
   api.POST.mockImplementation(() => ok(undefined));
   manager.signinRedirectCallback.mockResolvedValue(USER);
   manager.getUser.mockResolvedValue(USER);
+  manager.revokeTokens.mockResolvedValue(undefined);
+  manager.removeUser.mockResolvedValue(undefined);
+  heardByOtherTab = [];
+  otherTab = new BroadcastChannel(SIGN_OUT_CHANNEL);
+  otherTab.onmessage = (event: MessageEvent<unknown>) => heardByOtherTab.push(event.data);
 });
 
 afterEach(() => {
+  otherTab.close();
   vi.clearAllMocks();
   window.history.replaceState(null, "", "/");
 });
+
+const posts = (path: string) => api.POST.mock.calls.filter(([p]) => p === path);
+const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 
 describe("session start", () => {
   it("is reported once after a sign-in redirect", async () => {
@@ -90,5 +120,53 @@ describe("session start", () => {
     render(<Root />);
     expect(await screen.findByText("signed in")).toBeInTheDocument();
     expect(sessionStarts()).toHaveLength(1);
+  });
+});
+
+describe("sign-out across tabs", () => {
+  it("tells the portal's other tabs, and the tab that signed out ignores its own message", async () => {
+    render(<Root />);
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    await vi.waitFor(() => expect(redirectTo).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(heardByOtherTab).toEqual([{ type: "signed-out" }]));
+    // This tab: one sign-out row, its own refresh token revoked once, then Cognito's logout.
+    expect(posts("/api/auth/signed-out")).toHaveLength(1);
+    expect(manager.revokeTokens).toHaveBeenCalledExactlyOnceWith(["refresh_token"]);
+    expect(String(redirectTo.mock.calls[0]?.[0])).toContain("/logout?");
+    await settle();
+    expect(manager.revokeTokens).toHaveBeenCalledOnce();
+  });
+
+  it("ends this tab's session when another tab signs out", async () => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    otherTab.postMessage({ type: "signed-out" });
+    expect(await screen.findByText(SIGNED_OUT_ELSEWHERE)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    // Its own refresh token revoked and its tokens cleared...
+    expect(manager.revokeTokens).toHaveBeenCalledExactlyOnceWith(["refresh_token"]);
+    expect(manager.removeUser).toHaveBeenCalledOnce();
+    // ...but no second sign-out row, and no trip to Cognito's logout from this tab.
+    expect(posts("/api/auth/signed-out")).toHaveLength(0);
+    expect(redirectTo).not.toHaveBeenCalled();
+  });
+
+  it("still ends this tab's session if the revocation fails", async () => {
+    manager.revokeTokens.mockRejectedValue(new Error("offline"));
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    otherTab.postMessage({ type: "signed-out" });
+    expect(await screen.findByText(SIGNED_OUT_ELSEWHERE)).toBeInTheDocument();
+    expect(manager.removeUser).toHaveBeenCalledOnce();
+  });
+
+  it.each([{ type: "something-else" }, "signed-out", null, 42])("ignores any other message (%j)", async (data) => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    otherTab.postMessage(data);
+    await settle();
+    expect(screen.getByText("signed in")).toBeInTheDocument();
+    expect(manager.revokeTokens).not.toHaveBeenCalled();
+    expect(manager.removeUser).not.toHaveBeenCalled();
   });
 });

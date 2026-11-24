@@ -46,6 +46,11 @@ export function logoutUrl(pool: ActivePool): string {
   return `${pool.loginUrl}/logout?${params.toString()}`;
 }
 
+/** Leave the portal for another page (Cognito's logout endpoint). */
+export function redirectTo(url: string): void {
+  window.location.assign(url);
+}
+
 export function accessToken(user: User | null): string | null {
   if (!user || user.expired) return null;
   return user.access_token;
