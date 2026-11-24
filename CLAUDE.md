@@ -33,7 +33,7 @@ change. Where this file and the spec differ, the spec wins.
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
-| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half built** on `build-step-5`; `pulumi preview` reviewed, waiting for the owner's `pulumi up`. Second half (Audit history, Models) after sign-in, Users, Tenants and seed are verified |
+| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). Second half (Audit history, Models) planned, not started |
 | 6–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -109,7 +109,52 @@ Step 4 was verified on 2026-11-23:
   names in keys, and the reserved fixture document ID).
 - CI on the `build-step-4` pull request (#3) must pass before `main` is fast-forwarded.
 
+Step 5, first half, was verified on 2026-11-23:
+
+- `pulumi up` finished after two fixes on `build-step-5`: a security group rule description
+  with an apostrophe (EC2 refuses it at create time; `test_infra_program.py` now checks every
+  description in the program) and the portal origin's empty `s3_origin_config` (AWS does not
+  store it, so every preview showed a change). `pulumi preview` then showed 278 unchanged.
+- `scripts/seed.py` ran clean. `run_isolation.py` passed: 65 tests in the isolation Lambda,
+  28 checks in the provisioning role's probe, 7 Cognito client checks (owner).
+- In a browser (owner): the master admin's first sign-in with a new password and MFA
+  enrolment; the Tenants screen with five tenants; an Infinity Loans admin's first sign-in,
+  the portal's MFA setup and a second sign-in; the Users screen; the master admin's reset of
+  that admin's MFA, after which their session stopped and the next sign-in asked for MFA
+  setup; sign-out of both.
+- Read-only checks (2026-11-24 UTC): the auth-event queue and dead-letter queue are empty and
+  nothing was ever sent to the dead-letter queue; the four auth-event alarms are `OK`. The
+  trigger logged 7 `sign_in` events queued and the consumer 7 recorded, with no ERROR line and
+  no "not queued" line. The load balancer log shows `POST /api/auth/signed-out` 204 four
+  times (and once 403), `POST /api/admin/users/{id}/reset-mfa` 204 once, and `GET /api/users`
+  403 twice (the revoked session). Access logs arrive: 7 CloudFront and 7 load balancer log
+  objects; 95 WAF log events, all ALLOW.
+- **Not read directly:** the `audit_log` rows and the two users' `last_sign_in_at` and
+  `status`. No existing read path can (see "Reading audit_log" below). The evidence is
+  indirect: `auth_events.record()` returns `recorded` only after it has written the audit row
+  and updated the user, and the API writes each change and its audit row in the transaction
+  it commits before answering 204.
+
+### Reading audit_log
+
+Aurora is private and every tenant table has forced row-level security. As of step 5 only
+`platform_reader` may read `audit_log` across tenants, and only the API task can sign in as
+it. The migration Lambda signs in as the master user or `migrator` (no policy, so no rows),
+the seed Lambda as `platform_writer` (no SELECT on `audit_log`), the isolation Lambda as
+`app_tenant` (INSERT only). `GET /admin/audit` (second half of step 5) is the first read path.
+
+**Tenant users' email addresses in Audit history (owner decision, 2026-11-23).** Both master
+roles see every audit row's actor and target, including tenant users' email addresses (a
+tenant user's sign-in row has their email as the actor). This is deliberate: section 7
+asks for an audit history of sign-ins and user changes across tenants. D8 ("no view in
+schema `platform` shows a business tenant's non-admin users") applies to the admin list
+views, not to the audit record.
+
 ## Known limits (owner decisions, build step 5)
+
+- **A sign-out from a session already ended by an MFA reset or a disable is not recorded**:
+  the account check refuses the token (`session_revoked`), so `POST /auth/signed-out` answers
+  403. The reset or disable that ended the session is recorded.
 
 - **A suspended tenant's users can still complete managed login** (D10). Cognito is not
   changed when a tenant is suspended; every API request is refused with `tenant_suspended`

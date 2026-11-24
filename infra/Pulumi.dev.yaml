@@ -42,18 +42,18 @@ config:
     - name: Claude Haiku 4.5
       profileId: us.anthropic.claude-haiku-4-5-20251001-v1:0
       jobs: [ingest, query]
-      priceIn: ""
-      priceOut: ""
+      priceIn: "1.10"
+      priceOut: "5.50"
     - name: Claude Sonnet 4.6
       profileId: us.anthropic.claude-sonnet-4-6
       jobs: [ingest, query]
-      priceIn: ""
-      priceOut: ""
+      priceIn: "3.30"
+      priceOut: "16.50"
     - name: Claude Opus 4.6
       profileId: us.anthropic.claude-opus-4-6-v1
       jobs: [ingest, query]
-      priceIn: ""
-      priceOut: ""
+      priceIn: "5.50"
+      priceOut: "27.50"
   # The models every new tenant starts with (section 7b). Must be aiModels profile IDs.
   assay-platform:defaultIngestModel: us.anthropic.claude-haiku-4-5-20251001-v1:0
   assay-platform:defaultQueryModel: us.anthropic.claude-sonnet-4-6
