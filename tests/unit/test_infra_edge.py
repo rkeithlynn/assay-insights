@@ -96,6 +96,9 @@ def test_one_distribution_serves_both_hosts_with_the_portal_and_the_api() -> Any
         assert cdn["webAclId"].endswith("e1-edge-waf")
         portal, api = cdn["origins"]
         assert portal["originAccessControlId"] == "e1-edge-oac-id"
+        # Origin access control only. An s3OriginConfig with an empty origin access identity
+        # is not stored by AWS, so stating it made every preview show a difference.
+        assert "s3OriginConfig" not in portal
         assert api["vpcOriginConfig"]["vpcOriginId"] == "e1-edge-api-origin-id"
         default = cdn["defaultCacheBehavior"]
         assert default["targetOriginId"] == "portal"

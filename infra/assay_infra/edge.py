@@ -550,10 +550,9 @@ class Edge(pulumi.ComponentResource):
                 aws.cloudfront.DistributionOriginArgs(
                     origin_id=portal_origin,
                     domain_name=self.portal_bucket.bucket_regional_domain_name,
+                    # Origin access control only: no s3_origin_config. With an empty origin
+                    # access identity it is not stored, so every preview showed a difference.
                     origin_access_control_id=self.origin_access_control.id,
-                    s3_origin_config=aws.cloudfront.DistributionOriginS3OriginConfigArgs(
-                        origin_access_identity=""
-                    ),
                 ),
                 aws.cloudfront.DistributionOriginArgs(
                     origin_id=api_origin,
