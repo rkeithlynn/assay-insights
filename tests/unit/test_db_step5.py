@@ -384,3 +384,61 @@ def test_a_tenant_gets_the_default_models_once(db: TestDb, seeded_catalog: None)
 def test_a_default_must_be_a_us_inference_profile() -> None:
     with pytest.raises(catalog.CatalogError):
         catalog.DefaultModels(ingest="anthropic.direct", query="us.example.two-v1")
+
+
+# --- Migration 0005: model views and the audit category -----------------------------------
+
+
+def test_platform_reader_reads_models_only_through_the_views(db: TestDb) -> None:
+    with psycopg.connect(db.url) as conn:
+        owners: dict[str, str] = dict(
+            conn.execute(
+                "SELECT viewname, viewowner FROM pg_views WHERE schemaname = 'platform' "
+                "AND viewname IN ('ai_models_v', 'tenant_models_v')"
+            ).fetchall()
+        )
+        columns = {
+            view: [
+                r[0]
+                for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = "
+                    "'platform' AND table_name = %s ORDER BY ordinal_position",
+                    (view,),
+                ).fetchall()
+            ]
+            for view in ("ai_models_v", "tenant_models_v")
+        }
+    assert owners == {
+        "ai_models_v": "platform_view_owner",
+        "tenant_models_v": "platform_view_owner",
+    }
+    assert columns["tenant_models_v"] == ["tenant_id", "model_id", "job"]
+    assert columns["ai_models_v"] == [
+        "model_id",
+        "name",
+        "profile_id",
+        "jobs",
+        "price_in",
+        "price_out",
+        "status",
+    ]
+    with as_role(db, PLATFORM_READER) as conn:
+        conn.execute("SELECT * FROM platform.ai_models_v").fetchall()
+        conn.execute("SELECT * FROM platform.tenant_models_v").fetchall()
+    for table in ("ai_models", "tenant_models"):
+        with as_role(db, PLATFORM_READER) as conn, pytest.raises(errors.InsufficientPrivilege):
+            conn.execute(sql.SQL("SELECT 1 FROM assay.{}").format(sql.Identifier(table)))
+
+
+@pytest.mark.parametrize(("category", "accepted"), [("audit", True), ("export", False)])
+def test_audit_categories(db: TestDb, category: str, accepted: bool) -> None:
+    insert = (
+        "INSERT INTO assay.audit_log (tenant_id, category, action, outcome) "
+        "VALUES (%s, %s, 'exported', 'success')"
+    )
+    with as_role(db, PLATFORM_WRITER) as conn:
+        if accepted:
+            conn.execute(insert, (db.seed.platform, category))
+        else:
+            with pytest.raises(errors.CheckViolation):
+                conn.execute(insert, (db.seed.platform, category))

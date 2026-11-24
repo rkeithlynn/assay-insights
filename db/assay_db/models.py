@@ -73,7 +73,7 @@ PART_METHODS = ("rule", "model")
 LABEL_SOURCES = ("companion",)
 TEXT_SOURCES = ("native", "ocr")
 SIGNER_SOURCES = ("audit_trail", "companion")
-AUDIT_CATEGORIES = ("auth", "user", "tenant")
+AUDIT_CATEGORIES = ("auth", "user", "tenant", "audit")
 ATTACHMENT_KINDS = (
     "paystub",
     "bank_statement",

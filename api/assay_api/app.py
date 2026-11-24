@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from assay_api.auth import TokenVerifier
 from assay_api.database import Databases
-from assay_api.routes import admin, auth_events, health, me, users
+from assay_api.routes import admin, audit, auth_events, health, me, models, users
 from assay_api.services import (
     CognitoAdmin,
     LambdaCognitoAdmin,
@@ -46,7 +46,15 @@ def create_app(
     app.state.databases = databases
     app.state.cognito = cognito
     app.state.provisioning = provisioning
-    for router in (health.router, me.router, auth_events.router, users.router, admin.router):
+    for router in (
+        health.router,
+        me.router,
+        auth_events.router,
+        users.router,
+        admin.router,
+        audit.router,
+        models.router,
+    ):
         app.include_router(router, prefix=API_PREFIX)
     return app
 

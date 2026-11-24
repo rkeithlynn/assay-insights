@@ -56,6 +56,13 @@ class World:
     provisioning: FakeProvisioning
 
 
+HAIKU, SONNET, OPUS = (uuid.uuid4() for _ in range(3))
+CATALOG = (
+    (HAIKU, "Model Haiku", "us.example.haiku-v1:0"),
+    (SONNET, "Model Sonnet", "us.example.sonnet-v1"),
+    (OPUS, "Model Opus", "us.example.opus-v1"),
+)
+
 # sub -> (tenant attribute, role, status)
 USERS = {
     "m-admin": ("platform", "master-admin", "active"),
@@ -118,6 +125,26 @@ def world(db: TestDb) -> Iterator[World]:
                         role,
                         status,
                     ),
+                )
+            # The catalog, and tenants A and B with the defaults (Haiku ingest, Sonnet query).
+            for model_id, model_name, profile in CATALOG:
+                conn.execute(
+                    "INSERT INTO assay.ai_models (id, name, profile_id, jobs, price_in, "
+                    "price_out, status) VALUES (%s, %s, %s, ARRAY['ingest', 'query'], 1, 5, "
+                    "'active')",
+                    (model_id, model_name, profile),
+                )
+            for key in ("a", "b"):
+                for model_id, job in ((HAIKU, "ingest"), (SONNET, "query")):
+                    conn.execute(
+                        "INSERT INTO assay.tenant_models (tenant_id, model_id, job) "
+                        "VALUES (%s, %s, %s)",
+                        (tenants[key], model_id, job),
+                    )
+                conn.execute(
+                    "UPDATE assay.tenants SET extraction_model = %s, answer_model = %s "
+                    "WHERE id = %s",
+                    (HAIKU, SONNET, tenants[key]),
                 )
         cognito, provisioning = FakeCognito(), FakeProvisioning()
         databases = Databases(

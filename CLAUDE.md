@@ -33,7 +33,7 @@ change. Where this file and the spec differ, the spec wins.
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
-| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). Second half (Audit history, Models) planned, not started |
+| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). **Second half (Audit history, Models) built** on `build-step-5`; `pulumi preview` reviewed, waiting for the owner's `pulumi up` and `migrate.py` |
 | 6–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -858,3 +858,34 @@ Notes:
   HTTPS (the certificate checked against the forwarded Host header), the Authorization
   header reaching the API, the triggers on both pools, the MFA reset, and whether CloudTrail
   shows `ChangePassword`.
+
+Second half (Audit history, Models), owner decisions and conditions (2026-11-23):
+
+- **`GET /admin/audit`** (both master roles) is strictly read-only: it reads in the account
+  check's read-only `platform_reader` transaction. At most 50 rows per page, enforced by the
+  route (`page_size` above 50 is refused with 422). Every filter is a bound parameter (the
+  actor filter is a case-insensitive contains-match with `%` and `_` escaped), and the sort
+  comes from a fixed allow-list (`assay_api.audit_read.SORTS`). Last 7 days unless a range is
+  given; at most 400 days in one query.
+- **CSV export** (`format=csv`): at most 10,000 rows; cells a spreadsheet would read as a
+  formula are prefixed with `'`. Each export writes its own row, category `audit`, action
+  `exported` (migration 0005 adds the category), with the actor, the filters and the row
+  count, as `platform_writer` in a transaction of its own.
+- **Before and after values are redacted** (`assay_api.audit_read.redact`): any key that
+  names a password, token, secret, code, credential, authorization or session, in any case
+  or separator style and at any depth, is shown as `[redacted]`. Nothing secret is written to
+  `audit_log`; this makes sure nothing secret is shown either. `test_api_audit_models.py`
+  plants secrets and checks neither the row panel nor the CSV carries them, and checks every
+  row the tests wrote against the same rule.
+- **Audit rows are stamped with `clock_timestamp()`**, not `now()`: two rows of one
+  transaction (a model removed and the selection moved) would otherwise share a time and
+  show in no fixed order.
+- **Models.** `platform.ai_models_v` and `platform.tenant_models_v` (migration 0005) give
+  `platform_reader` the catalog and each tenant's models; it still has no table but
+  `tenants` and `audit_log`. A master admin's change runs as `platform_writer`, keeps at
+  least one model per job, and moves a removed selection to the first remaining model in the
+  same transaction (`models_available_changed`, then `model_selected`). A tenant admin's
+  selection runs as `app_tenant`, so only their tenant's list exists for them
+  (`model_not_available` otherwise).
+- **The role matrix** (`test_api_audit_models.py::test_role_matrix`) covers every route of
+  build step 5 for every role, and checks that a refused call writes nothing.

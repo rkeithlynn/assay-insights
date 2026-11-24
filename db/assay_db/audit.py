@@ -1,9 +1,10 @@
 """Writing `audit_log` rows (BUILD_SPEC.md section 7a), inside the caller's transaction.
 
-A change and its audit row commit together. `detail` holds the values before and after,
-never a password, token or code. The roles that call this have INSERT on `audit_log` and
-nothing else on it: `app_tenant` for its own tenant (row-level security), `platform_writer`
-for any tenant.
+A change and its audit row commit together. Each row is stamped with `clock_timestamp()`,
+not `now()` (the transaction's start), so rows written by one request keep their order.
+`detail` holds the values before and after, never a password, token or code. The roles
+that call this have INSERT on `audit_log` and nothing else on it: `app_tenant` for its own
+tenant (row-level security), `platform_writer` for any tenant.
 """
 
 from __future__ import annotations
@@ -56,11 +57,11 @@ def write(
         body["started_by"] = actor.principal
     conn.execute(
         text(
-            "INSERT INTO assay.audit_log (tenant_id, actor_user_id, actor_email, actor_role, "
+            "INSERT INTO assay.audit_log (at, tenant_id, actor_user_id, actor_email, actor_role, "
             "category, action, target_type, target_id, target_label, detail, outcome, "
-            "ip_address, user_agent) VALUES (:tenant_id, :actor_user_id, :actor_email, "
-            ":actor_role, :category, :action, :target_type, :target_id, :target_label, "
-            "CAST(:detail AS jsonb), :outcome, CAST(:ip AS inet), :user_agent)"
+            "ip_address, user_agent) VALUES (clock_timestamp(), :tenant_id, :actor_user_id, "
+            ":actor_email, :actor_role, :category, :action, :target_type, :target_id, "
+            ":target_label, CAST(:detail AS jsonb), :outcome, CAST(:ip AS inet), :user_agent)"
         ),
         {
             "tenant_id": tenant_id,

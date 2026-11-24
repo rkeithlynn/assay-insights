@@ -14,6 +14,11 @@ export type Me = Schemas["Me"];
 export type UserOut = Schemas["UserOut"];
 export type TenantOut = Schemas["TenantOut"];
 export type AdminOut = Schemas["AdminOut"];
+export type AuditEvent = Schemas["AuditEvent"];
+export type AuditPage = Schemas["AuditPage"];
+export type TenantModels = Schemas["TenantModels"];
+export type SettingsModels = Schemas["SettingsModels"];
+export type CatalogModel = Schemas["CatalogModel"];
 
 export type Api = ReturnType<typeof createClient<paths>>;
 

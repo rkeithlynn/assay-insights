@@ -179,10 +179,10 @@ def ensure_default_models(
     )
     conn.execute(
         text(
-            "INSERT INTO assay.audit_log (tenant_id, actor_role, category, action, target_type, "
-            "target_id, target_label, detail, outcome) VALUES (:tenant, 'system', 'tenant', "
-            "'models_available_changed', 'tenant', :target, :label, CAST(:detail AS jsonb), "
-            "'success')"
+            "INSERT INTO assay.audit_log (at, tenant_id, actor_role, category, action, "
+            "target_type, target_id, target_label, detail, outcome) VALUES (clock_timestamp(), "
+            ":tenant, 'system', 'tenant', 'models_available_changed', 'tenant', :target, "
+            ":label, CAST(:detail AS jsonb), 'success')"
         ),
         {
             "tenant": tenant_id,

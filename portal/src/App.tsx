@@ -3,8 +3,10 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 
 import { canSee, landingFor } from "./navigation";
+import { Audit } from "./pages/Audit";
 import { Home } from "./pages/Home";
 import { MfaSetup } from "./pages/MfaSetup";
+import { Settings } from "./pages/Settings";
 import { Tenants } from "./pages/Tenants";
 import { Users } from "./pages/Users";
 import { useSession } from "./session";
@@ -24,6 +26,8 @@ export function App() {
           {canSee(role, "/") && <Route path="/" element={<Home />} />}
           {canSee(role, "/tenants") && <Route path="/tenants" element={<Tenants />} />}
           {canSee(role, "/users") && <Route path="/users" element={<Users />} />}
+          {canSee(role, "/settings") && <Route path="/settings" element={<Settings />} />}
+          {canSee(role, "/audit") && <Route path="/audit" element={<Audit />} />}
           <Route path="*" element={<Navigate to={landing} replace />} />
         </Routes>
       </Shell>

@@ -25,6 +25,7 @@ import { Confirm, type ConfirmRequest } from "../components/Confirm";
 import { messageFor } from "../errors";
 import { useSession } from "../session";
 import { useLoad } from "../useLoad";
+import { ModelsPanel } from "./ModelsPanel";
 
 const POLL_MS = 5000;
 
@@ -366,6 +367,9 @@ export function Tenants() {
           />
         )}
         {selected && <TenantDetail key={selected.id} tenant={selected} canReset={isMasterAdmin} />}
+        {selected?.kind === "business" && (
+          <ModelsPanel key={`models-${selected.id}`} tenant={selected} canEdit={isMasterAdmin} />
+        )}
       </SpaceBetween>
       <AddTenantDialog
         visible={adding}

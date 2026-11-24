@@ -1,6 +1,8 @@
 import "@cloudscape-design/global-styles/index.css";
 
 import markUrl from "@assets/assay-insights-mark.svg";
+import { I18nProvider } from "@cloudscape-design/components/i18n";
+import messages from "@cloudscape-design/components/i18n/messages/all.en";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -19,6 +21,8 @@ const container = document.getElementById("root");
 if (!container) throw new Error("no #root element");
 createRoot(container).render(
   <StrictMode>
-    <Root />
+    <I18nProvider locale="en" messages={[messages]}>
+      <Root />
+    </I18nProvider>
   </StrictMode>,
 );

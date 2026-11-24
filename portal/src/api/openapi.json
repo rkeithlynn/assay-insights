@@ -66,6 +66,307 @@
         "title": "AdminOut",
         "type": "object"
       },
+      "AuditEvent": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Email"
+          },
+          "actor_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Role"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "ip_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip Address"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Label"
+          },
+          "target_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Type"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "tenant_name": {
+            "title": "Tenant Name",
+            "type": "string"
+          },
+          "user_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Agent"
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "tenant_id",
+          "tenant_name",
+          "actor_email",
+          "actor_role",
+          "category",
+          "action",
+          "target_type",
+          "target_id",
+          "target_label",
+          "outcome",
+          "detail",
+          "ip_address",
+          "user_agent"
+        ],
+        "title": "AuditEvent",
+        "type": "object"
+      },
+      "AuditPage": {
+        "properties": {
+          "end": {
+            "format": "date-time",
+            "title": "End",
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "events",
+          "total",
+          "page",
+          "page_size",
+          "start",
+          "end"
+        ],
+        "title": "AuditPage",
+        "type": "object"
+      },
+      "AvailabilityIn": {
+        "additionalProperties": false,
+        "properties": {
+          "ingest": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Ingest",
+            "type": "array"
+          },
+          "query": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Query",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ingest",
+          "query"
+        ],
+        "title": "AvailabilityIn",
+        "type": "object"
+      },
+      "AvailableModel": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "jobs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "price_in": {
+            "title": "Price In",
+            "type": "string"
+          },
+          "price_out": {
+            "title": "Price Out",
+            "type": "string"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "profile_id",
+          "jobs",
+          "price_in",
+          "price_out"
+        ],
+        "title": "AvailableModel",
+        "type": "object"
+      },
+      "CatalogModel": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "jobs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "price_in": {
+            "title": "Price In",
+            "type": "string"
+          },
+          "price_out": {
+            "title": "Price Out",
+            "type": "string"
+          },
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "profile_id",
+          "jobs",
+          "price_in",
+          "price_out"
+        ],
+        "title": "CatalogModel",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -190,6 +491,63 @@
         "title": "MeUser",
         "type": "object"
       },
+      "SelectionIn": {
+        "additionalProperties": false,
+        "properties": {
+          "ingest_model": {
+            "format": "uuid",
+            "title": "Ingest Model",
+            "type": "string"
+          },
+          "query_model": {
+            "format": "uuid",
+            "title": "Query Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ingest_model",
+          "query_model"
+        ],
+        "title": "SelectionIn",
+        "type": "object"
+      },
+      "SettingsModels": {
+        "description": "Per job, the models available to the caller's tenant and the one selected.",
+        "properties": {
+          "available": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/AvailableModel"
+              },
+              "type": "array"
+            },
+            "title": "Available",
+            "type": "object"
+          },
+          "selected": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Selected",
+            "type": "object"
+          }
+        },
+        "required": [
+          "available",
+          "selected"
+        ],
+        "title": "SettingsModels",
+        "type": "object"
+      },
       "TenantChange": {
         "additionalProperties": false,
         "properties": {
@@ -253,6 +611,51 @@
           "tenants"
         ],
         "title": "TenantList",
+        "type": "object"
+      },
+      "TenantModels": {
+        "description": "The catalog, and per job the models available to the tenant and the one selected.",
+        "properties": {
+          "available": {
+            "additionalProperties": {
+              "items": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Available",
+            "type": "object"
+          },
+          "catalog": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogModel"
+            },
+            "title": "Catalog",
+            "type": "array"
+          },
+          "selected": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Selected",
+            "type": "object"
+          }
+        },
+        "required": [
+          "catalog",
+          "available",
+          "selected"
+        ],
+        "title": "TenantModels",
         "type": "object"
       },
       "TenantOut": {
@@ -474,6 +877,196 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/admin/audit": {
+      "get": {
+        "operationId": "audit_history_api_admin_audit_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auth",
+                    "user",
+                    "tenant",
+                    "audit"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor_email",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 320,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actor Email"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "-at",
+              "enum": [
+                "at",
+                "-at",
+                "tenant",
+                "-tenant",
+                "actor",
+                "-actor",
+                "action",
+                "-action",
+                "category",
+                "-category"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "enum": [
+                "json",
+                "csv"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Audit History"
+      }
+    },
     "/api/admin/tenants": {
       "get": {
         "operationId": "list_tenants_api_admin_tenants_get",
@@ -639,6 +1232,104 @@
         "summary": "Tenant Admins"
       }
     },
+    "/api/admin/tenants/{tenant_id}/models": {
+      "get": {
+        "operationId": "tenant_models_api_admin_tenants__tenant_id__models_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Tenant Models"
+      },
+      "put": {
+        "operationId": "set_tenant_models_api_admin_tenants__tenant_id__models_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AvailabilityIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Tenant Models"
+      }
+    },
     "/api/admin/tenants/{tenant_id}/retry": {
       "post": {
         "operationId": "retry_api_admin_tenants__tenant_id__retry_post",
@@ -776,6 +1467,70 @@
           }
         ],
         "summary": "Me"
+      }
+    },
+    "/api/settings/models": {
+      "get": {
+        "operationId": "settings_models_api_settings_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Settings Models"
+      },
+      "put": {
+        "operationId": "select_models_api_settings_models_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsModels"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Select Models"
       }
     },
     "/api/users": {

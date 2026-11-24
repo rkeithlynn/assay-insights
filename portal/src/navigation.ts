@@ -7,7 +7,7 @@
 export type Role = "tenant-admin" | "tenant-user" | "master-admin" | "master-user";
 
 export interface Screen {
-  id: "home" | "tenants" | "users";
+  id: "home" | "tenants" | "users" | "settings" | "audit";
   title: string;
   path: string;
 }
@@ -16,15 +16,17 @@ export const SCREENS: Record<Screen["id"], Screen> = {
   home: { id: "home", title: "Home", path: "/" },
   tenants: { id: "tenants", title: "Tenants", path: "/tenants" },
   users: { id: "users", title: "Users", path: "/users" },
+  settings: { id: "settings", title: "Settings", path: "/settings" },
+  audit: { id: "audit", title: "Audit history", path: "/audit" },
 };
 
 const BY_ROLE: Record<Role, Screen["id"][]> = {
-  // Ask, Upload, Ingestion history, Fraud review and Settings arrive in steps 6 to 8.
-  "tenant-admin": ["home", "users"],
+  // Ask, Upload, Ingestion history and Fraud review arrive in steps 6 to 8.
+  "tenant-admin": ["home", "users", "settings"],
   "tenant-user": ["home"],
-  // Ingestion history and Audit history arrive later.
-  "master-admin": ["tenants"],
-  "master-user": ["tenants"],
+  // Ingestion history (all tenants) arrives in step 6.
+  "master-admin": ["tenants", "audit"],
+  "master-user": ["tenants", "audit"],
 };
 
 export function isRole(value: string): value is Role {

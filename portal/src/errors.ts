@@ -24,6 +24,9 @@ const MESSAGES: Record<string, string> = {
   session_revoked: "Your session has ended. Sign in again.",
   invalid_token: "Your session has ended. Sign in again.",
   invalid_input: "Some of the values are not valid.",
+  model_not_available: "That model is not available to your organization.",
+  model_not_in_catalog: "That model is not in the catalog or not approved for that job.",
+  invalid_range: "Choose a date range of up to 13 months, with the start before the end.",
 };
 
 /** Codes after which the user must sign in again. */

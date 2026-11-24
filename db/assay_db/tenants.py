@@ -110,10 +110,11 @@ def _audit(
         detail = {**detail, "started_by": actor.principal}
     conn.execute(
         text(
-            "INSERT INTO assay.audit_log (tenant_id, actor_user_id, actor_email, actor_role, "
+            "INSERT INTO assay.audit_log (at, tenant_id, actor_user_id, actor_email, actor_role, "
             "category, action, target_type, target_id, target_label, detail, outcome) "
-            "VALUES (:tenant_id, :actor_user_id, :actor_email, :actor_role, :category, "
-            ":action, :target_type, :target_id, :target_label, CAST(:detail AS jsonb), :outcome)"
+            "VALUES (clock_timestamp(), :tenant_id, :actor_user_id, :actor_email, :actor_role, "
+            ":category, :action, :target_type, :target_id, :target_label, "
+            "CAST(:detail AS jsonb), :outcome)"
         ),
         {
             "tenant_id": tenant.id,

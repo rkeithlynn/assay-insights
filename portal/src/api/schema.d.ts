@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/admin/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Audit History */
+        get: operations["audit_history_api_admin_audit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/tenants": {
         parameters: {
             query?: never;
@@ -52,6 +69,24 @@ export interface paths {
          */
         get: operations["tenant_admins_api_admin_tenants__tenant_id__admins_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/tenants/{tenant_id}/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Tenant Models */
+        get: operations["tenant_models_api_admin_tenants__tenant_id__models_get"];
+        /** Set Tenant Models */
+        put: operations["set_tenant_models_api_admin_tenants__tenant_id__models_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -140,6 +175,24 @@ export interface paths {
         /** Me */
         get: operations["me_api_me_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Settings Models */
+        get: operations["settings_models_api_settings_models_get"];
+        /** Select Models */
+        put: operations["select_models_api_settings_models_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -266,6 +319,114 @@ export interface components {
              */
             status: "invited" | "active" | "disabled";
         };
+        /** AuditEvent */
+        AuditEvent: {
+            /** Action */
+            action: string;
+            /** Actor Email */
+            actor_email: string | null;
+            /** Actor Role */
+            actor_role: string | null;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Category */
+            category: string;
+            /** Detail */
+            detail: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Ip Address */
+            ip_address: string | null;
+            /** Outcome */
+            outcome: string;
+            /** Target Id */
+            target_id: string | null;
+            /** Target Label */
+            target_label: string | null;
+            /** Target Type */
+            target_type: string | null;
+            /**
+             * Tenant Id
+             * Format: uuid
+             */
+            tenant_id: string;
+            /** Tenant Name */
+            tenant_name: string;
+            /** User Agent */
+            user_agent: string | null;
+        };
+        /** AuditPage */
+        AuditPage: {
+            /**
+             * End
+             * Format: date-time
+             */
+            end: string;
+            /** Events */
+            events: components["schemas"]["AuditEvent"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /**
+             * Start
+             * Format: date-time
+             */
+            start: string;
+            /** Total */
+            total: number;
+        };
+        /** AvailabilityIn */
+        AvailabilityIn: {
+            /** Ingest */
+            ingest: string[];
+            /** Query */
+            query: string[];
+        };
+        /** AvailableModel */
+        AvailableModel: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Jobs */
+            jobs: string[];
+            /** Name */
+            name: string;
+            /** Price In */
+            price_in: string;
+            /** Price Out */
+            price_out: string;
+            /** Profile Id */
+            profile_id: string;
+        };
+        /** CatalogModel */
+        CatalogModel: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Jobs */
+            jobs: string[];
+            /** Name */
+            name: string;
+            /** Price In */
+            price_in: string;
+            /** Price Out */
+            price_out: string;
+            /** Profile Id */
+            profile_id: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -319,6 +480,33 @@ export interface components {
             /** Name */
             name: string;
         };
+        /** SelectionIn */
+        SelectionIn: {
+            /**
+             * Ingest Model
+             * Format: uuid
+             */
+            ingest_model: string;
+            /**
+             * Query Model
+             * Format: uuid
+             */
+            query_model: string;
+        };
+        /**
+         * SettingsModels
+         * @description Per job, the models available to the caller's tenant and the one selected.
+         */
+        SettingsModels: {
+            /** Available */
+            available: {
+                [key: string]: components["schemas"]["AvailableModel"][];
+            };
+            /** Selected */
+            selected: {
+                [key: string]: string | null;
+            };
+        };
         /** TenantChange */
         TenantChange: {
             /**
@@ -340,6 +528,22 @@ export interface components {
         TenantList: {
             /** Tenants */
             tenants: components["schemas"]["TenantOut"][];
+        };
+        /**
+         * TenantModels
+         * @description The catalog, and per job the models available to the tenant and the one selected.
+         */
+        TenantModels: {
+            /** Available */
+            available: {
+                [key: string]: string[];
+            };
+            /** Catalog */
+            catalog: components["schemas"]["CatalogModel"][];
+            /** Selected */
+            selected: {
+                [key: string]: string | null;
+            };
         };
         /** TenantOut */
         TenantOut: {
@@ -431,6 +635,46 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    audit_history_api_admin_audit_get: {
+        parameters: {
+            query?: {
+                from?: string | null;
+                to?: string | null;
+                tenant_id?: string | null;
+                category?: ("auth" | "user" | "tenant" | "audit") | null;
+                actor_email?: string | null;
+                sort?: "at" | "-at" | "tenant" | "-tenant" | "actor" | "-actor" | "action" | "-action" | "category" | "-category";
+                page?: number;
+                page_size?: number;
+                format?: "json" | "csv";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
+                    "text/csv": string;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_tenants_api_admin_tenants_get: {
         parameters: {
             query?: never;
@@ -537,6 +781,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tenant_models_api_admin_tenants__tenant_id__models_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantModels"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_tenant_models_api_admin_tenants__tenant_id__models_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AvailabilityIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantModels"];
                 };
             };
             /** @description Validation Error */
@@ -662,6 +972,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Me"];
+                };
+            };
+        };
+    };
+    settings_models_api_settings_models_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsModels"];
+                };
+            };
+        };
+    };
+    select_models_api_settings_models_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SelectionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsModels"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
