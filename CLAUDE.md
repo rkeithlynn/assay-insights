@@ -810,7 +810,9 @@ assets/     Logo and favicon SVGs
   only from database rows and scan events, never from a listing of `derived/` or any other
   prefix, so it never treats this object as a document's text. Owner's condition
   (2026-11-23): the fixture is never in the inbox, and the pipeline ignores it. The owner
-  decided to keep it at this key. Step 6 must also do the following:
+  decided to keep it at this key. (2026-11-24: the owner asked for a separate inbox fixture
+  for the inbox refusals; see "Reserved fixture objects" under "Step 6, first half". This
+  text fixture stays where it is.) Step 6 must also do the following:
   - **Define the reserved document ID as a constant in one place.** Today it is defined
     only in `tests/isolation/conftest.py`, which the pipeline cannot import. Move it to
     code that both the pipeline and the isolation tests import (`assay_tss.keys` is the
@@ -1246,12 +1248,34 @@ Notes:
 
 - **Not yet verified in AWS:** a browser PUT through the presigned link into a bucket with
   Object Lock default retention (the signed `x-amz-checksum-sha256` should satisfy Object
-  Lock's integrity requirement); that S3 includes "because no session policy allows the
-  s3:GetObject action" in the AccessDenied message for a same-account request through the
-  gateway endpoint (AWS documents it for same-account requests, and not for denials by a VPC
-  endpoint policy; `test_only_pipeline_sessions_read_the_inbox` relies on it, with a pipeline
-  session's refusal of the same missing key as the control); that the scan event's
-  `versionId` names the version scanned (AWS's example has it; it does not say so in words).
+  Lock's integrity requirement); that the scan event's `versionId` names the version
+  scanned (AWS's example has it; it does not say so in words); that S3 cites
+  `s3:GetObject` (or `s3:GetObjectVersion`) for a session-policy refusal of an object that
+  exists (the inbox fixture checks it on the next isolation run).
+- **S3 refuses a missing key for `s3:ListBucket`** (first isolation run after the step 6
+  deploy, 2026-11-24). Its AccessDenied message to a READ or UPLOAD session reading a key
+  that was never written was "not authorized to perform: s3:ListBucket ... because no
+  session policy allows the s3:ListBucket action", not the read. So the reason shows whether
+  the object was there. The first version of `test_only_pipeline_sessions_read_the_inbox`
+  read a random, missing key, proved nothing, and failed; it now reads the inbox fixture.
+- **Reserved fixture objects** (keys in `assay_tss.keys`, all under `RESERVED_DOCUMENT_ID`,
+  written once by `tests/isolation` with a PIPELINE session and kept by Object Lock):
+  - `derived/text/{id}.json` (build step 4), in both test tenants' buckets;
+  - `quarantine/{id}.pdf` (build step 6), Isolation Test A;
+  - `inbox/{id}/{id}` (owner's request, 2026-11-24), Isolation Test A, **two versions**. The
+    current one's body names the noncurrent one's version ID, because no tenant session may
+    list versions. It shows that READ and UPLOAD sessions are refused both versions, with
+    S3 citing `s3:GetObject` and `s3:GetObjectVersion`.
+  - **The inbox fixture raises no alarm, and real uploads lose none.** GuardDuty scans its
+    two writes (first run only). The scan Lambda ignores results for exactly
+    `keys.isolation_fixture_inbox_key()` at INFO. No upload can have that key: `inbox_key`
+    refuses the reserved ID, and no `batch_files` row has it. Any other inbox key that is
+    not a registered upload still logs at ERROR. That now includes keys under `inbox/` that
+    are not upload keys at all (the reserved ID in another position, a file name), which
+    were INFO "outside the inbox" before. Tested in
+    `test_only_the_isolation_inbox_fixture_is_ignored_without_an_alarm`.
+  - None of them ever gets a `documents` or `batch_files` row, and the pipeline works only
+    from rows and scan events, so none is ever processed.
 - **GuardDuty's event** (user guide, read 2026-11-24): `detail.s3ObjectDetails.bucketName`,
   `objectKey`, `versionId`; `detail.scanResultDetails.scanResultStatus` is
   `NO_THREATS_FOUND`, `THREATS_FOUND`, `UNSUPPORTED`, `ACCESS_DENIED` or `FAILED`.

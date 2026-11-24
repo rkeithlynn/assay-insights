@@ -6,6 +6,9 @@ from `aws.guardduty` about tenant buckets. For one event:
 1. The key must be an inbox key (`inbox/{batch_id}/{file_id}`). Anything else is logged and
    ignored: the pipeline's own writes outside inbox/ are scanned too while a tenant's plan
    still covers the whole bucket, and nothing outside inbox/ is ever an upload.
+   Two exceptions under inbox/: the isolation tests' inbox fixture
+   (`keys.isolation_fixture_inbox_key()`, exactly that key) is ignored at INFO, and any
+   other key under inbox/ that is not an upload key is logged at ERROR (an alarm).
 2. The tenant is the one whose registered upload has that key (`pipeline.tenant_for_upload`),
    and the event's bucket must be that tenant's bucket (owner decision 3, build step 6).
    A key no upload was registered under is logged at ERROR, which raises an alarm, and
@@ -178,9 +181,18 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
         log.warning("not a scan result event; ignored")
         return "ignored_event"
     fields: dict[str, Any] = {"event_id": scan.event_id, "result": scan.result}
+    if scan.key == keys.isolation_fixture_inbox_key():
+        # The isolation tests' inbox fixture, written by them under the reserved ID. No upload
+        # can have this key (`inbox_key` refuses the reserved ID). This exact key only.
+        log.info("scan result for the isolation tests' inbox fixture; ignored", extra=fields)
+        return "isolation_fixture"
     inbox = keys.parse_inbox_key(scan.key)
     if inbox is None:
-        # Outside inbox/ (or the reserved fixture ID, which is never in the inbox).
+        if scan.key.startswith(keys.INBOX_PREFIX):
+            # Under inbox/ but not a key `inbox_key` builds (or the reserved ID in another
+            # shape): nothing registered could have written it. Condition (d).
+            log.error("scan result for an inbox key no upload can have", extra=fields)
+            return "not_an_upload_key"
         log.info("scan result outside the inbox; ignored", extra=fields)
         return "outside_inbox"
     batch_id, file_id = inbox

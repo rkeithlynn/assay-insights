@@ -156,12 +156,14 @@ def test_no_key_is_ever_built_from_the_reserved_id(build: object) -> None:
 def test_the_fixture_keys_are_the_only_keys_with_the_reserved_id() -> None:
     assert keys.isolation_fixture_text_key() == f"derived/text/{RESERVED}.json"
     assert keys.isolation_fixture_quarantine_key() == f"quarantine/{RESERVED}.pdf"
+    assert keys.isolation_fixture_inbox_key() == f"inbox/{RESERVED}/{RESERVED}"
     assert (
         keys.isolation_fixture_text_key(),
         keys.isolation_fixture_quarantine_key(),
+        keys.isolation_fixture_inbox_key(),
     ) == keys.ISOLATION_FIXTURE_KEYS
-    # Never in the inbox (owner's condition, build step 4).
-    assert not any(k.startswith(keys.INBOX_PREFIX) for k in keys.ISOLATION_FIXTURE_KEYS)
+    # The inbox fixture (build step 6) is never an upload key.
+    assert keys.parse_inbox_key(keys.isolation_fixture_inbox_key()) is None
 
 
 def test_check_not_reserved() -> None:

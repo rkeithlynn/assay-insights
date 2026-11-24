@@ -4,14 +4,17 @@ The two tenants come from the runner's event (`ISOLATION_TENANT_A`, `ISOLATION_T
 Every storage context is issued by the real TSS. "The runner" is this Lambda's own role: a
 probe whose IAM policy allows what the tenant resources' own policies must refuse.
 
-The tests write two things: two small fixture objects in each tenant's own bucket, once,
-with that tenant's pipeline credentials (`ensure_fixture_objects`), both under the reserved
-document ID (`assay_tss.keys.RESERVED_DOCUMENT_ID`) and never in `inbox/`. Every other write
-they attempt must be refused, and every database transaction is rolled back.
+The tests write only fixture objects, in a test tenant's own bucket, once, with that
+tenant's pipeline credentials, all under the reserved document ID
+(`assay_tss.keys.RESERVED_DOCUMENT_ID`): `derived/text/{id}.json` and `quarantine/{id}.pdf`
+(`ensure_fixture_objects`), and `inbox/{id}/{id}` in two versions (`ensure_inbox_fixture`,
+build step 6). Every other write they attempt must be refused, and every database
+transaction is rolled back.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Callable, Iterator
@@ -46,9 +49,16 @@ FIXTURES = (
 # A pipeline session may not list the bucket (build step 6), so S3 answers 403, not 404,
 # for a key that does not exist.
 MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound", "403", "AccessDenied"})
-# S3's reason for a refusal by the session policy (same-account requests). A missing key
-# never carries it: that refusal comes from S3 hiding the key, not from a policy.
+# S3's reason for a refusal by the session policy (same-account requests), for an object
+# that exists. A missing key never carries it: S3 then refuses for s3:ListBucket instead,
+# to a caller that may not list (seen on 2026-11-24).
 SESSION_POLICY_REFUSAL = "because no session policy allows the s3:GetObject action"
+VERSION_REFUSAL = "because no session policy allows the s3:GetObjectVersion action"
+LIST_REFUSAL = "because no session policy allows the s3:ListBucket action"
+# The inbox fixture's first version. The second (current) version names the first's ID,
+# because no tenant session may list versions.
+INBOX_FIXTURE_FIRST = b'{"isolation-test-fixture": true, "version": 1}\n'
+NONCURRENT = "noncurrent_version"
 
 
 @dataclass(frozen=True)
@@ -217,6 +227,64 @@ def quarantine_key(
         return keys.isolation_fixture_quarantine_key()
 
     return _key
+
+
+@dataclass(frozen=True)
+class InboxFixture:
+    key: str
+    current: str  # the current version's ID
+    noncurrent: str  # the older version's ID
+
+
+def ensure_inbox_fixture(context: StorageContext) -> InboxFixture:
+    """`inbox/{reserved}/{reserved}` with two versions, written once with the tenant's
+    pipeline credentials.
+
+    A refused inbox read proves something only for an object that exists, current or
+    noncurrent. The first version is written, then a second whose body names the first's
+    version ID; Object Lock keeps both, so later runs read that ID back and write nothing.
+    GuardDuty scans each write; the scan Lambda ignores this exact key at INFO, and no
+    upload is ever registered under it.
+    """
+    api: Any = context.session().client("s3", region_name=context.region, config=CLIENT_CONFIG)
+    key = keys.isolation_fixture_inbox_key()
+    try:
+        current = api.get_object(Bucket=context.bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in MISSING_CODES:
+            raise
+        current = None
+    if current is not None:
+        body = json.loads(current["Body"].read())
+        if isinstance(body, dict) and isinstance(body.get(NONCURRENT), str):
+            return InboxFixture(key, current["VersionId"], body[NONCURRENT])
+        # A run that stopped between the two writes: the first version is the current one.
+        first = str(current["VersionId"])
+    else:
+        first = api.put_object(
+            Bucket=context.bucket,
+            Key=key,
+            Body=INBOX_FIXTURE_FIRST,
+            ContentType="application/json",
+        )["VersionId"]
+    second = json.dumps({"isolation-test-fixture": True, NONCURRENT: first}).encode()
+    written = api.put_object(
+        Bucket=context.bucket, Key=key, Body=second, ContentType="application/json"
+    )
+    return InboxFixture(key, written["VersionId"], first)
+
+
+@pytest.fixture(scope="session")
+def inbox_fixture() -> Callable[[StorageContext], InboxFixture]:
+    """The tenant's inbox fixture, given the tenant's pipeline context."""
+    known: dict[uuid.UUID, InboxFixture] = {}
+
+    def _fixture(context: StorageContext) -> InboxFixture:
+        if context.tenant_id not in known:
+            known[context.tenant_id] = ensure_inbox_fixture(context)
+        return known[context.tenant_id]
+
+    return _fixture
 
 
 @pytest.fixture(scope="session")

@@ -15,6 +15,7 @@ Three groups:
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 import uuid
 from collections.abc import Callable
@@ -28,9 +29,12 @@ from assay_tss.models import StorageAccess, StorageContext
 from assay_tss.policies import BUCKET_TAG, TENANT_TAG, VECTOR_BUCKET_TAG
 from tests.isolation.conftest import (
     FIXTURE_BODY,
+    LIST_REFUSAL,
     PROBE_TAG,
     SESSION_POLICY_REFUSAL,
+    VERSION_REFUSAL,
     Env,
+    InboxFixture,
     Pair,
     assert_denied,
     client,
@@ -299,29 +303,46 @@ def test_only_pipeline_sessions_read_quarantine(
 
 @pytest.mark.parametrize("access", [StorageAccess.READ, StorageAccess.UPLOAD])
 def test_only_pipeline_sessions_read_the_inbox(
-    env: Env, resolve: Resolve, context_a: StorageContext, access: StorageAccess
+    env: Env,
+    resolve: Resolve,
+    context_a: StorageContext,
+    inbox_fixture: Callable[[StorageContext], InboxFixture],
+    access: StorageAccess,
 ) -> None:
-    """Condition (c): unscanned uploads are readable by pipeline sessions only.
+    """Condition (c): unscanned uploads, current or noncurrent, are readable by pipeline
+    sessions only.
 
-    The inbox holds no fixture (owner's condition, build step 4), so a refused read cannot
-    be shown on an object that exists. S3 says why it refused instead: a read the session
-    policy does not allow is refused "because no session policy allows the s3:GetObject
-    action", which a missing key never is. The pipeline session's refusal of the same
-    missing key is the control: it must not carry that reason.
+    Shown on the inbox fixture, an object with two versions. The pipeline session reads both
+    (the control: they exist). Every other read must be refused by the session policy for
+    the action it needs, s3:GetObject or s3:GetObjectVersion. S3 refuses a missing key for
+    s3:ListBucket instead (also checked here), so that reason proves the object was there.
     """
-    key = context_a.inbox_key(uuid.uuid4(), uuid.uuid4())
+    fixture = inbox_fixture(context_a)
+    key, bucket = fixture.key, context_a.bucket
+    assert fixture.current != fixture.noncurrent
     pipeline = s3(context_a.session(), context_a.region)
-    control = assert_denied(lambda: pipeline.get_object(Bucket=context_a.bucket, Key=key))
-    assert SESSION_POLICY_REFUSAL not in control, control
+    assert pipeline.head_object(Bucket=bucket, Key=key)["VersionId"] == fixture.current
+    for version in (fixture.current, fixture.noncurrent):
+        read = pipeline.get_object(Bucket=bucket, Key=key, VersionId=version)
+        assert read["VersionId"] == version and read["Body"].read()
 
     session = resolve(env.tenant_a, access)
+    assert session.bucket == bucket
     api = s3(session.session(), session.region)
-    current = assert_denied(lambda: api.get_object(Bucket=session.bucket, Key=key))
+    current = assert_denied(lambda: api.get_object(Bucket=bucket, Key=key))
     assert SESSION_POLICY_REFUSAL in current, current
-    noncurrent = assert_denied(
-        lambda: api.get_object(Bucket=session.bucket, Key=key, VersionId="null")
-    )
-    assert "no session policy allows the s3:GetObjectVersion action" in noncurrent, noncurrent
+    for version in (fixture.current, fixture.noncurrent):
+        by_version = assert_denied(
+            functools.partial(api.get_object, Bucket=bucket, Key=key, VersionId=version)
+        )
+        assert VERSION_REFUSAL in by_version, (version, by_version)
+    assert_denied(lambda: api.head_object(Bucket=bucket, Key=key))
+    assert_denied(lambda: api.get_object_tagging(Bucket=bucket, Key=key))
+
+    # The reason tells an existing object from a missing one.
+    missing = context_a.inbox_key(uuid.uuid4(), uuid.uuid4())
+    absent = assert_denied(lambda: api.get_object(Bucket=bucket, Key=missing))
+    assert LIST_REFUSAL in absent and SESSION_POLICY_REFUSAL not in absent, absent
 
 
 def test_a_tenant_session_cannot_start_another_session(env: Env, pair: Pair) -> None:

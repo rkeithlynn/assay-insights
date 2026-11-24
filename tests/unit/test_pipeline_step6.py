@@ -313,6 +313,34 @@ def test_events_that_are_not_registered_uploads_are_ignored(
     assert w.storage.asked == []  # no storage context was even asked for
 
 
+def test_only_the_isolation_inbox_fixture_is_ignored_without_an_alarm(
+    w: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The isolation tests' inbox fixture is scanned on every first write. Its exact key is
+    ignored at INFO; any other inbox key that no upload can have still logs at ERROR."""
+    bucket = naming.bucket_name(PREFIX, w.db.tenants["a"])
+    deps = w.scan_deps()
+    reserved = keys.RESERVED_DOCUMENT_ID
+    with caplog.at_level(logging.INFO):
+        for result in ("NO_THREATS_FOUND", "THREATS_FOUND", "FAILED"):
+            event = scan_event(bucket, keys.isolation_fixture_inbox_key(), "v1", result)
+            assert scan.handle(event, deps) == "isolation_fixture"
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+        for stray in (
+            f"inbox/{uuid.uuid4()}/{reserved}",
+            f"inbox/{reserved}/{uuid.uuid4()}",
+            f"inbox/{reserved}/{reserved}/",
+            f"inbox/{reserved}/{reserved}.pdf",
+            f"inbox/{reserved}/{reserved}x",
+            "inbox/smith.pdf",
+        ):
+            caplog.clear()
+            assert scan.handle(scan_event(bucket, stray, "v1"), deps) == "not_an_upload_key"
+            assert [r.levelno for r in caplog.records] == [logging.ERROR], stray
+    assert w.storage.asked == []
+
+
 def test_an_event_naming_another_tenants_bucket_is_refused(w: World) -> None:
     b = open_batch(w, "a", "a-admin", [("x.pdf", minimal_pdf(text="x"))])
     version = put(w, b, "x.pdf")

@@ -43,23 +43,33 @@ Every cross-tenant test runs in both directions (A against B, and B against A).
 | `test_rows.py` | As `app_tenant` with one tenant set, the other tenant's rows cannot be read or inserted, `tenant_storage` cannot be read at all, and with no tenant set nothing is visible. |
 | The provisioning role's probe | The provisioning role cannot read an object that exists, write an object, list object versions, read, query or write vectors, or use the tenant's key directly. It can list keys, which hold IDs only. It may use the key only through S3 Vectors, to create the vector bucket and index (an accepted exception; BUILD_SPEC.md section 6). Three settings calls it is allowed must succeed. |
 
-The tests write two things: two small fixture objects in each test tenant's own bucket,
-once, with that tenant's pipeline credentials, both under the reserved document ID
+The tests write only fixture objects, in a test tenant's own bucket, once, with that
+tenant's pipeline credentials, all under the reserved document ID
 (`assay_tss.keys.RESERVED_DOCUMENT_ID`, defined there and nowhere else):
-`keys.isolation_fixture_text_key()` (under `derived/text/`) and, from build step 6,
-`keys.isolation_fixture_quarantine_key()` (under `quarantine/`). Neither is ever in
-`inbox/`. Object Lock keeps them, so later runs find them and write nothing. The API and
-the pipeline refuse the reserved ID: no document is ever created or processed with it.
-Every other write the tests attempt must be refused, and every database transaction is
-rolled back. Tagging probes use a tag no policy looks at.
+
+| Key | Since | Shows |
+| --- | --- | --- |
+| `keys.isolation_fixture_text_key()`, `derived/text/{id}.json` | build step 4 | Cross-tenant refusals; a READ session reads it back |
+| `keys.isolation_fixture_quarantine_key()`, `quarantine/{id}.pdf` | build step 6 | Only PIPELINE reads `quarantine/` |
+| `keys.isolation_fixture_inbox_key()`, `inbox/{id}/{id}`, two versions | build step 6 (2026-11-24) | Only PIPELINE reads `inbox/`, current or noncurrent |
+
+Object Lock keeps them, so later runs find them and write nothing. The current version of
+the inbox fixture names the older version's ID in its body, because no tenant session may
+list versions. The API and the pipeline refuse the reserved ID: no document is ever created
+or processed with it. Every other write the tests attempt must be refused, and every
+database transaction is rolled back. Tagging probes use a tag no policy looks at.
 
 The fixture objects are there because a refused read proves something only for an object
-that exists: S3 refuses a missing key too, to any caller that may not list the bucket (and
-since build step 6 no tenant session may). So every read that must be refused is tried on a
-fixture object. The inbox holds no fixture, so its refusals are shown by S3's reason
-instead: a read the session policy does not allow is refused "because no session policy
-allows the s3:GetObject action", which a missing key never is; a pipeline session's
-refusal of the same missing key is the control.
+that exists. S3 refuses a missing key too, to any caller that may not list the bucket, and
+since build step 6 no tenant session may. Such a refusal names `s3:ListBucket`, not the read
+(seen 2026-11-24). So every read that must be refused is tried on a fixture object. The
+inbox test also requires S3's reason, `s3:GetObject` or `s3:GetObjectVersion`, and checks
+that a missing key gets the `s3:ListBucket` reason instead.
+
+The inbox fixture is the only one GuardDuty scans (each tenant's plan covers `inbox/` only).
+Its two writes, on the first run in a tenant, each produce a scan result. The scan Lambda
+ignores results for exactly that key at INFO, so they raise no alarm. Every other inbox key
+that is not a registered upload still logs at ERROR and raises the alarm.
 
 ## Adding a test
 

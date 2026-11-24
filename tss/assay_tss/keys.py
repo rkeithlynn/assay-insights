@@ -25,12 +25,17 @@ only when the batch closes, so an infected one is quarantined under its own file
 
 The reserved document ID
 ------------------------
-`RESERVED_DOCUMENT_ID` belongs to the isolation tests (tests/isolation). Each test tenant's
-bucket keeps two fixture objects under it, written by those tests and kept by Object Lock:
-`derived/text/{id}.json` and `quarantine/{id}.pdf`. It has no `documents` row and must never
-get one. So every key builder below refuses it, the only keys ever built from it are the
-two `isolation_fixture_*` keys, and the API and the pipeline refuse to create or process a
-document with it (`check_not_reserved`). It is never in `inbox/`.
+`RESERVED_DOCUMENT_ID` belongs to the isolation tests (tests/isolation). A test tenant's
+bucket keeps fixture objects under it, written by those tests and kept by Object Lock:
+`derived/text/{id}.json`, `quarantine/{id}.pdf` and, from build step 6, `inbox/{id}/{id}`
+(two versions). It has no `documents` or `batch_files` row and must never get one. So every
+key builder below refuses it, the only keys ever built from it are the `isolation_fixture_*`
+keys, and the API and the pipeline refuse to create or process a document with it
+(`check_not_reserved`).
+
+The inbox fixture is the one fixture GuardDuty scans. No upload can have its key, because
+`inbox_key` refuses the reserved ID, so the scan Lambda ignores scan results for exactly
+that key (at INFO) and still raises its alarm for every other unregistered inbox key.
 """
 
 from __future__ import annotations
@@ -145,7 +150,7 @@ def chat_key(conversation_id: uuid.UUID, message_id: uuid.UUID) -> str:
     return f"{CHAT_PREFIX}{_id(conversation_id)}/{_id(message_id)}.json"
 
 
-# --- The isolation tests' two fixture objects: the only keys built from the reserved ID ----
+# --- The isolation tests' fixture objects: the only keys built from the reserved ID --------
 
 
 def isolation_fixture_text_key() -> str:
@@ -158,4 +163,17 @@ def isolation_fixture_quarantine_key() -> str:
     return f"{QUARANTINE_PREFIX}{RESERVED_DOCUMENT_ID}.pdf"
 
 
-ISOLATION_FIXTURE_KEYS = (isolation_fixture_text_key(), isolation_fixture_quarantine_key())
+def isolation_fixture_inbox_key() -> str:
+    """`inbox/{reserved}/{reserved}`: shows that only pipeline sessions read inbox/.
+
+    Not an upload key: `parse_inbox_key` reports it as none, and no upload is ever
+    registered under it.
+    """
+    return f"{INBOX_PREFIX}{RESERVED_DOCUMENT_ID}/{RESERVED_DOCUMENT_ID}"
+
+
+ISOLATION_FIXTURE_KEYS = (
+    isolation_fixture_text_key(),
+    isolation_fixture_quarantine_key(),
+    isolation_fixture_inbox_key(),
+)
