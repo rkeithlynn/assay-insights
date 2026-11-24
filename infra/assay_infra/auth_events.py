@@ -281,7 +281,7 @@ class AuthEvents(pulumi.ComponentResource):
         )
 
         # --- Alarms on the trigger and the dead-letter queue ------------------------------
-        aws.cloudwatch.LogMetricFilter(
+        self.trigger_error_filter = aws.cloudwatch.LogMetricFilter(
             f"{trigger_name}-errors",
             name=f"{trigger_name}-errors",
             log_group_name=self.trigger_log_group.name,
@@ -427,7 +427,7 @@ class AuthEvents(pulumi.ComponentResource):
             ),
             opts=pulumi.ResourceOptions(parent=self, depends_on=[policy]),
         )
-        aws.lambda_.EventSourceMapping(
+        self.consumer_source = aws.lambda_.EventSourceMapping(
             f"{name}-source",
             event_source_arn=self.queue.arn,
             function_name=self.consumer_function.arn,

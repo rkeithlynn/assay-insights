@@ -97,6 +97,9 @@ def _after_everything(auth: Auth, api: ApiService) -> pulumi.Output[list[Any]]:
         api.task_definition.container_definitions,
         api.task_role_policy.policy,
         *[r.id for r in api.security_group_rules],
+        api.server_errors_alarm.id,
+        api.listener.id,
+        api.load_balancer.id,
     )
 
 

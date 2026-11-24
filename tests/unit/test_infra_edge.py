@@ -78,6 +78,8 @@ def _ready(edge: Edge) -> pulumi.Output[list[Any]]:
         edge.config_object.content,
         edge.portal_build.id,
         edge.headers_policy.id,
+        edge.waf_logging.id,
+        edge.log_delivery.id,
         *[r.id for r in edge.records],
     )
 

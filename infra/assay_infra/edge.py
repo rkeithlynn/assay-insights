@@ -514,7 +514,7 @@ class Edge(pulumi.ComponentResource):
             retention_in_days=LOG_RETENTION_DAYS,
             opts=child,
         )
-        aws.wafv2.WebAclLoggingConfiguration(
+        self.waf_logging = aws.wafv2.WebAclLoggingConfiguration(
             f"{name}-waf-logging",
             resource_arn=self.web_acl.arn,
             log_destination_configs=[self.waf_log_group.arn],
@@ -625,7 +625,7 @@ class Edge(pulumi.ComponentResource):
             ),
             opts=pulumi.ResourceOptions(parent=self, depends_on=[logs.policy]),
         )
-        aws.cloudwatch.LogDelivery(
+        self.log_delivery = aws.cloudwatch.LogDelivery(
             f"{name}-cdn-logs",
             delivery_source_name=log_source.name,
             delivery_destination_arn=log_destination.arn,

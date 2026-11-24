@@ -65,6 +65,8 @@ def _ready(events: AuthEvents) -> pulumi.Output[list[Any]]:
         events.trigger_function.id,
         events.consumer_function.id,
         events.sqs_endpoint_policy.policy,
+        events.trigger_error_filter.id,
+        events.consumer_source.id,
         *[a.id for a in events.alarms],
     )
 
