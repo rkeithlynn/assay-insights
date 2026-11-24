@@ -390,7 +390,8 @@ class Edge(pulumi.ComponentResource):
         self.load_balancer_ingress = aws.vpc.SecurityGroupIngressRule(
             f"{name}-alb-in-cloudfront",
             security_group_id=load_balancer_security_group.id,
-            description="HTTPS from CloudFront's VPC origin only",
+            # EC2 allows only a-zA-Z0-9. _-:/()#,@[]+=&;{}!$* here (no apostrophe).
+            description="HTTPS from the CloudFront VPC origin only",
             ip_protocol="tcp",
             from_port=443,
             to_port=443,
