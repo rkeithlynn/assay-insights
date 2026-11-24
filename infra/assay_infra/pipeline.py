@@ -497,7 +497,7 @@ class Pipeline(pulumi.ComponentResource):
             opts=child,
         )
         self.ingest_senders = [api_task_role, roles.scan, roles.sweeper]
-        aws.sqs.QueuePolicy(
+        self.ingest_policy = aws.sqs.QueuePolicy(
             f"{name}-ingest-policy",
             queue_url=self.ingest_queue.url,
             policy=pulumi.Output.all(
@@ -625,7 +625,7 @@ class Pipeline(pulumi.ComponentResource):
             event_pattern=scan_event_pattern(name_prefix),
             opts=child,
         )
-        aws.sqs.QueuePolicy(
+        self.scan_dlq_policy = aws.sqs.QueuePolicy(
             f"{name}-scan-dlq-policy",
             queue_url=self.scan_dlq.url,
             policy=pulumi.Output.all(queue=self.scan_dlq.arn, rule=self.scan_rule.arn).apply(
@@ -641,7 +641,7 @@ class Pipeline(pulumi.ComponentResource):
             source_arn=self.scan_rule.arn,
             opts=child,
         )
-        aws.cloudwatch.EventTarget(
+        self.scan_target = aws.cloudwatch.EventTarget(
             f"{name}-scan-target",
             rule=self.scan_rule.name,
             target_id="scan",
@@ -654,7 +654,7 @@ class Pipeline(pulumi.ComponentResource):
             ),
             opts=pulumi.ResourceOptions(parent=self, depends_on=[permission]),
         )
-        aws.lambda_.FunctionEventInvokeConfig(
+        self.scan_retries = aws.lambda_.FunctionEventInvokeConfig(
             f"{name}-scan-retries",
             function_name=scan_fn.name,
             maximum_retry_attempts=2,
@@ -683,7 +683,7 @@ class Pipeline(pulumi.ComponentResource):
             ),
             opts=child,
         )
-        state_machine_policy = aws.iam.RolePolicy(
+        self.state_machine_policy = state_machine_policy = aws.iam.RolePolicy(
             f"{name}-sfn-policy",
             role=state_machine_role.id,
             policy=steps_fn.arn.apply(lambda arn: state_machine_role_policy(steps_function=arn)),
@@ -705,7 +705,7 @@ class Pipeline(pulumi.ComponentResource):
         )
 
         # --- The starter ------------------------------------------------------------------
-        aws.lambda_.EventSourceMapping(
+        self.starter_source = aws.lambda_.EventSourceMapping(
             f"{name}-starter-source",
             event_source_arn=self.ingest_queue.arn,
             function_name=self.functions["starter"].arn,
@@ -725,7 +725,7 @@ class Pipeline(pulumi.ComponentResource):
             ),
             opts=child,
         )
-        aws.iam.RolePolicy(
+        self.schedule_policy = aws.iam.RolePolicy(
             f"{name}-sweep-schedule-policy",
             role=scheduler_role.id,
             policy=self.functions["sweeper"].arn.apply(
@@ -733,7 +733,7 @@ class Pipeline(pulumi.ComponentResource):
             ),
             opts=child,
         )
-        aws.scheduler.Schedule(
+        self.schedule = aws.scheduler.Schedule(
             f"{name}-sweep",
             name=f"{name}-sweep",
             description="Batch housekeeping: stale batches, overdue scans, unstarted documents",

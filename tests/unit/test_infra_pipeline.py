@@ -65,9 +65,18 @@ QUEUE_POLICY = "aws:sqs/queuePolicy:QueuePolicy"
 
 
 def _ready(p: pipeline.Pipeline) -> pulumi.Output[list[Any]]:
+    # Every resource the tests read, so none is checked before it is registered.
     return pulumi.Output.all(
         p.state_machine.id,
+        p.state_machine_policy.id,
         p.ingest_queue.id,
+        p.ingest_policy.id,
+        p.scan_dlq_policy.id,
+        p.scan_target.id,
+        p.scan_retries.id,
+        p.starter_source.id,
+        p.schedule.id,
+        p.schedule_policy.id,
         *[f.id for f in p.functions.values()],
         *[a.id for a in p.alarms],
     )
