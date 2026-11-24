@@ -153,12 +153,22 @@ class S3Objects:
     def copy(
         self, *, source_key: str, source_version: str, target_key: str, content_type: str
     ) -> None:
+        """Copy one version, with no tags.
+
+        GuardDuty tags every object it scans, and a copy takes the source's tags by default
+        (`TaggingDirective` COPY). Copying them needs object-tagging permissions that no
+        tenant session has (`s3:GetObjectVersionTagging`, `s3:PutObjectTagging`), so S3
+        refused every copy of a scanned upload (build step 6, first browser upload,
+        2026-11-24). REPLACE with no tag set reads no tags and writes none. The scan
+        result is kept in the database, not in a tag.
+        """
         self._s3.copy_object(
             Bucket=self._bucket,
             Key=target_key,
             CopySource={"Bucket": self._bucket, "Key": source_key, "VersionId": source_version},
             ContentType=content_type,
             MetadataDirective="REPLACE",
+            TaggingDirective="REPLACE",
             ChecksumAlgorithm="SHA256",
         )
 
