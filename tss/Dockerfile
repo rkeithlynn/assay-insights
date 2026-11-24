@@ -10,7 +10,9 @@ COPY pyproject.toml uv.lock ./
 COPY infra/pyproject.toml infra/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
 COPY api/pyproject.toml api/pyproject.toml
+COPY schemas/pyproject.toml schemas/pyproject.toml
 COPY tss/pyproject.toml tss/pyproject.toml
+COPY workers/pyproject.toml workers/pyproject.toml
 # Locked, hash-checked, wheels only: nothing is compiled and nothing comes from the host.
 RUN uv export --locked --package assay-tss --extra service --no-dev --no-emit-workspace \
         --no-header --format requirements-txt -o /tmp/requirements.txt \

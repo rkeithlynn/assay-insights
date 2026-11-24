@@ -31,6 +31,7 @@ from assay_tss.models import (
     Credentials,
     IsolationMode,
     ResolveRequest,
+    StorageAccess,
     StorageContext,
     StorageStatus,
     TenantStorageProfile,
@@ -81,13 +82,49 @@ class TenantRoleRefused(TssError):
     code = "tenant_role_refused"
 
 
+class AccessNotAllowed(TssError):
+    status = 403
+    code = "access_not_allowed"
+
+
+@dataclass(frozen=True)
+class CallerGrant:
+    """What one caller role may ask for: its service name and the accesses it may use."""
+
+    service: str
+    access: frozenset[StorageAccess]
+
+
+def parse_callers(raw: str) -> dict[str, CallerGrant]:
+    """`TSS_CALLERS`: {"<role name>": {"service": "<name>", "access": ["read", ...]}}."""
+    document = json.loads(raw)
+    if not isinstance(document, dict):
+        raise ValueError("TSS_CALLERS must be a JSON object of role name to grant")
+    callers: dict[str, CallerGrant] = {}
+    for role, grant in document.items():
+        if not (
+            isinstance(role, str)
+            and isinstance(grant, dict)
+            and set(grant) == {"service", "access"}
+            and isinstance(grant["service"], str)
+            and isinstance(grant["access"], list)
+            and grant["access"]
+        ):
+            raise ValueError(f"TSS_CALLERS entry for {role!r} must be {{service, access}}")
+        callers[role] = CallerGrant(
+            service=grant["service"],
+            access=frozenset(StorageAccess(a) for a in grant["access"]),
+        )
+    return callers
+
+
 @dataclass(frozen=True)
 class ServiceSettings:
     region: str
     name_prefix: str
     tenant_role_arn: str
-    # IAM role name of each allowed caller -> the service name it must use.
-    callers: Mapping[str, str]
+    # IAM role name of each allowed caller -> its service name and allowed accesses.
+    callers: Mapping[str, CallerGrant]
 
     @property
     def account_id(self) -> str:
@@ -96,16 +133,11 @@ class ServiceSettings:
 
     @classmethod
     def from_env(cls) -> ServiceSettings:
-        callers = json.loads(os.environ["TSS_CALLERS"])
-        if not isinstance(callers, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in callers.items()
-        ):
-            raise ValueError("TSS_CALLERS must be a JSON object of role name to service name")
         return cls(
             region=os.environ["AWS_REGION"],
             name_prefix=naming.check_prefix(os.environ["NAME_PREFIX"]),
             tenant_role_arn=os.environ["TENANT_ROLE_ARN"],
-            callers=callers,
+            callers=parse_callers(os.environ["TSS_CALLERS"]),
         )
 
 
@@ -142,8 +174,8 @@ class DbStorageReader:
             raise StorageProfileInvalid(str(exc)) from None
 
 
-def caller_service(user_arn: str | None, callers: Mapping[str, str]) -> str:
-    """The service name of the IAM role that signed the request, from API Gateway."""
+def caller_service(user_arn: str | None, callers: Mapping[str, CallerGrant]) -> CallerGrant:
+    """The grant of the IAM role that signed the request, from API Gateway."""
     # arn:aws:sts::<account>:assumed-role/<role name>/<session name>
     parts = (user_arn or "").split(":", 5)
     if len(parts) == 6 and parts[2] == "sts" and parts[5].startswith("assumed-role/"):
@@ -183,11 +215,13 @@ class Resolver:
             raise StorageProfileInvalid(f"tenant_storage row has unexpected {', '.join(wrong)}")
         return profile
 
-    def resolve(self, request: ResolveRequest, *, service: str) -> StorageContext:
-        """`service` is the caller's name, taken from its IAM role, not from the request."""
+    def resolve(self, request: ResolveRequest, *, caller: CallerGrant) -> StorageContext:
+        """`caller` comes from the signing IAM role, never from the request."""
         claimed, _job = check_source_identity(request.source_identity)
-        if claimed != service:
+        if claimed != caller.service:
             raise SourceIdentityMismatch("source identity must start with the caller's service")
+        if request.access not in caller.access:
+            raise AccessNotAllowed(f"{caller.service} may not ask for {request.access.value}")
         profile = self._checked_profile(request.tenant_id)
         account_id = self._settings.account_id
         try:

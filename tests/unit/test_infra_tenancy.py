@@ -26,7 +26,7 @@ from assay_infra.database import Database
 from assay_infra.isolation import IsolationRunner, runner_role
 from assay_infra.network import Network
 from assay_infra.provisioning import Provisioning
-from assay_infra.tss import TenantStorage
+from assay_infra.tss import TenantStorage, TssCaller
 from assay_tss import policies
 from tests.unit.conftest import ACCOUNT_ID, REGION, registered
 from tests.unit.test_infra_auth_api import AUTH, DNS, FAKE_JWKS
@@ -149,9 +149,12 @@ class Stack:
             auth_event_lambda_arn=self.auth_events.trigger_function.arn,
             jwks_fetcher=lambda region, pool_id: FAKE_JWKS,
         )
-        callers = {}
+        callers: dict[str, TssCaller] = {}
         if with_runner:
-            callers[isolation.SERVICE_NAME] = runner_role(f"{prefix}-isolation", ACCOUNT_ID)
+            callers[isolation.SERVICE_NAME] = TssCaller(
+                role=runner_role(f"{prefix}-isolation", ACCOUNT_ID),
+                access=("pipeline", "read", "upload"),
+            )
         self.storage = TenantStorage(
             f"{prefix}-tss",
             repo_root=REPO_ROOT,
@@ -179,6 +182,7 @@ class Stack:
             vector_dimensions=1024,
             default_tags=TAGS,
             default_models=DEFAULT_MODELS,
+            upload_origins=["https://example.test"],
             platform_key_arns=[self.database.key.arn, self.alerts.key.arn],
             alarm_topic_arn=self.alerts.topic.arn,
         )
@@ -201,7 +205,7 @@ class Stack:
         if with_runner:
             self.runner = IsolationRunner(
                 f"{prefix}-isolation",
-                role=callers[isolation.SERVICE_NAME],
+                role=callers[isolation.SERVICE_NAME].role,
                 repo_root=REPO_ROOT,
                 region=REGION,
                 account_id=ACCOUNT_ID,
@@ -1015,7 +1019,12 @@ def test_tss_lambda_runs_in_the_vpc_as_database_role_tss() -> Any:
         variables = function["environment"]["variables"]
         assert variables["NAME_PREFIX"] == stack.name_prefix
         assert variables["TENANT_ROLE_ARN"] == f"{ROLE}/{stack.name_prefix}-tenant"
-        assert json.loads(variables["TSS_CALLERS"]) == {"t2-isolation-role-a1b2c3d": "isolation"}
+        assert json.loads(variables["TSS_CALLERS"]) == {
+            "t2-isolation-role-a1b2c3d": {
+                "service": "isolation",
+                "access": ["pipeline", "read", "upload"],
+            }
+        }
         assert variables["AWS_STS_REGIONAL_ENDPOINTS"] == "regional"
 
         policy = _one("aws:iam/rolePolicy:RolePolicy", "t2-tss-role-policy")["policy"]

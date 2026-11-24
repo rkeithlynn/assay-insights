@@ -7,7 +7,9 @@ dependencies = [
     "assay-api",
     "assay-db",
     "assay-infra",
+    "assay-schemas",
     "assay-tss[service,provision,isolation-tests]",
+    "assay-workers",
 ]
 
 [tool.uv]
@@ -19,10 +21,12 @@ python-preference = "only-managed"
 assay-api = { workspace = true }
 assay-db = { workspace = true }
 assay-infra = { workspace = true }
+assay-schemas = { workspace = true }
 assay-tss = { workspace = true }
+assay-workers = { workspace = true }
 
 [tool.uv.workspace]
-members = ["api", "db", "infra", "tss"]
+members = ["api", "db", "infra", "schemas", "tss", "workers"]
 
 [dependency-groups]
 dev = [
@@ -50,7 +54,15 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PTH"]
 exclude = ["*.md"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["assay_api", "assay_db", "assay_infra", "assay_tss", "tests"]
+known-first-party = [
+    "assay_api",
+    "assay_db",
+    "assay_infra",
+    "assay_schemas",
+    "assay_tss",
+    "assay_workers",
+    "tests",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests build fake tokens and signing keys on purpose.
@@ -61,9 +73,14 @@ known-first-party = ["assay_api", "assay_db", "assay_infra", "assay_tss", "tests
 [tool.mypy]
 python_version = "3.14"
 strict = true
-files = ["api", "db", "infra", "scripts", "tests", "tss"]
+files = ["api", "db", "infra", "schemas", "scripts", "tests", "tss", "workers"]
 explicit_package_bases = true
-mypy_path = ["api", "db", "infra", "tss"]
+mypy_path = ["api", "db", "infra", "schemas", "tss", "workers"]
+
+# pypdfium2 ships no type information.
+[[tool.mypy.overrides]]
+module = ["pypdfium2", "pypdfium2.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]

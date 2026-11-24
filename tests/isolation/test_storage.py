@@ -5,8 +5,9 @@ Three groups:
 1. A tenant's TSS-issued credentials work on its own bucket, key, vector index and face
    collection (so an environment where everything is refused cannot pass), and are refused
    on the other tenant's. Run in both directions.
-2. The credentials do only what was asked for (upload cannot read, read cannot write), last
-   15 minutes, cannot start another session, and cannot change the tags the policies match.
+2. The credentials do only what was asked for (upload cannot read, read cannot write, only
+   pipeline reads inbox/ and quarantine/, nothing lists), last 15 minutes, cannot start
+   another session, and cannot change the tags the policies match.
 3. A principal whose own IAM policy allows it (the runner's role) is still refused by the
    tenant role's trust policy and by each tenant's bucket and key policies.
 """
@@ -28,6 +29,7 @@ from assay_tss.policies import BUCKET_TAG, TENANT_TAG, VECTOR_BUCKET_TAG
 from tests.isolation.conftest import (
     FIXTURE_BODY,
     PROBE_TAG,
+    SESSION_POLICY_REFUSAL,
     Env,
     Pair,
     assert_denied,
@@ -110,9 +112,15 @@ def test_session_is_the_tenant_role_tagged_for_one_tenant(env: Env, tenant: Stor
 # --- 1. Own resources work; the other tenant's are refused -----------------------------------
 
 
-def test_own_bucket_is_reachable(tenant: StorageContext) -> None:
-    response = s3(tenant.session(), tenant.region).list_objects_v2(Bucket=tenant.bucket, MaxKeys=1)
+def test_own_bucket_is_reachable_by_key_but_never_listed(
+    tenant: StorageContext, object_key: ObjectKey
+) -> None:
+    """A pipeline session reads by key and may not list (build step 6, decision 16)."""
+    api = s3(tenant.session(), tenant.region)
+    response = api.head_object(Bucket=tenant.bucket, Key=object_key(tenant))
     assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert_denied(lambda: api.list_objects_v2(Bucket=tenant.bucket, MaxKeys=1))
+    assert_denied(lambda: api.list_object_versions(Bucket=tenant.bucket, MaxKeys=1))
 
 
 def test_own_key_is_reachable(tenant: StorageContext) -> None:
@@ -240,7 +248,7 @@ def test_read_access_reads_but_cannot_write(
     existing = object_key(context_a)
     read = resolve(env.tenant_a, StorageAccess.READ)
     api = s3(read.session(), read.region)
-    assert api.list_objects_v2(Bucket=read.bucket, MaxKeys=1)["ResponseMetadata"]
+    assert_denied(lambda: api.list_objects_v2(Bucket=read.bucket, MaxKeys=1))
     assert api.get_object(Bucket=read.bucket, Key=existing)["Body"].read() == FIXTURE_BODY
     assert_denied(
         lambda: api.put_object(
@@ -262,6 +270,58 @@ def test_read_access_reads_but_cannot_write(
             CollectionId=read.face_collection
         )
     )
+
+
+@pytest.mark.parametrize("access", [StorageAccess.READ, StorageAccess.UPLOAD])
+def test_only_pipeline_sessions_read_quarantine(
+    env: Env,
+    resolve: Resolve,
+    context_a: StorageContext,
+    quarantine_key: ObjectKey,
+    access: StorageAccess,
+) -> None:
+    """Condition (c), build step 6: infected files, current or noncurrent, are readable by
+    pipeline sessions only. Shown on the quarantine fixture, an object that exists."""
+    key = quarantine_key(context_a)
+    pipeline = s3(context_a.session(), context_a.region)
+    head = pipeline.head_object(Bucket=context_a.bucket, Key=key)
+    version = head["VersionId"]
+    # The pipeline reads it, by key and by version: the object is there.
+    assert pipeline.get_object(Bucket=context_a.bucket, Key=key, VersionId=version)["Body"].read()
+
+    session = resolve(env.tenant_a, access)
+    api = s3(session.session(), session.region)
+    assert_denied(lambda: api.get_object(Bucket=session.bucket, Key=key))
+    assert_denied(lambda: api.get_object(Bucket=session.bucket, Key=key, VersionId=version))
+    assert_denied(lambda: api.head_object(Bucket=session.bucket, Key=key))
+    assert_denied(lambda: api.get_object_tagging(Bucket=session.bucket, Key=key))
+
+
+@pytest.mark.parametrize("access", [StorageAccess.READ, StorageAccess.UPLOAD])
+def test_only_pipeline_sessions_read_the_inbox(
+    env: Env, resolve: Resolve, context_a: StorageContext, access: StorageAccess
+) -> None:
+    """Condition (c): unscanned uploads are readable by pipeline sessions only.
+
+    The inbox holds no fixture (owner's condition, build step 4), so a refused read cannot
+    be shown on an object that exists. S3 says why it refused instead: a read the session
+    policy does not allow is refused "because no session policy allows the s3:GetObject
+    action", which a missing key never is. The pipeline session's refusal of the same
+    missing key is the control: it must not carry that reason.
+    """
+    key = context_a.inbox_key(uuid.uuid4(), uuid.uuid4())
+    pipeline = s3(context_a.session(), context_a.region)
+    control = assert_denied(lambda: pipeline.get_object(Bucket=context_a.bucket, Key=key))
+    assert SESSION_POLICY_REFUSAL not in control, control
+
+    session = resolve(env.tenant_a, access)
+    api = s3(session.session(), session.region)
+    current = assert_denied(lambda: api.get_object(Bucket=session.bucket, Key=key))
+    assert SESSION_POLICY_REFUSAL in current, current
+    noncurrent = assert_denied(
+        lambda: api.get_object(Bucket=session.bucket, Key=key, VersionId="null")
+    )
+    assert "no session policy allows the s3:GetObjectVersion action" in noncurrent, noncurrent
 
 
 def test_a_tenant_session_cannot_start_another_session(env: Env, pair: Pair) -> None:

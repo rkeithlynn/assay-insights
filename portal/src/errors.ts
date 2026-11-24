@@ -27,6 +27,25 @@ const MESSAGES: Record<string, string> = {
   model_not_available: "That model is not available to your organization.",
   model_not_in_catalog: "That model is not in the catalog or not approved for that job.",
   invalid_range: "Choose a date range of up to 13 months, with the start before the end.",
+  // Build step 6: batches and uploads.
+  batch_already_open: "You already have an open batch. Close or discard it first.",
+  batch_not_open: "That batch is no longer open. Refresh the page.",
+  batch_not_found: "That batch no longer exists. Refresh the page.",
+  not_batch_owner: "Only the admin who opened a batch can change it.",
+  batch_not_ready: "The batch cannot close yet. See the files marked below.",
+  file_not_found: "That file is no longer in the batch. Refresh the page.",
+  unsupported_file_type: "Only PDF files and their JSON companion files can be uploaded.",
+  invalid_file_name: "A file name may not be empty or contain slashes or control characters.",
+  file_too_large: "A PDF may be at most 100 MB and a companion file at most 64 KB.",
+  empty_file: "That file is empty.",
+  duplicate_file_name: "The batch already has a file with that name.",
+  too_many_pdfs: "A batch may hold at most 200 PDFs.",
+  too_many_companion_files: "A batch may hold at most one companion file per PDF.",
+  too_many_files_in_request: "Add at most 50 files at a time.",
+  no_files: "Choose at least one file.",
+  storage_unavailable: "Storage did not respond. Try again in a minute.",
+  pdf_not_available: "This document's PDF is not available to view.",
+  document_not_found: "That document was not found.",
 };
 
 /** Codes after which the user must sign in again. */

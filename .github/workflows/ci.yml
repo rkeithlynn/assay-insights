@@ -70,7 +70,7 @@ jobs:
           uv run pip-audit --strict --disable-pip --require-hashes -r "$RUNNER_TEMP/requirements.txt"
 
       - name: Bandit
-        run: uv run bandit -c pyproject.toml -r api infra db scripts tss
+        run: uv run bandit -c pyproject.toml -r api infra db schemas scripts tss workers
 
   portal:
     runs-on: ubuntu-latest

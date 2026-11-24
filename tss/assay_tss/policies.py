@@ -46,6 +46,9 @@ SESSION_POLICY_MAX_CHARS = 2048
 # --- Actions --------------------------------------------------------------------------
 
 OBJECT_READ = ("s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging")
+# The only prefixes a READ session may read. inbox/ (unscanned) and quarantine/ (infected)
+# are for PIPELINE sessions only.
+READ_PREFIXES = (keys.ORIGINALS_PREFIX, keys.DERIVED_PREFIX, keys.CHAT_PREFIX)
 # DeleteObject only adds a delete marker: the role never gets DeleteObjectVersion.
 OBJECT_WRITE = (
     "s3:PutObject",
@@ -347,16 +350,22 @@ def session_policy(
                 allow(("kms:GenerateDataKey",), key),
             ]
         case StorageAccess.READ:
+            # Never inbox/ or quarantine/: unscanned and infected files are the pipeline's
+            # alone. No listing either.
             statements = [
-                allow(OBJECT_READ, f"{bucket}/*"),
-                allow(BUCKET_LIST, bucket),
+                {
+                    "Effect": "Allow",
+                    "Action": list(OBJECT_READ),
+                    "Resource": [f"{bucket}/{prefix}*" for prefix in READ_PREFIXES],
+                },
                 allow(("kms:Decrypt", *KEY_DESCRIBE), key),
                 allow(VECTOR_READ, index),
             ]
         case StorageAccess.PIPELINE:
+            # Every object, by key, but no listing: the pipeline works from database rows and
+            # scan events only.
             statements = [
                 allow((*OBJECT_READ, *OBJECT_WRITE), f"{bucket}/*"),
-                allow(BUCKET_LIST, bucket),
                 allow((*KEY_USE, *KEY_DESCRIBE), key),
                 allow((*VECTOR_READ, *VECTOR_WRITE), index),
                 allow(FACE_COLLECTION, collection),

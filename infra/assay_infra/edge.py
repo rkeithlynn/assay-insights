@@ -132,12 +132,18 @@ def portal_config(
 
 def content_security_policy(*, region: str, login_domains: Iterable[str]) -> str:
     """Scripts from the portal only. The browser talks to the API (same origin), to the
-    managed login token endpoints, and to Cognito's user API (change password, MFA setup).
+    managed login token endpoints, to Cognito's user API (change password, MFA setup), and
+    (build step 6) to tenant buckets through presigned links: uploads, and step 7's viewer.
+
+    CSP cannot name only the tenant buckets (`<prefix>-t-*` is not a valid source), so the
+    S3 source is every virtual-hosted bucket in the Region (owner decision 11, a known
+    limit). A presigned link reaches one key of one tenant's bucket, for 15 minutes at most.
     """
     connect = [
         "'self'",
         f"https://cognito-idp.{region}.amazonaws.com",
         *sorted(f"https://{d}.auth.{region}.amazoncognito.com" for d in login_domains),
+        f"https://*.s3.{region}.amazonaws.com",
     ]
     directives = {
         "default-src": ["'self'"],

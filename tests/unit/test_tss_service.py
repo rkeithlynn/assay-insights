@@ -22,7 +22,7 @@ from assay_tss.models import (
     StorageStatus,
     TenantStorageProfile,
 )
-from assay_tss.service import Resolver, ServiceSettings
+from assay_tss.service import CallerGrant, Resolver, ServiceSettings
 
 REGION = "us-east-1"
 ACCOUNT = "000000000000"
@@ -30,11 +30,19 @@ PREFIX = "assay-dev"
 TENANT_ROLE = f"arn:aws:iam::{ACCOUNT}:role/assay-dev-tenant"
 TENANT_A = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
 TENANT_B = uuid.UUID("bbbbbbbb-0000-4000-8000-000000000002")
+# A caller allowed every access, so the tests below can ask for any of them.
+API = CallerGrant(service="api", access=frozenset(StorageAccess))
+API_NARROW = CallerGrant(
+    service="api", access=frozenset({StorageAccess.READ, StorageAccess.UPLOAD})
+)
 SETTINGS = ServiceSettings(
     region=REGION,
     name_prefix=PREFIX,
     tenant_role_arn=TENANT_ROLE,
-    callers={"api-task-role-1a2b3c": "api", "worker-role-9z": "worker"},
+    callers={
+        "api-task-role-1a2b3c": API_NARROW,
+        "worker-role-9z": CallerGrant(service="worker", access=frozenset({StorageAccess.PIPELINE})),
+    },
 )
 API_CALLER = f"arn:aws:sts::{ACCOUNT}:assumed-role/api-task-role-1a2b3c/session-1"
 EXPIRATION = dt.datetime(2026, 11, 23, 12, 15, tzinfo=dt.UTC)
@@ -98,7 +106,7 @@ def request(
 
 def test_resolve_assumes_the_tenant_role_for_15_minutes_with_tags_and_source_identity() -> None:
     subject, reader, sts = resolver(profile(TENANT_A), profile(TENANT_B))
-    context = subject.resolve(request(), service="api")
+    context = subject.resolve(request(), caller=API)
 
     assert reader.asked == [TENANT_A]
     [call] = sts.calls
@@ -121,15 +129,15 @@ def test_resolve_assumes_the_tenant_role_for_15_minutes_with_tags_and_source_ide
 
 def test_session_policy_names_the_exact_bucket_key_index_and_collection() -> None:
     subject, _, sts = resolver(profile(TENANT_A), profile(TENANT_B))
-    subject.resolve(request(), service="api")
+    subject.resolve(request(), caller=API)
     policy = json.loads(sts.calls[0]["Policy"])
     resources = {
         r
         for s in policy["Statement"]
         for r in (s["Resource"] if isinstance(s["Resource"], list) else [s["Resource"]])
     }
+    # No bucket ARN: no session may list the bucket.
     assert resources == {
-        "arn:aws:s3:::assay-dev-t-aaaaaaaa",
         "arn:aws:s3:::assay-dev-t-aaaaaaaa/*",
         f"arn:aws:kms:{REGION}:{ACCOUNT}:key/{TENANT_A}",
         f"arn:aws:s3vectors:{REGION}:{ACCOUNT}:bucket/assay-dev-t-aaaaaaaa-vectors/index/documents",
@@ -140,7 +148,7 @@ def test_session_policy_names_the_exact_bucket_key_index_and_collection() -> Non
 
 def test_upload_access_gets_the_narrow_session_policy() -> None:
     subject, _, sts = resolver(profile(TENANT_A))
-    subject.resolve(request(access=StorageAccess.UPLOAD), service="api")
+    subject.resolve(request(access=StorageAccess.UPLOAD), caller=API)
     policy = json.loads(sts.calls[0]["Policy"])
     assert [s["Action"] for s in policy["Statement"]] == [["s3:PutObject"], ["kms:GenerateDataKey"]]
     assert sts.calls[0]["RoleSessionName"] == "t-aaaaaaaa-upload"
@@ -163,7 +171,7 @@ def test_a_refused_assume_role_is_reported_with_its_own_code(
 
     subject = Resolver(SETTINGS, FakeReader(profile(TENANT_A)), RefusingSts())  # type: ignore[arg-type]
     with pytest.raises(service.TenantRoleRefused) as raised:
-        subject.resolve(request(), service="api")
+        subject.resolve(request(), caller=API)
     assert "sts:SetSourceIdentity" in str(raised.value)
 
     with caplog.at_level(logging.INFO):
@@ -178,14 +186,14 @@ def test_a_refused_assume_role_is_reported_with_its_own_code(
 def test_unknown_tenant_gets_nothing() -> None:
     subject, _, sts = resolver(profile(TENANT_B))
     with pytest.raises(service.UnknownTenant):
-        subject.resolve(request(TENANT_A), service="api")
+        subject.resolve(request(TENANT_A), caller=API)
     assert sts.calls == []
 
 
 def test_offboarded_storage_gets_nothing() -> None:
     subject, _, sts = resolver(profile(TENANT_A, status=StorageStatus.OFFBOARDED))
     with pytest.raises(service.StorageNotActive):
-        subject.resolve(request(), service="api")
+        subject.resolve(request(), caller=API)
     assert sts.calls == []
 
 
@@ -208,22 +216,43 @@ def test_a_row_that_does_not_match_the_tenant_is_refused(changes: dict[str, Any]
     reader.rows[TENANT_A] = row
     subject = Resolver(SETTINGS, reader, sts)  # type: ignore[arg-type]
     with pytest.raises(service.StorageProfileInvalid):
-        subject.resolve(request(), service="api")
+        subject.resolve(request(), caller=API)
     assert sts.calls == []
 
 
 def test_source_identity_must_carry_the_callers_own_service() -> None:
     subject, _, sts = resolver(profile(TENANT_A))
     with pytest.raises(service.SourceIdentityMismatch):
-        subject.resolve(request(source="worker.doc-1"), service="api")
+        subject.resolve(request(source="worker.doc-1"), caller=API)
     assert sts.calls == []
+
+
+@pytest.mark.parametrize(
+    ("caller", "access"),
+    [
+        # The API signs upload links and reads originals; it never gets pipeline access.
+        (API_NARROW, StorageAccess.PIPELINE),
+        # The pipeline gets nothing but pipeline access.
+        (
+            CallerGrant(service="api", access=frozenset({StorageAccess.PIPELINE})),
+            StorageAccess.READ,
+        ),
+    ],
+)
+def test_a_caller_gets_only_the_accesses_it_is_granted(
+    caller: CallerGrant, access: StorageAccess
+) -> None:
+    subject, reader, sts = resolver(profile(TENANT_A))
+    with pytest.raises(service.AccessNotAllowed):
+        subject.resolve(request(access=access), caller=caller)
+    assert sts.calls == [] and reader.asked == []
 
 
 # --- Who is calling --------------------------------------------------------------------------
 
 
 def test_caller_service_comes_from_the_iam_role_that_signed_the_request() -> None:
-    assert service.caller_service(API_CALLER, SETTINGS.callers) == "api"
+    assert service.caller_service(API_CALLER, SETTINGS.callers) == API_NARROW
 
 
 @pytest.mark.parametrize(
@@ -247,13 +276,23 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_REGION", REGION)
     monkeypatch.setenv("NAME_PREFIX", PREFIX)
     monkeypatch.setenv("TENANT_ROLE_ARN", TENANT_ROLE)
-    monkeypatch.setenv("TSS_CALLERS", json.dumps({"role-a": "api"}))
+    monkeypatch.setenv(
+        "TSS_CALLERS", json.dumps({"role-a": {"service": "api", "access": ["read", "upload"]}})
+    )
     settings = ServiceSettings.from_env()
     assert settings.account_id == ACCOUNT
-    assert settings.callers == {"role-a": "api"}
-    monkeypatch.setenv("TSS_CALLERS", json.dumps(["role-a"]))
-    with pytest.raises(ValueError, match="TSS_CALLERS"):
-        ServiceSettings.from_env()
+    assert settings.callers == {"role-a": API_NARROW}
+    for bad in (
+        ["role-a"],
+        {"role-a": "api"},
+        {"role-a": {"service": "api"}},
+        {"role-a": {"service": "api", "access": []}},
+        {"role-a": {"service": "api", "access": ["everything"]}},
+        {"role-a": {"service": "api", "access": ["read"], "extra": True}},
+    ):
+        monkeypatch.setenv("TSS_CALLERS", json.dumps(bad))
+        with pytest.raises(ValueError):
+            ServiceSettings.from_env()
 
 
 # --- The Lambda handler -----------------------------------------------------------------------
@@ -294,6 +333,7 @@ def test_handler_returns_a_storage_context() -> None:
     [
         (event(good_body(), user_arn=None), 403, "caller_not_allowed"),
         (event(good_body(source_identity="worker.x")), 403, "source_identity_mismatch"),
+        (event(good_body(access="pipeline")), 403, "access_not_allowed"),
         (event(good_body(tenant_id=str(TENANT_B))), 404, "no_storage_for_tenant"),
         (event(good_body(access="everything")), 400, "invalid_request"),
         (event(good_body(bucket="assay-dev-t-bbbbbbbb")), 400, "invalid_request"),
@@ -356,7 +396,7 @@ def test_client_refuses_plain_http() -> None:
 
 def test_client_parses_the_wire_format(monkeypatch: pytest.MonkeyPatch) -> None:
     subject, _, _ = resolver(profile(TENANT_A))
-    wire = subject.resolve(request(access=StorageAccess.READ), service="api").to_wire()
+    wire = subject.resolve(request(access=StorageAccess.READ), caller=API).to_wire()
     sent: list[bytes] = []
     tss = client()
 

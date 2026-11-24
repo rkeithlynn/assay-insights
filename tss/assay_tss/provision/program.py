@@ -9,7 +9,10 @@ BUILD_SPEC.md section 6, rule 1. Creates, for one business tenant:
   a bucket policy that refuses every principal but the four it names;
 - an S3 Vectors bucket and its one index, encrypted with the tenant key, with a vector
   bucket policy that admits only the tenant role and the provisioning role;
-- a GuardDuty Malware Protection plan for the bucket;
+- a GuardDuty Malware Protection plan for the bucket's `inbox/` prefix only (build step 6,
+  owner decision 9): uploads are scanned; the pipeline's own writes elsewhere are not;
+- CORS for the tenant portal's origin (build step 6): the browser PUTs uploads through
+  presigned links, and step 7's PDF viewer GETs originals the same way;
 - a Rekognition face collection named after the bucket.
 
 Rekognition does not document customer-managed keys for face vectors, so the collection is
@@ -22,7 +25,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from assay_tss import naming, policies
+from assay_tss import keys, naming, policies
 from assay_tss.provision.settings import ProvisionSettings
 
 # Chunk text is stored with each vector but never filtered on. Filterable metadata is
@@ -36,6 +39,14 @@ RETENTION_MODE = "GOVERNANCE"
 # written the way S3 stores it. Objects are encrypted with the tenant key only.
 BLOCKED_ENCRYPTION_TYPES = ("SSE-C",)
 RETENTION_DAYS = 1
+# Only uploads are scanned (owner decision 9, build step 6).
+SCANNED_PREFIXES = (keys.INBOX_PREFIX,)
+# Browser access through presigned links only: the signed headers of an upload, and Range
+# for the viewer. ETag lets the browser confirm an upload.
+CORS_METHODS = ("PUT", "GET")
+CORS_HEADERS = ("content-type", "x-amz-checksum-sha256", "range")
+CORS_EXPOSE = ("ETag",)
+CORS_MAX_AGE_SECONDS = 600
 
 # Stack outputs, read back by the provisioning task.
 OUT_BUCKET = "bucket"
@@ -222,12 +233,28 @@ def tenant_program(settings: ProvisionSettings, tenant_id: uuid.UUID) -> Callabl
 
         # GuardDuty checks the bucket with the scan role when the plan is created, so the
         # bucket's encryption and policy must already allow that role.
+        if s.upload_origins:
+            aws.s3.BucketCorsConfiguration(
+                "bucket-cors",
+                bucket=bucket.id,
+                cors_rules=[
+                    aws.s3.BucketCorsConfigurationCorsRuleArgs(
+                        allowed_methods=list(CORS_METHODS),
+                        allowed_origins=list(s.upload_origins),
+                        allowed_headers=list(CORS_HEADERS),
+                        expose_headers=list(CORS_EXPOSE),
+                        max_age_seconds=CORS_MAX_AGE_SECONDS,
+                    )
+                ],
+                opts=pulumi.ResourceOptions(provider=provider, depends_on=[bucket_policy]),
+            )
+
         aws.guardduty.MalwareProtectionPlan(
             "malware-protection",
             role=s.principals.scan_role_arn,
             protected_resource=aws.guardduty.MalwareProtectionPlanProtectedResourceArgs(
                 s3_bucket=aws.guardduty.MalwareProtectionPlanProtectedResourceS3BucketArgs(
-                    bucket_name=bucket.bucket
+                    bucket_name=bucket.bucket, object_prefixes=list(SCANNED_PREFIXES)
                 )
             ),
             actions=[

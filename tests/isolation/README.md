@@ -37,22 +37,29 @@ Every cross-tenant test runs in both directions (A against B, and B against A).
 
 | File | Shows |
 | --- | --- |
-| `test_storage.py` | A tenant's TSS-issued credentials work on its own bucket, key, vector index and face collection, and are refused on the other tenant's. `UPLOAD` cannot read and `READ` cannot write. Credentials last at most 15 minutes. A tenant session cannot start another session, cannot change key, bucket, vector bucket or collection tags, and cannot invoke the Cognito admin Lambda. |
+| `test_storage.py` | A tenant's TSS-issued credentials work on its own bucket, key, vector index and face collection, and are refused on the other tenant's. `UPLOAD` cannot read and `READ` cannot write. Only `PIPELINE` reads `inbox/` and `quarantine/`, current or noncurrent, and no session lists a bucket (build step 6). Credentials last at most 15 minutes. A tenant session cannot start another session, cannot change key, bucket, vector bucket or collection tags, and cannot invoke the Cognito admin Lambda. |
 | `test_storage.py` (runner probes) | The runner's own role, whose IAM policy *allows* it, still cannot assume the tenant role (trust policy), read, write or tag a tenant bucket (bucket policy), use or tag a tenant key (key policy), read tenant vectors, or invoke the Cognito admin Lambda. |
 | `test_tss_api.py` | The TSS refuses an unsigned request, an unknown tenant, another service's name in the source identity, and any route but `resolve`. |
 | `test_rows.py` | As `app_tenant` with one tenant set, the other tenant's rows cannot be read or inserted, `tenant_storage` cannot be read at all, and with no tenant set nothing is visible. |
 | The provisioning role's probe | The provisioning role cannot read an object that exists, write an object, list object versions, read, query or write vectors, or use the tenant's key directly. It can list keys, which hold IDs only. It may use the key only through S3 Vectors, to create the vector bucket and index (an accepted exception; BUILD_SPEC.md section 6). Three settings calls it is allowed must succeed. |
 
-The tests write one thing: a small fixture object in each test tenant's own bucket
-(`derived/text/00000000-0000-4000-8000-0000000000f1.json`), once, with that tenant's
-credentials. Object Lock keeps it, so later runs find it and write nothing. Every other
-write they attempt must be refused, and every database transaction is rolled back. Tagging
-probes use a tag no policy looks at.
+The tests write two things: two small fixture objects in each test tenant's own bucket,
+once, with that tenant's pipeline credentials, both under the reserved document ID
+(`assay_tss.keys.RESERVED_DOCUMENT_ID`, defined there and nowhere else):
+`keys.isolation_fixture_text_key()` (under `derived/text/`) and, from build step 6,
+`keys.isolation_fixture_quarantine_key()` (under `quarantine/`). Neither is ever in
+`inbox/`. Object Lock keeps them, so later runs find them and write nothing. The API and
+the pipeline refuse the reserved ID: no document is ever created or processed with it.
+Every other write the tests attempt must be refused, and every database transaction is
+rolled back. Tagging probes use a tag no policy looks at.
 
-The fixture object is there because a refused read proves something only for an object
-that exists. S3 answers "no such key" (404) for a missing key to any caller that may list
-the bucket, whatever its right to read. So every read that must be refused is tried on the
-fixture object, and a 404 fails the check.
+The fixture objects are there because a refused read proves something only for an object
+that exists: S3 refuses a missing key too, to any caller that may not list the bucket (and
+since build step 6 no tenant session may). So every read that must be refused is tried on a
+fixture object. The inbox holds no fixture, so its refusals are shown by S3's reason
+instead: a read the session policy does not allow is refused "because no session policy
+allows the s3:GetObject action", which a missing key never is; a pipeline session's
+refusal of the same missing key is the control.
 
 ## Adding a test
 

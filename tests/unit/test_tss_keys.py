@@ -58,6 +58,7 @@ def test_every_key_follows_the_spec_layout() -> None:
     assert ctx.attachment_key(DOC, OTHER, "jpg") == f"originals/{DOC}/attachments/{OTHER}.jpg"
     assert ctx.face_key(OTHER) == f"derived/faces/{OTHER}.png"
     assert ctx.quarantine_key(DOC) == f"quarantine/{DOC}.pdf"
+    assert ctx.quarantine_companion_key(FILE) == f"quarantine/{FILE}.companion.json"
     assert ctx.text_key(DOC) == f"derived/text/{DOC}.json"
     assert ctx.fields_key(DOC) == f"derived/fields/{DOC}.json"
     assert ctx.chat_key(BATCH, OTHER) == f"chat/{BATCH}/{OTHER}.json"
@@ -119,6 +120,77 @@ def test_attachment_extension_is_checked(extension: str) -> None:
 def test_ids_must_be_uuids() -> None:
     with pytest.raises(keys.InvalidKeyPart):
         keys.original_key("../../other-tenant")  # type: ignore[arg-type]
+
+
+# --- The reserved isolation-test document ID ------------------------------------------------
+
+RESERVED = keys.RESERVED_DOCUMENT_ID
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: keys.inbox_key(BATCH, RESERVED),
+        lambda: keys.inbox_key(RESERVED, FILE),
+        lambda: keys.inbox_batch_prefix(RESERVED),
+        lambda: keys.original_key(RESERVED),
+        lambda: keys.companion_key(RESERVED),
+        lambda: keys.attachment_key(RESERVED, OTHER, "jpg"),
+        lambda: keys.attachment_key(DOC, RESERVED, "jpg"),
+        lambda: keys.face_key(RESERVED),
+        lambda: keys.quarantine_key(RESERVED),
+        lambda: keys.quarantine_companion_key(RESERVED),
+        lambda: keys.text_key(RESERVED),
+        lambda: keys.fields_key(RESERVED),
+        lambda: keys.chat_key(RESERVED, OTHER),
+        lambda: context().text_key(RESERVED),
+        lambda: context().inbox_key(BATCH, RESERVED),
+    ],
+)
+def test_no_key_is_ever_built_from_the_reserved_id(build: object) -> None:
+    """The pipeline cannot write under the isolation fixture's ID, whatever it is asked."""
+    with pytest.raises(keys.ReservedId):
+        build()  # type: ignore[operator]
+
+
+def test_the_fixture_keys_are_the_only_keys_with_the_reserved_id() -> None:
+    assert keys.isolation_fixture_text_key() == f"derived/text/{RESERVED}.json"
+    assert keys.isolation_fixture_quarantine_key() == f"quarantine/{RESERVED}.pdf"
+    assert (
+        keys.isolation_fixture_text_key(),
+        keys.isolation_fixture_quarantine_key(),
+    ) == keys.ISOLATION_FIXTURE_KEYS
+    # Never in the inbox (owner's condition, build step 4).
+    assert not any(k.startswith(keys.INBOX_PREFIX) for k in keys.ISOLATION_FIXTURE_KEYS)
+
+
+def test_check_not_reserved() -> None:
+    keys.check_not_reserved(DOC, FILE)
+    with pytest.raises(keys.ReservedId):
+        keys.check_not_reserved(DOC, RESERVED)
+    assert keys.is_reserved(RESERVED) and not keys.is_reserved(DOC)
+
+
+def test_quarantined_companion_files_are_keyed_by_their_file_id() -> None:
+    assert context().quarantine_companion_key(FILE) == f"quarantine/{FILE}.companion.json"
+
+
+@pytest.mark.parametrize(
+    ("key", "parsed"),
+    [
+        (f"inbox/{BATCH}/{FILE}", (BATCH, FILE)),
+        (f"inbox/{BATCH}/{FILE}/", None),
+        (f"inbox/{BATCH}/smith.pdf", None),
+        (f"originals/{DOC}.pdf", None),
+        (f"inbox/{BATCH}/{FILE}".upper(), None),
+        (f"inbox/{BATCH}/{RESERVED}", None),
+        (f"inbox/{RESERVED}/{FILE}", None),
+        (keys.isolation_fixture_quarantine_key(), None),
+        ("", None),
+    ],
+)
+def test_parse_inbox_key(key: str, parsed: tuple[uuid.UUID, uuid.UUID] | None) -> None:
+    assert keys.parse_inbox_key(key) == parsed
 
 
 # --- Names -----------------------------------------------------------------------------------

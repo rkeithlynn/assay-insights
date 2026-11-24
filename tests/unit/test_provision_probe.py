@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError, ConnectTimeoutError
 
+from assay_tss import keys
 from assay_tss.policies import Principals
 from assay_tss.provision import __main__ as entry
 from assay_tss.provision.probe import ALLOWED, DENIED, Check, Probe, attempt, parse_tenants
@@ -42,7 +43,8 @@ SETTINGS = ProvisionSettings(
 )
 # What the role is allowed: three settings calls, and listing keys (keys hold IDs only).
 ALLOWED_CALLS = {"get_bucket_versioning", "describe_key", "get_index", "list_objects_v2"}
-EXISTING_KEY = "derived/text/00000000-0000-4000-8000-0000000000f1.json"
+# The isolation tests' fixture object, the one key the probe finds when it lists.
+EXISTING_KEY = keys.isolation_fixture_text_key()
 LISTING = {"Contents": [{"Key": EXISTING_KEY}]}
 
 

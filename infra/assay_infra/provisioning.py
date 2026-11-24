@@ -177,6 +177,7 @@ TASK_VARIABLES = (
     "DEFAULT_TAGS",
     "DEFAULT_INGEST_MODEL",
     "DEFAULT_QUERY_MODEL",
+    "UPLOAD_ORIGINS",
     "DB_HOST",
     "DB_PORT",
     "DB_NAME",
@@ -804,6 +805,8 @@ class Provisioning(pulumi.ComponentResource):
         default_tags: Mapping[str, str],
         # Profile IDs of the models a tenant starts with (stack config), set at activation.
         default_models: tuple[str, str],
+        # Origins that may use presigned links in a tenant's bucket (build step 6).
+        upload_origins: Sequence[str],
         # Every other KMS key the platform stack creates. The provisioning role is denied
         # tagging them (and the state key, which this component adds itself).
         platform_key_arns: Sequence[pulumi.Input[str]],
@@ -1067,6 +1070,8 @@ class Provisioning(pulumi.ComponentResource):
                 "DEFAULT_TAGS": json.dumps(dict(sorted(default_tags.items()))),
                 "DEFAULT_INGEST_MODEL": default_models[0],
                 "DEFAULT_QUERY_MODEL": default_models[1],
+                # Bucket CORS (build step 6): the tenant portal, which uploads and views.
+                "UPLOAD_ORIGINS": json.dumps(sorted(upload_origins)),
                 "DB_NAME": database_name,
             }
         )

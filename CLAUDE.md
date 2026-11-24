@@ -34,7 +34,8 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6–9 | Not started |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half built** (2026-11-24), on `build-step-6`, not deployed. Second half not started |
+| 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
 
@@ -168,28 +169,38 @@ Step 5 was completed and verified on 2026-11-24:
 
 ### Carried forward to step 6
 
-- **Isolation and storage (step 4 notes):** no file name in any S3 key
-  (`StorageContext.inbox_key(batch_id, file_id)`); move the reserved fixture document ID into
-  `assay_tss.keys`, make the isolation tests import it, refuse it in the pipeline, and test
-  both refusals; work only from database rows and scan events, never from a listing.
-- **New callers need their grants:** the API and the workers become TSS callers (`callers` in
-  `TenantStorage`, `infra/__main__.py`); every pipeline queue goes into `sqs_endpoint_policy`
-  (today it admits only the auth-event trigger); a new platform KMS key goes into
-  `platform_key_arns`; a new alarm passes the alarm topic.
-- **Bucket CORS for browser uploads** reaches existing tenants only when their stacks run
-  again: step 6 needs an "update every tenant" command (step 4 note).
-- **Rule 6:** re-check the AI services opt-out policy and that Bedrock invocation logging is
-  off before any content first goes to Bedrock, Textract or Rekognition.
+Done in the first half of step 6 (see "Step 6, first half" below): inbox keys by opaque file ID;
+the reserved fixture ID in `assay_tss.keys`, imported by the isolation tests and refused by
+the API and the pipeline (tested); no listing anywhere (session policies and a source test);
+the API and the pipeline functions as TSS callers, each with its own accesses; the ingest
+queue in the SQS endpoint's policy; bucket CORS and the "update every tenant" command
+(`scripts/update_tenants.py`); every new alarm on the alarm topic; the new screens in
+`SCREENS`. No new KMS key, so `platform_key_arns` is unchanged.
+
+Still open:
+
+- **Rule 6, before the second half:** re-check the AI services opt-out policy and that Bedrock
+  invocation logging is off before any content first goes to Bedrock or Textract (checked on
+  2026-11-24 for the plan: `optOut` for every service, logging off). The first half sends no
+  content to any AI service.
+- **The worker (owner decision 8, deferred):** before the second half, compare the always-on
+  worker with Step Functions starting one ECS task per document (`runTask.sync`): cost,
+  start-up delay, complexity and every permission each needs. Do not build it before the owner
+  chooses.
+- **Titan Text Embeddings V2 (owner decisions 1 and 2):** called by model ID in us-east-1 (it
+  has no `us.` profile; a named exception to section 2), with an `ai_models` row (job
+  `embed`, migration `0009`) and its price left blank for the owner. Arrives with the second
+  half, when the catalog changes; `seed.py` refuses a catalog with a blank price.
 - **Portal:** add every new screen to `SCREENS` in `portal/e2e/layout.e2e.ts` (and its data
-  to `e2e/fixtures.ts`); use `RowActions` for any row menu; the navigation width follows the
-  longest title (a title such as "Ingestion history" widens it to 218 px), and the rendered
-  check catches one that no longer fits. Run `uv run scripts/check_portal_render.py` after any
-  visible change and look at the screenshots. Not covered by it: the CloudFront CSP.
+  to `e2e/fixtures.ts`); use `RowActions` for any row menu. The navigation is now 218 px
+  ("Ingestion history"). Run `uv run scripts/check_portal_render.py` after any visible change
+  and look at the screenshots. Not covered by it: the CloudFront CSP.
 - **Still to check:** whether Cognito's `amr` claim shows MFA (it could replace the
   pre-token trigger's `AdminGetUser`, step 3 note).
 - **Dependencies:** bump ESLint to 10.15.0 and `typescript-eslint` to 8.74.0 after
   2026-12-07 (dev-only `minimatch` advisory). Raise the `fastapi` and `pydantic` caps
-  deliberately.
+  deliberately. New in step 6: `aws-lambda-powertools` capped below 3.40 and `pypdfium2`
+  below 5.16 (releases younger than two weeks on 2026-11-24).
 - **Before production (unchanged):** VPC flow logs to the Log Archive account; an
   approval-gated break-glass role; a Cognito signing-key rotation needs a `pulumi up`.
 
@@ -211,6 +222,18 @@ views, not to the audit record.
 ## Known limits (owner decisions, build step 5)
 
 These stay as they are into step 6 unless the owner decides otherwise.
+
+- **Inbox objects stay in the bucket** (owner decision 10, build step 6). No lifecycle rule
+  expires them: it would need `s3:PutLifecycleConfiguration`, a setting that can destroy data,
+  for the provisioning role. A PDF moved to `originals/`, an infected file moved to
+  `quarantine/`, a removed file and a discarded batch's files all leave their inbox versions
+  (or a delete marker over them). They are never read again: only pipeline sessions can read
+  `inbox/`, and the pipeline works only from database rows.
+- **The portal's CSP admits every virtual-hosted S3 bucket in the Region**
+  (`https://*.s3.<region>.amazonaws.com`; owner decision 11, build step 6). CSP cannot name
+  only the tenant buckets (`<prefix>-t-*` is not a valid source). The browser reaches a bucket
+  only through a presigned link, which names one key of one tenant's bucket for 15 minutes at
+  most.
 
 - **A sign-out from a session already ended by an MFA reset or a disable is not recorded**:
   the account check refuses the token (`session_revoked`), so `POST /auth/signed-out` answers
@@ -366,7 +389,9 @@ Owner decisions on these rules (2026-11-23):
   Textract included), last updated 2026-11-24 04:37:58 UTC, and Bedrock model invocation
   logging is off (`aws bedrock get-model-invocation-logging-configuration` returns no
   configuration). The policy ID is the owner's; a member account cannot list the policies
-  attached to it. Check both again before any content first goes to Bedrock, Textract or
+  attached to it. Checked again on 2026-11-24 for the step 6 plan: the same effective policy,
+  last updated 2026-11-24 04:37:58 UTC, and no invocation logging configuration. Check both
+  again before any content first goes to Bedrock, Textract or
   Rekognition:
   `aws organizations describe-effective-policy --policy-type AISERVICES_OPT_OUT_POLICY --profile pilar-dev`.
 
@@ -778,8 +803,8 @@ assets/     Logo and favicon SVGs
   database, not by listing keys. BUILD_SPEC.md section 6 has the layout.
 - **For step 6 (pipeline): ignore the isolation tests' fixture object.** Each test tenant's
   bucket holds one object the isolation tests wrote, kept by Object Lock:
-  `derived/text/00000000-0000-4000-8000-0000000000f1.json` (`FIXTURE_DOCUMENT` in
-  `tests/isolation/conftest.py`). It is outside `inbox/`, so no upload or scan event ever
+  `derived/text/<reserved ID>.json` (since build step 6: `assay_tss.keys.RESERVED_DOCUMENT_ID`,
+  `keys.isolation_fixture_text_key()`). It is outside `inbox/`, so no upload or scan event ever
   refers to it, but it sits under `derived/text/`, which the pipeline writes. That document
   ID is reserved: it has no `documents` row and must never get one. The pipeline must work
   only from database rows and scan events, never from a listing of `derived/` or any other
@@ -1122,3 +1147,138 @@ Audit-trail follow-ups (owner decisions and conditions, 2026-11-24):
   (`mfa_not_enabled`, 409, otherwise). No IAM change: the function's role already had
   `AdminGetUser`; the API may now ask it for one more operation, which changes nothing in
   Cognito.
+
+### Step 6, first half (batches, uploads, scan routing, fingerprint, ingestion history)
+
+Owner decisions on the plan (2026-11-24), by number:
+
+- **1, 2.** Titan Text Embeddings V2 by model ID in us-east-1, a named exception to section 2
+  (it has no `us.` inference profile: `aws bedrock list-inference-profiles`, 2026-11-24). It
+  goes into `ai_models` with job `embed`, price left blank for the owner (second half).
+  **The three Claude profiles were test-called by `scripts/seed.py` on 2026-11-23** (section
+  7b's "verify each profile with a test call before seeding"), successfully.
+- **3.** A GuardDuty scan event is a pipeline job message for rule 4: the tenant comes from
+  the database (`pipeline.tenant_for_upload`, a registered upload's key), and the event's
+  bucket must be that tenant's bucket (`naming.bucket_name`), or the event is refused.
+- **4 (changed on the owner's later answer), e.** The API never reads `inbox/`. The scan
+  Lambda (a PIPELINE caller) validates each companion file once its scan is clean: size
+  checked first, at most 64 KB read, strict JSON with a depth limit, never logged, errors by
+  key only. Close reads only the database and waits for every file's scan result.
+- **5.** A batch open 24 hours is closed by the sweeper anyway: files never uploaded and
+  companions with no PDF are dropped (`removed`), a PDF whose companion is invalid fails
+  (`companion_invalid`), files still waiting for a scan wait on in the closed batch.
+- **6, 7.** New table `batch_files`; extra routes `GET /batches` (status and mine filters; any
+  tenant member, for the history's batch filter) and `DELETE /batches/{id}/files/{file_id}`.
+- **8.** Deferred: the worker is not built (see "Carried forward to step 6").
+- **9.** Each tenant's malware protection plan covers `inbox/` only (`object_prefixes`).
+- **10, 11.** Known limits: inbox objects stay; the CSP admits every S3 bucket in the Region.
+- **12, a.** The upload link signs `Content-Length`, `Content-Type` and
+  `x-amz-checksum-sha256` (botocore puts all three in `X-Amz-SignedHeaders`; checked offline).
+  The scan step checks the stored version's size and SHA-256 against the registration again.
+- **13.** The fingerprint step holds a password-protected PDF (`on_hold`, `pdf_encrypted`;
+  PDFium's `FPDF_ERR_PASSWORD`), whatever GuardDuty said.
+- **14, g.** A `failed` document is not an original; a duplicate is within one tenant only
+  (advisory lock on tenant and hash, an explicit tenant condition, row-level security, and a
+  partial unique index per tenant).
+- **15.** Status `discarded` (a discarded batch's documents, a removed file's), left out of
+  both history views unless the status filter asks for it. A quarantined document keeps its
+  status when its batch is discarded.
+- **16.** Each TSS caller gets only its accesses (`TSS_CALLERS`: role name -> service and
+  accesses; `api`: read and upload; `scan`, `pipeline`, `sweeper`: pipeline). No session may
+  list a bucket.
+- **17.** No database CHECK for the reserved ID (the literal would be written a second time).
+- **18.** Textract and Bedrock will be called with the worker's own role and bytes (second
+  half); Rekognition only with tenant credentials (step 8).
+- **19.** A suspended tenant's documents get no new execution: the starter drops the job and
+  the document stays eligible; the sweeper queues it again once the tenant is active (within
+  about 20 minutes). Executions already running finish.
+
+Conditions, and where each is met:
+
+- **a.** Limits: 100 MB a PDF, 64 KB a companion file, 200 PDFs and 200 companion files a
+  batch, 50 files a registration request, names up to 255 characters, `.pdf` and `.json`
+  only (`assay_db.batches`). Signed headers as in 12. A stored size or hash that differs fails
+  the file (`mismatch`, `size_mismatch` or `checksum_mismatch`) and its PDF.
+- **b.** The first decisive scan result pins `batch_files.version_id`; fingerprint downloads,
+  hashes and copies that version only. A later version's event is logged and ignored
+  (`later_version_ignored`). Tested: `test_only_the_version_that_scanned_clean_is_ever_used`.
+- **c.** READ sessions read `originals/`, `derived/` and `chat/` only; UPLOAD writes `inbox/`
+  only; only PIPELINE reads `inbox/` and `quarantine/`. Isolation tests: a quarantine fixture
+  (`keys.isolation_fixture_quarantine_key()`) read current and by version; the inbox by S3's
+  AccessDenied reason (see the notes). `pdf-url` refuses anything whose key is not the
+  context's `original_key`.
+- **d.** A registered file with no scan result 30 minutes after registration: `scan_timeout`
+  and `on_hold` if it is in the bucket (HEAD by key), with an ERROR line (alarm); otherwise
+  `not_uploaded`. An event for an unregistered inbox key: ERROR line (alarm), ignored.
+- **f.** `GET /documents/{id}/pdf-url`: a `viewed` event with the user's ID and email, the IP
+  address (`CloudFront-Viewer-Address`) and the browser; five minutes; `response-content-type`
+  `application/pdf`, `inline`. `platform.ingestion_events_v` leaves `viewed` events out.
+- **h.** `api_task_role()` creates the role outside `ApiService` with an alias to its old
+  parent. The preview (2026-11-24) shows no change to it at all.
+- **i.** Titan's price stays blank (second half).
+
+How it works (first half):
+
+- `POST /batches/{id}/files` -> a `batch_files` row per file, a `documents` row per PDF (its ID
+  is the file's ID), and a presigned PUT to `inbox/{batch_id}/{file_id}`, signed with an
+  UPLOAD context. GuardDuty scans it -> EventBridge -> the scan Lambda records the result.
+  Close (or a scan result for a closed batch) makes clean PDFs `processing` and sends one job
+  each to the ingest queue after the commit. The starter starts one execution per document,
+  named after it. Fingerprint (step 4) hashes, checks duplicates, holds encrypted PDFs and
+  copies the PDF and its companion to `originals/`. The execution then ends; documents stay
+  `processing` until the second half adds steps 5 to 10.
+- Statuses: `uploaded` (batch open), `scanning` (closed, a scan still due), `processing`
+  (queued or running), `quarantined`, `on_hold`, `failed`, `duplicate`, `discarded`.
+- Database: migration `0008` (see its docstring). The two `pipeline` functions belong to the
+  new NOLOGIN role `pipeline_lookup`, which the bootstrap creates; they answer with tenant
+  IDs only and read no file name and no `tenant_storage`.
+- Shared logic is in `assay_db.batches` (the API and the pipeline both use it); the
+  companion validator in `assay_schemas.companion`; the pipeline in `workers/assay_workers`
+  (one Lambda image, `workers/lambda.Dockerfile`, four handlers); the infrastructure in
+  `infra/assay_infra/pipeline.py`.
+
+Deploy order (owner): `pulumi up`; `uv run scripts/migrate.py` (bootstrap creates
+`pipeline_lookup`, then 0008); `uv run scripts/update_tenants.py` (CORS, malware plan
+prefix: needed before any browser upload); `uv run scripts/run_isolation.py ...`; browser
+checks.
+
+Notes:
+
+- **Not yet verified in AWS:** a browser PUT through the presigned link into a bucket with
+  Object Lock default retention (the signed `x-amz-checksum-sha256` should satisfy Object
+  Lock's integrity requirement); that S3 includes "because no session policy allows the
+  s3:GetObject action" in the AccessDenied message for a same-account request through the
+  gateway endpoint (AWS documents it for same-account requests, and not for denials by a VPC
+  endpoint policy; `test_only_pipeline_sessions_read_the_inbox` relies on it, with a pipeline
+  session's refusal of the same missing key as the control); that the scan event's
+  `versionId` names the version scanned (AWS's example has it; it does not say so in words).
+- **GuardDuty's event** (user guide, read 2026-11-24): `detail.s3ObjectDetails.bucketName`,
+  `objectKey`, `versionId`; `detail.scanResultDetails.scanResultStatus` is
+  `NO_THREATS_FOUND`, `THREATS_FOUND`, `UNSUPPORTED`, `ACCESS_DENIED` or `FAILED`.
+  `ACCESS_DENIED` with `statusReasons` `OBJECT_E_TAG_CHANGED` means a newer version will be
+  scanned, so the scan Lambda waits for that one.
+- **A missing key answers 403** to every tenant session now (none may list), so `head()` in
+  the pipeline treats 403 and 404 alike as "not there".
+- **Portal:** Upload, Ingestion history (tenant), Ingestion history (all tenants). The
+  navigation is 218 px on both portals. At 1280 px the ten sortable columns did not fit
+  legibly, so the histories use Cloudscape's full-page table, compact times (no year when it
+  is this year's; full time in the row's panel), short IDs in the master view (first 8
+  characters; full in the panel), and column preferences: Size and Duration are hidden by
+  default on a window narrower than 1600 px, kept in the row's panel, and every column can be
+  shown (kept per browser in localStorage). Audit history's Time column drops the year when
+  it is this year's, so the table still fits at 1280 px beside the wider navigation.
+- **Browser-check files:** `uv run scripts/make_test_files.py` writes synthetic ones to
+  `.test-files/` (git-ignored). **The EICAR test file is never written by a script or kept in
+  the repository**: Windows Defender removes it on save, and a copy in the tree would flag
+  the repository. For the quarantine check the owner makes it by hand in one folder excluded
+  from Defender for the length of the check, then deletes the folder and removes the
+  exclusion (commands in the build step 6 hand-over). Never exclude a broader path.
+- **`update_tenants.py` is guarded** (owner's request, 2026-11-24): each tenant is previewed
+  first and updated only if every planned change is in `update.ALLOWED_CHANGES` (build step
+  6: create `bucket-cors`; update `malware-protection`'s `protectedResource`), then with
+  `--target` set to exactly those resources. Anything else refuses that tenant. `--preview`
+  applies nothing; `--tenant <id>` limits it to one tenant. Change `ALLOWED_CHANGES` with
+  the tenant program.
+- **Every Dockerfile that runs `uv export --locked`** copies `schemas/` and `workers/`
+  manifests, and `.dockerignore` admits both packages; every image rebuilds on the first
+  `pulumi up` of step 6.

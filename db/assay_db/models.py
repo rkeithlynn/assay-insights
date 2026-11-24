@@ -68,6 +68,22 @@ DOCUMENT_STATUSES = (
     "on_hold",
     "failed",
     "duplicate",
+    # The document's batch was discarded, or its file removed, before it was processed
+    # (owner decision, build step 6). Left out of the ingestion history unless asked for.
+    "discarded",
+)
+# An upload in a batch (build step 6): one PDF or one companion file.
+BATCH_FILE_KINDS = ("pdf", "companion")
+BATCH_FILE_STATUSES = (
+    "registered",  # waiting for the upload and its scan result
+    "clean",  # scanned clean; size and checksum match the registration; companion valid
+    "invalid",  # a companion file that scanned clean but fails validation
+    "mismatch",  # stored size or checksum differs from the registration
+    "infected",  # THREATS_FOUND: moved to quarantine/
+    "unsupported",  # UNSUPPORTED, ACCESS_DENIED or FAILED scan: held
+    "scan_timeout",  # uploaded, but no scan result arrived in time: held
+    "not_uploaded",  # registered, but nothing arrived before the link expired
+    "removed",  # taken out of the batch by the admin, or dropped when it closed
 )
 PART_METHODS = ("rule", "model")
 LABEL_SOURCES = ("companion",)
@@ -277,6 +293,19 @@ class Document(Base):
         Index("ix_documents_tenant_id_received_at", "tenant_id", text("received_at DESC")),
         Index("ix_documents_tenant_id_batch_id", "tenant_id", "batch_id"),
         Index("ix_documents_tenant_id_sha256", "tenant_id", "sha256"),
+        # The master view's history across tenants, newest first.
+        Index("ix_documents_received_at", text("received_at DESC")),
+        # One original per hash within a tenant. Duplicates point at it (duplicate_of), and a
+        # failed original no longer counts. Backs up the fingerprint step's advisory lock.
+        Index(
+            "uq_documents_tenant_id_sha256_original",
+            "tenant_id",
+            "sha256",
+            unique=True,
+            postgresql_where=text(
+                "sha256 IS NOT NULL AND duplicate_of IS NULL AND status <> 'failed'"
+            ),
+        ),
     )
 
     id: Mapped[uuid_pk]
@@ -300,6 +329,68 @@ class Document(Base):
     received_at: Mapped[tstz_now]
     completed_at: Mapped[tstz | None]
     pipeline_version: Mapped[str | None]
+    # When the document became eligible and was sent to the ingest queue (build step 6). The
+    # sweeper queues it again if no execution started within a while.
+    queued_at: Mapped[tstz | None]
+
+
+class BatchFile(Base):
+    """One upload in a batch (build step 6): a PDF or a companion file.
+
+    `id` is the upload's opaque file ID, the last part of its inbox key; a PDF's document has
+    the same ID. `file_name` is kept here only, never in an S3 key. `size_bytes` and `sha256`
+    are what the browser registered; the presigned link signs both, and the scan step checks
+    the stored object against them. `version_id` is the object version that scanned clean:
+    every later read, hash and copy uses it.
+    """
+
+    __tablename__ = "batch_files"
+    __table_args__ = (
+        one_of("kind", BATCH_FILE_KINDS),
+        one_of("status", BATCH_FILE_STATUSES),
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256"),
+        CheckConstraint("size_bytes > 0", name="size_bytes"),
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("s3_key"),
+        child_of("batches", "batch_id"),
+        child_of("documents", "document_id"),
+        child_of("users", "registered_by"),
+        Index("ix_batch_files_tenant_id_batch_id", "tenant_id", "batch_id"),
+        # Pairing is by base name, so a batch holds one live file per kind and base name.
+        Index(
+            "uq_batch_files_live_name",
+            "tenant_id",
+            "batch_id",
+            "kind",
+            "base_name",
+            unique=True,
+            postgresql_where=text("status <> 'removed'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = tenant_fk()
+    batch_id: Mapped[uuid_col]
+    kind: Mapped[str]
+    file_name: Mapped[str]
+    # The name without its extension, lower-cased: how a companion finds its PDF.
+    base_name: Mapped[str]
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str]
+    s3_key: Mapped[str]
+    content_type: Mapped[str]
+    status: Mapped[str] = mapped_column(server_default="registered")
+    error_code: Mapped[str | None]
+    # For an invalid companion: [{code, key}], naming keys only, never values.
+    error_detail: Mapped[json_doc | None]
+    # GuardDuty's scanResultStatus, as received.
+    scan_result: Mapped[str | None]
+    version_id: Mapped[str | None]
+    scanned_at: Mapped[tstz | None]
+    # The PDF's document. For a companion file, set when the batch closes and pairs it.
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    registered_by: Mapped[uuid_col]
+    registered_at: Mapped[tstz_now]
 
 
 class DocumentEvent(Base):

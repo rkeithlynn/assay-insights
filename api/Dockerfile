@@ -11,7 +11,9 @@ COPY pyproject.toml uv.lock ./
 COPY infra/pyproject.toml infra/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
 COPY api/pyproject.toml api/pyproject.toml
+COPY schemas/pyproject.toml schemas/pyproject.toml
 COPY tss/pyproject.toml tss/pyproject.toml
+COPY workers/pyproject.toml workers/pyproject.toml
 # Locked, hash-checked, wheels only: nothing is compiled and nothing comes from the host.
 RUN uv export --locked --package assay-api --no-dev --no-emit-workspace --no-header \
         --format requirements-txt -o /tmp/requirements.txt \
@@ -19,6 +21,11 @@ RUN uv export --locked --package assay-api --no-dev --no-emit-workspace --no-hea
         --require-hashes --only-binary :all: -r /tmp/requirements.txt
 COPY db/assay_db /out/assay_db
 COPY api/assay_api /out/assay_api
+COPY schemas/assay_schemas /out/assay_schemas
+# The TSS client only (build step 6): types, object keys and the SigV4 client. Never the
+# service, the policies' users or the provisioning code.
+RUN install -d -m 0755 /out/assay_tss
+COPY tss/assay_tss/__init__.py tss/assay_tss/client.py tss/assay_tss/keys.py      tss/assay_tss/models.py tss/assay_tss/naming.py /out/assay_tss/
 
 # RDS CA bundle for TLS verify-full, checked against the checksum pinned in db/Dockerfile.
 FROM scratch AS rds-ca

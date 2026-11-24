@@ -15,6 +15,7 @@ from assay_infra.api import (
     TASK_VARIABLES,
     ApiService,
     TaskEnvironmentError,
+    api_task_role,
     check_environment,
     container_definitions,
     task_role_policy,
@@ -32,6 +33,9 @@ COGNITO_ADMIN_API = f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:cognito-admi
 STATE_MACHINE = f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:provision"
 CERTIFICATE = f"arn:aws:acm:{REGION}:{ACCOUNT_ID}:certificate/validated"
 ALARM_TOPIC = f"arn:aws:sns:{REGION}:{ACCOUNT_ID}:alarms"
+TSS_ENDPOINT = f"https://tss.execute-api.{REGION}.amazonaws.com/v1"
+INGEST_QUEUE = f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:ingest"
+INGEST_QUEUE_URL = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT_ID}/ingest"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DNS = build_dns("example.test", "example.test", "admin.example.test")
@@ -61,6 +65,7 @@ def _stack(prefix: str) -> tuple[Auth, ApiService, list[tuple[str, str]]]:
         jwks_fetcher=fake_fetch,
     )
     logs = aws.s3.Bucket(f"{prefix}-logs-standin")
+    task_role = api_task_role(f"{prefix}-api", account_id=ACCOUNT_ID, region=REGION)
     api = ApiService(
         f"{prefix}-api",
         repo_root=REPO_ROOT,
@@ -72,6 +77,10 @@ def _stack(prefix: str) -> tuple[Auth, ApiService, list[tuple[str, str]]]:
         auth=auth,
         cognito_admin_function_arn=COGNITO_ADMIN_API,
         state_machine_arn=STATE_MACHINE,
+        task_role=task_role,
+        tss_endpoint_url=TSS_ENDPOINT,
+        ingest_queue_arn=INGEST_QUEUE,
+        ingest_queue_url=INGEST_QUEUE_URL,
         certificate_arn=CERTIFICATE,
         access_logs_bucket=logs.bucket,
         access_logs_ready=logs,
@@ -362,12 +371,15 @@ def test_load_balancer_is_internal_https_only_and_reached_only_through_the_edge(
 
 
 @pulumi.runtime.test
-def test_task_role_has_exactly_its_three_permissions() -> Any:
+def test_task_role_has_exactly_its_four_permissions() -> Any:
+    """Build step 6 added the fourth: sending ingest jobs. The TSS's invoke grant is attached
+    by TenantStorage (assay_infra.tss), with the API's caller access."""
     auth, api, _ = _stack("a3")
 
     def check(_: list[Any]) -> None:
         policy = json.loads(_one("aws:iam/rolePolicy:RolePolicy", "a3-api-task-policy")["policy"])
-        connect, cognito, provision = policy["Statement"]
+        connect, cognito, provision, ingest = policy["Statement"]
+        assert (ingest["Action"], ingest["Resource"]) == ("sqs:SendMessage", INGEST_QUEUE)
         assert connect["Action"] == "rds-db:connect"
         prefix = f"arn:aws:rds-db:{REGION}:{ACCOUNT_ID}:dbuser:cluster-MOCKRESOURCEID/"
         assert connect["Resource"] == [
@@ -499,8 +511,19 @@ def test_a_complete_environment_passes() -> None:
 
 
 def test_task_role_policy_sorts_resources() -> None:
-    policy = json.loads(task_role_policy(["b", "a"], cognito_admin_function="f", state_machine="m"))
+    policy = json.loads(
+        task_role_policy(
+            ["b", "a"], cognito_admin_function="f", state_machine="m", ingest_queue="q"
+        )
+    )
     assert policy["Statement"][0]["Resource"] == ["a", "b"]
+    # Build step 6: the ingest queue, send only.
+    assert policy["Statement"][-1] == {
+        "Sid": "QueueIngestJobs",
+        "Effect": "Allow",
+        "Action": "sqs:SendMessage",
+        "Resource": "q",
+    }
 
 
 # --- Helpers ------------------------------------------------------------------------------

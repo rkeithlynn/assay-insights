@@ -81,15 +81,15 @@ def handle(event: dict[str, Any], settings: ServiceSettings, resolver: Resolver)
     identity = (event.get("requestContext") or {}).get("identity") or {}
     fields: dict[str, Any] = {"route": "resolve"}
     try:
-        service = caller_service(identity.get("userArn"), settings.callers)
-        fields["service"] = service
+        caller = caller_service(identity.get("userArn"), settings.callers)
+        fields["service"] = caller.service
         request = ResolveRequest.model_validate_json(_body(event))
         fields |= {
             "tenant_id": str(request.tenant_id),
             "access": request.access.value,
             "source_identity": request.source_identity,
         }
-        context = resolver.resolve(request, service=service)
+        context = resolver.resolve(request, caller=caller)
     except ValidationError as exc:
         log.warning("invalid request", extra=fields | {"errors": exc.error_count()})
         return _response(400, {"error": "invalid_request"})

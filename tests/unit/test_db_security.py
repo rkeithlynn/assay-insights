@@ -24,6 +24,7 @@ from assay_db.roles import (
     AUTH_EVENT_RECORDER,
     LOGIN_ROLES,
     MIGRATOR,
+    PIPELINE_LOOKUP,
     PLATFORM_READER,
     PLATFORM_VIEW_OWNER,
     PLATFORM_WRITER,
@@ -84,6 +85,8 @@ EXPECTED_PRIVILEGES: dict[str, dict[str, set[str]]] = {
     PLATFORM_VIEW_OWNER: {},
     # Owns auth_events.record() (migration 0004); column-level SELECT and UPDATE on users.
     AUTH_EVENT_RECORDER: {"audit_log": {INS}},
+    # Owns the two lookups in schema pipeline (migration 0008); column-level SELECT only.
+    PIPELINE_LOOKUP: {},
     MIGRATOR: {},  # owner; checked separately
 }
 
@@ -130,7 +133,7 @@ def test_every_table_except_ai_models_has_tenant_id_and_forced_rls(db: TestDb) -
         ).fetchall()
     tables = {r[0]: r[1:] for r in rows}
     assert set(tables) == {*TENANT_TABLES, "ai_models"}
-    assert len(TENANT_TABLES) == 23
+    assert len(TENANT_TABLES) == 24
     for name, (rls, forced, has_tenant_id, policies) in tables.items():
         if name == "ai_models":
             assert not has_tenant_id

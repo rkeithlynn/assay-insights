@@ -7,8 +7,12 @@
 !db/assay_db/**
 !api/pyproject.toml
 !api/assay_api/**
+!schemas/pyproject.toml
+!schemas/assay_schemas/**
 !tss/pyproject.toml
 !tss/assay_tss/**
+!workers/pyproject.toml
+!workers/assay_workers/**
 !tests/__init__.py
 !tests/isolation/**
 **/__pycache__

@@ -32,15 +32,23 @@ s3.get_object(Bucket=ctx.bucket, Key=ctx.text_key(document_id))
 - The source identity is `<service>.<job>`. The TSS takes the service from the caller's
   IAM role and refuses a request that claims another one.
 - Credentials last 15 minutes. Ask for a new context when `ctx.expired()` is true.
-- A caller needs three things, all in `infra/assay_infra/tss.py`: an entry in the
-  `callers` argument (which gives it `execute-api:Invoke` and its service name), and a
-  network path to the `execute-api` endpoint.
+- A caller needs an entry in the `callers` argument of `TenantStorage` (a `TssCaller`: its
+  role and the accesses it may ask for), which gives it `execute-api:Invoke`, its service name
+  and its accesses (`TSS_CALLERS`), and a network path to the `execute-api` endpoint. The TSS
+  refuses any other access (`access_not_allowed`).
+- No access may list a bucket: callers work from database rows and scan events.
 
 | Access | Allows |
 | --- | --- |
 | `UPLOAD` | Put new objects under `inbox/` only (for presigned upload links) |
-| `READ` | Read objects and query vectors |
-| `PIPELINE` | Read and write objects and vectors; use the face collection |
+| `READ` | Read objects under `originals/`, `derived/` and `chat/` (never `inbox/` or `quarantine/`), and query vectors |
+| `PIPELINE` | Read and write every object, by key, and vectors; use the face collection |
+
+| Caller (service) | Accesses |
+| --- | --- |
+| `api` (the API's task role) | `UPLOAD`, `READ` |
+| `scan`, `pipeline`, `sweeper` (the pipeline's Lambdas) | `PIPELINE` |
+| `isolation` (the isolation test runner, development stacks only) | all three |
 
 ## Who can do what to a tenant's storage
 

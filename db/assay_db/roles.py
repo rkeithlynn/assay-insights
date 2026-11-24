@@ -41,6 +41,11 @@ PLATFORM_VIEW_OWNER = "platform_view_owner"
 # Cannot sign in. Owns auth_events.record(), the SECURITY DEFINER function audit_writer
 # calls to record a sign-in or password reset (migration 0004).
 AUTH_EVENT_RECORDER = "auth_event_recorder"
+# Cannot sign in. Owns the two SECURITY DEFINER functions in schema `pipeline` that the
+# pipeline (as app_tenant) calls before it knows a tenant (migration 0008): the tenant of a
+# registered upload's key, and the tenants with batch housekeeping to do. Column-level
+# SELECT only; it reads no tenant_storage and no file names.
+PIPELINE_LOOKUP = "pipeline_lookup"
 
 LOGIN_ROLES: tuple[str, ...] = (
     MIGRATOR,
@@ -50,7 +55,7 @@ LOGIN_ROLES: tuple[str, ...] = (
     AUDIT_WRITER,
     TSS,
 )
-NOLOGIN_ROLES: tuple[str, ...] = (PLATFORM_VIEW_OWNER, AUTH_EVENT_RECORDER)
+NOLOGIN_ROLES: tuple[str, ...] = (PLATFORM_VIEW_OWNER, AUTH_EVENT_RECORDER, PIPELINE_LOOKUP)
 # Roles migrator may hand objects to (ALTER ... OWNER TO), without inheriting anything.
 OWNER_ROLES: tuple[str, ...] = NOLOGIN_ROLES
 ALL_ROLES: tuple[str, ...] = LOGIN_ROLES + NOLOGIN_ROLES

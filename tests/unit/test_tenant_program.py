@@ -44,6 +44,7 @@ SETTINGS = ProvisionSettings(
     vector_dimensions=1024,
     default_tags={"app": "assay-insights", "env": "dev"},
     work_dir=Path("unused"),
+    upload_origins=("https://portal.example.test",),
 )
 BUCKET = naming.bucket_name(PREFIX, TENANT)
 VECTOR_BUCKET = naming.vector_bucket_name(PREFIX, TENANT)
@@ -87,6 +88,7 @@ def test_program_creates_exactly_the_tenants_resources(
         ),
         "bucket-object-lock": "aws:s3/bucketObjectLockConfiguration:BucketObjectLockConfiguration",
         "bucket-policy": "aws:s3/bucketPolicy:BucketPolicy",
+        "bucket-cors": "aws:s3/bucketCorsConfiguration:BucketCorsConfiguration",
         "vector-bucket": "aws:s3/vectorsVectorBucket:VectorsVectorBucket",
         "vector-bucket-policy": "aws:s3/vectorsVectorBucketPolicy:VectorsVectorBucketPolicy",
         "vector-index": "aws:s3/vectorsIndex:VectorsIndex",
@@ -207,8 +209,28 @@ def test_face_collection_and_malware_protection(
     assert inputs(resources, "face-collection")["collectionId"] == BUCKET
     plan = inputs(resources, "malware-protection")
     assert plan["role"] == PRINCIPALS.scan_role_arn
-    assert plan["protectedResource"] == {"s3Bucket": {"bucketName": BUCKET}}
+    # Uploads only (owner decision 9, build step 6).
+    assert plan["protectedResource"] == {
+        "s3Bucket": {"bucketName": BUCKET, "objectPrefixes": ["inbox/"]}
+    }
     assert plan["actions"] == [{"taggings": [{"status": "ENABLED"}]}]
+
+
+def test_bucket_cors_admits_only_the_portal_and_the_signed_headers(
+    resources: dict[str, tuple[str, dict[str, Any]]],
+) -> None:
+    """Build step 6: the browser PUTs uploads (and, from step 7, GETs originals) through
+    presigned links. Nothing else: no other origin, method or header."""
+    cors = inputs(resources, "bucket-cors")
+    assert cors["corsRules"] == [
+        {
+            "allowedMethods": ["PUT", "GET"],
+            "allowedOrigins": ["https://portal.example.test"],
+            "allowedHeaders": ["content-type", "x-amz-checksum-sha256", "range"],
+            "exposeHeaders": ["ETag"],
+            "maxAgeSeconds": 600,
+        }
+    ]
 
 
 def test_every_taggable_resource_carries_the_tenant_id(

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,21 @@ _ERROR_LINE = re.compile(r"^\s*(?:error|Error):\s*(.+)$", re.MULTILINE)
 
 class StackError(RuntimeError):
     """The tenant's stack did not converge. The message is short and safe to record."""
+
+
+@dataclass(frozen=True)
+class PlannedChange:
+    """One resource a preview would change. `diffs` names the changed top-level inputs."""
+
+    urn: str
+    name: str
+    type: str
+    op: str
+    diffs: tuple[str, ...] = ()
+
+
+# Preview steps that change nothing.
+UNCHANGED_OPS = frozenset({"same", "read"})
 
 
 @dataclass(frozen=True)
@@ -131,6 +146,44 @@ class StackRunner:
         except auto.CommandError as exc:
             raise StackError(summarise(exc)) from exc
         return {str(op): count for op, count in result.change_summary.items()}
+
+    def plan(self, tenant_id: uuid.UUID) -> list[PlannedChange]:
+        """Every change `up` would make, resource by resource (a preview: changes nothing)."""
+        changes: list[PlannedChange] = []
+
+        def collect(event: auto.EngineEvent) -> None:
+            pre = event.resource_pre_event
+            if pre is None:
+                return
+            meta = pre.metadata
+            op = str(meta.op.value if hasattr(meta.op, "value") else meta.op)
+            if op in UNCHANGED_OPS:
+                return
+            changes.append(
+                PlannedChange(
+                    urn=meta.urn,
+                    name=meta.urn.rsplit("::", 1)[-1],
+                    type=meta.type,
+                    op=op,
+                    diffs=tuple(sorted(meta.diffs or ())),
+                )
+            )
+
+        try:
+            self._stack(tenant_id).preview(color="never", on_event=collect)
+        except auto.CommandError as exc:
+            raise StackError(summarise(exc)) from exc
+        return changes
+
+    def apply(self, tenant_id: uuid.UUID, urns: Sequence[str]) -> StackOutputs:
+        """`up` limited to these resources (`--target`): nothing else can change."""
+        try:
+            stack = self._stack(tenant_id)
+            stack.up(on_output=self._log_line, color="never", target=list(urns))
+            outputs = stack.outputs()
+        except auto.CommandError as exc:
+            raise StackError(summarise(exc)) from exc
+        return self._outputs(outputs)
 
     @staticmethod
     def _outputs(outputs: Mapping[str, Any]) -> StackOutputs:

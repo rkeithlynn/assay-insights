@@ -249,9 +249,12 @@ def test_csp_allows_scripts_only_from_the_portal() -> None:
     directives = dict(d.split(" ", 1) for d in csp.split("; "))
     assert directives["script-src"] == "'self'"
     assert directives["object-src"] == "'none'"
+    # Build step 6: presigned upload (and, from step 7, view) links to tenant buckets, by
+    # their regional virtual-hosted names (owner decision 11).
     assert directives["connect-src"] == (
         "'self' https://cognito-idp.us-east-1.amazonaws.com "
-        "https://a.auth.us-east-1.amazoncognito.com https://b.auth.us-east-1.amazoncognito.com"
+        "https://a.auth.us-east-1.amazoncognito.com https://b.auth.us-east-1.amazoncognito.com "
+        "https://*.s3.us-east-1.amazonaws.com"
     )
 
 

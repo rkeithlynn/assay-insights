@@ -244,8 +244,11 @@ def test_session_policy_names_only_this_tenants_resources(access: StorageAccess)
         for resource in as_list(statement["Resource"]):
             assert resource != "*"
             assert a.bucket in resource or resource == a.kms_key_arn
-            # The only wildcard is "every object in this bucket" (or under inbox/).
-            assert "*" not in resource.removesuffix("/*").removesuffix(f"/{keys.INBOX_PREFIX}*")
+            # The only wildcard is "every object in this bucket" or under one fixed prefix.
+            trimmed = resource.removesuffix("/*")
+            for prefix in (keys.INBOX_PREFIX, *policies.READ_PREFIXES):
+                trimmed = trimmed.removesuffix(f"/{prefix}*")
+            assert "*" not in trimmed
 
 
 @pytest.mark.parametrize("access", list(StorageAccess))
@@ -276,6 +279,52 @@ def test_read_access_cannot_write_or_reach_faces() -> None:
     allowed = set().union(*(actions(s) for s in policy["Statement"]))
     assert not allowed & {*policies.OBJECT_WRITE, *policies.VECTOR_WRITE, "kms:GenerateDataKey"}
     assert not any(a.startswith("rekognition:") for a in allowed)
+
+
+def test_read_access_reads_only_originals_derived_and_chat() -> None:
+    """Condition (c), build step 6: unscanned (inbox/) and infected (quarantine/) objects, in any
+    version, are readable by pipeline sessions only."""
+    a = profile(TENANT_A)
+    policy = policies.session_policy(StorageAccess.READ, a, account_id=ACCOUNT)
+    object_resources = {
+        r
+        for s in policy["Statement"]
+        if set(actions(s)) & set(policies.OBJECT_READ)
+        for r in as_list(s["Resource"])
+    }
+    bucket = f"arn:aws:s3:::{a.bucket}"
+    assert object_resources == {f"{bucket}/originals/*", f"{bucket}/derived/*", f"{bucket}/chat/*"}
+    for resource in object_resources:
+        assert not resource.startswith((f"{bucket}/inbox", f"{bucket}/quarantine", f"{bucket}/*"))
+
+
+@pytest.mark.parametrize("access", list(StorageAccess))
+def test_no_session_may_list_the_bucket(access: StorageAccess) -> None:
+    """The pipeline and the API work from database rows and scan events, never a listing."""
+    policy = policies.session_policy(access, profile(TENANT_A), account_id=ACCOUNT)
+    allowed = set().union(*(actions(s) for s in policy["Statement"]))
+    # ListMultipartUploadParts lists one upload's parts, not the bucket.
+    assert not {a for a in allowed if a.startswith("s3:ListBucket")}
+    resources = {r for s in policy["Statement"] for r in as_list(s["Resource"])}
+    assert f"arn:aws:s3:::{profile(TENANT_A).bucket}" not in resources
+
+
+def test_only_pipeline_access_reads_inbox_and_quarantine() -> None:
+    a = profile(TENANT_A)
+    bucket = f"arn:aws:s3:::{a.bucket}"
+    for access in StorageAccess:
+        policy = policies.session_policy(access, a, account_id=ACCOUNT)
+        reads = {
+            r
+            for s in policy["Statement"]
+            if set(actions(s)) & {"s3:GetObject", "s3:GetObjectVersion"}
+            for r in as_list(s["Resource"])
+        }
+        if access is StorageAccess.PIPELINE:
+            assert reads == {f"{bucket}/*"}
+        else:
+            assert f"{bucket}/*" not in reads
+            assert not any(r.startswith((f"{bucket}/inbox", f"{bucket}/quarantine")) for r in reads)
 
 
 def test_pipeline_access_reaches_the_exact_index_and_collection() -> None:

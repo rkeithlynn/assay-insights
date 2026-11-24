@@ -44,7 +44,20 @@ const SCREENS: Screen[] = [
     },
   },
   { id: "tenant-admin-settings", persona: "tenant-admin", path: "/settings", ready: "Claude Sonnet" },
+  { id: "tenant-admin-upload", persona: "tenant-admin", path: "/upload", ready: "garcia-package.json" },
+  { id: "tenant-admin-ingestion", persona: "tenant-admin", path: "/ingestion", ready: "application-package-1.pdf" },
+  {
+    id: "tenant-admin-ingestion-detail",
+    persona: "tenant-admin",
+    path: "/ingestion",
+    ready: "application-package-1.pdf",
+    setup: async (page) => {
+      await page.getByRole("link", { name: "application-package-1.pdf" }).click();
+      await page.getByRole("dialog").getByText("Fingerprint").waitFor();
+    },
+  },
   { id: "tenant-user-home", persona: "tenant-user", path: "/", ready: "Welcome, Ada Lovelace" },
+  { id: "tenant-user-ingestion", persona: "tenant-user", path: "/ingestion", ready: "application-package-1.pdf" },
   { id: "master-admin-tenants", persona: "master-admin", path: "/tenants", ready: "Northwind Credit" },
   {
     id: "master-admin-tenant-detail",
@@ -67,8 +80,20 @@ const SCREENS: Screen[] = [
     },
   },
   { id: "master-admin-audit", persona: "master-admin", path: "/audit", ready: "session_started", audit: true },
+  { id: "master-admin-ingestion", persona: "master-admin", path: "/ingestion", ready: "Northwind Credit" },
+  {
+    id: "master-admin-ingestion-detail",
+    persona: "master-admin",
+    path: "/ingestion",
+    ready: "Northwind Credit",
+    setup: async (page) => {
+      await page.getByRole("row").nth(1).click();
+      await page.getByRole("dialog").getByText("Fingerprint").waitFor();
+    },
+  },
   { id: "master-user-tenants", persona: "master-user", path: "/tenants", ready: "Northwind Credit" },
   { id: "master-user-audit", persona: "master-user", path: "/audit", ready: "session_started", audit: true },
+  { id: "master-user-ingestion", persona: "master-user", path: "/ingestion", ready: "Northwind Credit" },
 ];
 
 // Cloudscape draws the banner logo at most 32 px high (24 px below 688 px wide).

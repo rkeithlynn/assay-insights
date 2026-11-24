@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import pulumi
@@ -33,6 +34,33 @@ from assay_tss import policies
 from assay_tss.naming import tenant_pattern
 
 TSS_DB_USER = "tss"  # assay_db.roles.TSS
+
+
+@dataclass(frozen=True)
+class TssCaller:
+    """A role that may call `resolve`, and the accesses it may ask for (build step 6).
+
+    The TSS refuses any other access (assay_tss.service.AccessNotAllowed): the API, for
+    example, never gets pipeline credentials, so it can never read inbox/ or quarantine/.
+    """
+
+    role: aws.iam.Role
+    access: Sequence[str]
+
+
+def caller_grants(names: Mapping[str, str], callers: Mapping[str, TssCaller]) -> str:
+    """`TSS_CALLERS` (assay_tss.service.parse_callers): role name -> service and accesses.
+
+    `names` maps each service to its role's name (an Output resolved by the caller).
+    """
+    return _json(
+        {
+            names[service]: {"service": service, "access": sorted(set(caller.access))}
+            for service, caller in sorted(callers.items())
+        }
+    )
+
+
 DOCKERFILE = "tss/Dockerfile"
 IMAGE_TREES = ("db/assay_db", "tss/assay_tss")
 
@@ -365,8 +393,9 @@ class TenantStorage(pulumi.ComponentResource):
         break_glass_principal_arn: str,
         # The SNS topic alarms notify (assay_infra.alerts).
         alarm_topic_arn: pulumi.Input[str],
-        # Service name -> the IAM role allowed to call `resolve` under that name.
-        callers: Mapping[str, aws.iam.Role],
+        # Service name -> the IAM role allowed to call `resolve` under that name, and the
+        # accesses it may ask for.
+        callers: Mapping[str, TssCaller],
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -442,12 +471,12 @@ class TenantStorage(pulumi.ComponentResource):
             aws_profile=aws_profile,
             opts=child,
         )
-        # IAM role name -> service name, as assay_tss.service.ServiceSettings reads it.
+        # IAM role name -> service name and accesses, as assay_tss.service reads it.
         caller_names: pulumi.Input[str] = "{}"
         if callers:
             caller_names = pulumi.Output.all(
-                **{service: role.name for service, role in callers.items()}
-            ).apply(lambda names: _json({n: service for service, n in sorted(names.items())}))
+                **{service: caller.role.name for service, caller in callers.items()}
+            ).apply(lambda names: caller_grants(names, callers))
         self.function = aws.lambda_.Function(
             f"{name}-fn",
             name=name,
@@ -485,7 +514,7 @@ class TenantStorage(pulumi.ComponentResource):
 
         # --- Private API -----------------------------------------------------------------
         endpoint = network.interface_endpoints["execute-api"]
-        caller_arns = [role.arn for role in callers.values()]
+        caller_arns = [caller.role.arn for caller in callers.values()]
         self.api = aws.apigateway.RestApi(
             f"{name}-api",
             name=name,
@@ -604,10 +633,10 @@ class TenantStorage(pulumi.ComponentResource):
             "https://", self.api.id, f".execute-api.{region}.amazonaws.com/", self.stage.stage_name
         )
 
-        for service, role in callers.items():
+        for service, caller in callers.items():
             aws.iam.RolePolicy(
                 f"{name}-caller-{service}",
-                role=role.id,
+                role=caller.role.id,
                 policy=self.api.execution_arn.apply(invoke_policy),
                 opts=child,
             )

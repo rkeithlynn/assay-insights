@@ -7,9 +7,13 @@ The state machine passes everything in the environment:
 - `PROVISION_REQUEST`: the execution's request, as JSON;
 - `PROVISION_ERROR`: for `fail`, the error name Step Functions reported.
 
-A third command, `probe`, is not part of provisioning: `scripts/run_isolation.py` runs the
-task with it to show what this role cannot do with tenant data (`PROBE_TENANTS`, a
-comma-separated list of tenant IDs; see `probe.py`).
+Two more commands are not part of provisioning:
+
+- `probe`: `scripts/run_isolation.py` runs the task with it to show what this role cannot do
+  with tenant data (`PROBE_TENANTS`, a comma-separated list of tenant IDs; see `probe.py`);
+- `update`: `scripts/update_tenants.py` runs it to apply the tenant stack program again to
+  every active tenant (or those in `UPDATE_TENANTS`), allowing only the changes listed in
+  `update.ALLOWED_CHANGES`; `UPDATE_APPLY=false` previews only (see `update.py`).
 
 Exits 0 on success and 1 on failure, so the execution's status shows the result.
 """
@@ -28,10 +32,12 @@ from assay_tss.provision.probe import Probe, parse_tenants
 from assay_tss.provision.settings import ProvisionSettings
 from assay_tss.provision.stack import StackRunner, prepare_pulumi_home
 from assay_tss.provision.task import Provisioner, ProvisioningFailed, ProvisionRequest
+from assay_tss.provision.update import parse_apply, run_update
+from assay_tss.provision.update import parse_tenants as parse_update_tenants
 
 APPLICATION_NAME = "assay-provision"
 DB_USER = "platform_writer"  # assay_db.roles.PLATFORM_WRITER
-COMMANDS = ("provision", "fail", "probe")
+COMMANDS = ("provision", "fail", "probe", "update")
 _STANDARD = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
 
 
@@ -75,6 +81,12 @@ def main() -> int:
     if command == "probe":
         return run_probe(log)
     prepare_pulumi_home(os.environ)
+    if command == "update":
+        settings = ProvisionSettings.from_env()
+        engine = iam_engine(DbTarget.from_env(), DB_USER, application_name=APPLICATION_NAME)
+        only = parse_update_tenants(os.environ.get("UPDATE_TENANTS", ""))
+        apply = parse_apply(os.environ.get("UPDATE_APPLY", ""))
+        return run_update(settings, engine, StackRunner(settings), only, apply=apply)
     request = ProvisionRequest.model_validate_json(os.environ["PROVISION_REQUEST"])
     settings = ProvisionSettings.from_env()
     engine = iam_engine(DbTarget.from_env(), DB_USER, application_name=APPLICATION_NAME)

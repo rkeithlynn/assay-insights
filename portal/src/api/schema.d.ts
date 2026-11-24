@@ -21,6 +21,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/ingestion": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ingestion History */
+        get: operations["ingestion_history_api_admin_ingestion_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ingestion/{document_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ingestion Detail */
+        get: operations["ingestion_detail_api_admin_ingestion__document_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/tenants": {
         parameters: {
             query?: never;
@@ -193,6 +227,147 @@ export interface paths {
         put?: never;
         /** Signed Out */
         post: operations["signed_out_api_auth_signed_out_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Batches */
+        get: operations["list_batches_api_batches_get"];
+        put?: never;
+        /** Open Batch */
+        post: operations["open_batch_api_batches_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{batch_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Batch */
+        get: operations["get_batch_api_batches__batch_id__get"];
+        put?: never;
+        post?: never;
+        /** Discard Batch */
+        delete: operations["discard_batch_api_batches__batch_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{batch_id}/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Close Batch
+         * @description Refused with 409 `batch_not_ready` while anything blocks it; GET the batch to see what.
+         */
+        post: operations["close_batch_api_batches__batch_id__close_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{batch_id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Register Files */
+        post: operations["register_files_api_batches__batch_id__files_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{batch_id}/files/{file_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove File */
+        delete: operations["remove_file_api_batches__batch_id__files__file_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Documents */
+        get: operations["list_documents_api_documents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Document */
+        get: operations["get_document_api_documents__document_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}/pdf-url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pdf Url */
+        get: operations["pdf_url_api_documents__document_id__pdf_url_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -443,6 +618,85 @@ export interface components {
             /** Profile Id */
             profile_id: string;
         };
+        /** BatchIn */
+        BatchIn: {
+            /** Name */
+            name?: string | null;
+        };
+        /** BatchList */
+        BatchList: {
+            /** Batches */
+            batches: components["schemas"]["BatchSummary"][];
+        };
+        /** BatchOut */
+        BatchOut: {
+            /** Closed At */
+            closed_at: string | null;
+            /** Closes By */
+            closes_by: string | null;
+            /** Files */
+            files: components["schemas"]["FileOut"][];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Mine */
+            mine: boolean;
+            /** Name */
+            name: string | null;
+            /**
+             * Opened At
+             * Format: date-time
+             */
+            opened_at: string;
+            /** Opened By */
+            opened_by: string;
+            /** Pdf Count */
+            pdf_count: number;
+            /** Problems */
+            problems: components["schemas"]["BatchProblem"][];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "open" | "closed" | "discarded";
+        };
+        /** BatchProblem */
+        BatchProblem: {
+            /** Code */
+            code: string;
+            /** File Id */
+            file_id: string | null;
+        };
+        /** BatchSummary */
+        BatchSummary: {
+            /** Closed At */
+            closed_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Mine */
+            mine: boolean;
+            /** Name */
+            name: string | null;
+            /**
+             * Opened At
+             * Format: date-time
+             */
+            opened_at: string;
+            /** Opened By */
+            opened_by: string;
+            /** Pdf Count */
+            pdf_count: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "open" | "closed" | "discarded";
+        };
         /** CatalogModel */
         CatalogModel: {
             /**
@@ -461,10 +715,298 @@ export interface components {
             /** Profile Id */
             profile_id: string;
         };
+        /** DocumentDetail */
+        DocumentDetail: {
+            /**
+             * Batch Id
+             * Format: uuid
+             */
+            batch_id: string;
+            /** Batch Name */
+            batch_name: string | null;
+            /** Completed At */
+            completed_at: string | null;
+            /** Duplicate Of */
+            duplicate_of: string | null;
+            /** Duration Seconds */
+            duration_seconds: number | null;
+            /** Error Code */
+            error_code: string | null;
+            /** Events */
+            events: components["schemas"]["DocumentEventOut"][];
+            /** File Name */
+            file_name: string;
+            /** Forms Found */
+            forms_found: number;
+            /** Has Companion */
+            has_companion: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Page Count */
+            page_count: number | null;
+            /** Parts */
+            parts: components["schemas"]["DocumentPartOut"][];
+            /** Pdf Available */
+            pdf_available: boolean;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Size Bytes */
+            size_bytes: number | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "uploaded" | "scanning" | "processing" | "ready" | "needs_review" | "quarantined" | "on_hold" | "failed" | "duplicate" | "discarded";
+            /** Uploaded By */
+            uploaded_by: string;
+        };
+        /** DocumentEventOut */
+        DocumentEventOut: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Error Code */
+            error_code: string | null;
+            /** Status */
+            status: string;
+            /** Step */
+            step: string;
+            /** Viewer */
+            viewer: string | null;
+        };
+        /** DocumentPage */
+        DocumentPage: {
+            /** Documents */
+            documents: components["schemas"]["DocumentRow"][];
+            /**
+             * End
+             * Format: date-time
+             */
+            end: string;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /**
+             * Start
+             * Format: date-time
+             */
+            start: string;
+            /** Total */
+            total: number;
+        };
+        /** DocumentPartOut */
+        DocumentPartOut: {
+            /** Confidence */
+            confidence: number | null;
+            /** End Page */
+            end_page: number;
+            /** Form Type */
+            form_type: string;
+            /** Method */
+            method: string;
+            /** Start Page */
+            start_page: number;
+        };
+        /** DocumentRow */
+        DocumentRow: {
+            /**
+             * Batch Id
+             * Format: uuid
+             */
+            batch_id: string;
+            /** Batch Name */
+            batch_name: string | null;
+            /** Completed At */
+            completed_at: string | null;
+            /** Duration Seconds */
+            duration_seconds: number | null;
+            /** Error Code */
+            error_code: string | null;
+            /** File Name */
+            file_name: string;
+            /** Forms Found */
+            forms_found: number;
+            /** Has Companion */
+            has_companion: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Page Count */
+            page_count: number | null;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Size Bytes */
+            size_bytes: number | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "uploaded" | "scanning" | "processing" | "ready" | "needs_review" | "quarantined" | "on_hold" | "failed" | "duplicate" | "discarded";
+            /** Uploaded By */
+            uploaded_by: string;
+        };
+        /** FileIn */
+        FileIn: {
+            /** Name */
+            name: string;
+            /** Sha256 */
+            sha256: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
+        /** FileOut */
+        FileOut: {
+            /** Document Id */
+            document_id: string | null;
+            /** Error Code */
+            error_code: string | null;
+            /** Errors */
+            errors: components["schemas"]["FileProblem"][];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "pdf" | "companion";
+            /** Matched */
+            matched: boolean;
+            /** Name */
+            name: string;
+            /**
+             * Registered At
+             * Format: date-time
+             */
+            registered_at: string;
+            /** Scanned At */
+            scanned_at: string | null;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Status */
+            status: string;
+        };
+        /** FileProblem */
+        FileProblem: {
+            /** Code */
+            code: string;
+            /** Key */
+            key?: string | null;
+        };
+        /** FilesIn */
+        FilesIn: {
+            /** Files */
+            files: components["schemas"]["FileIn"][];
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** IngestionDetail */
+        IngestionDetail: {
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Events */
+            events: components["schemas"]["IngestionEvent"][];
+        };
+        /** IngestionEvent */
+        IngestionEvent: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Error Code */
+            error_code: string | null;
+            /** Status */
+            status: string;
+            /** Step */
+            step: string;
+        };
+        /** IngestionPage */
+        IngestionPage: {
+            /** Documents */
+            documents: components["schemas"]["IngestionRow"][];
+            /**
+             * End
+             * Format: date-time
+             */
+            end: string;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /**
+             * Start
+             * Format: date-time
+             */
+            start: string;
+            /** Total */
+            total: number;
+        };
+        /** IngestionRow */
+        IngestionRow: {
+            /**
+             * Batch Id
+             * Format: uuid
+             */
+            batch_id: string;
+            /** Completed At */
+            completed_at: string | null;
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Duration Seconds */
+            duration_seconds: number | null;
+            /** Error Code */
+            error_code: string | null;
+            /** Forms Found */
+            forms_found: number;
+            /** Has Companion */
+            has_companion: boolean;
+            /** Page Count */
+            page_count: number | null;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Size Bytes */
+            size_bytes: number | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "uploaded" | "scanning" | "processing" | "ready" | "needs_review" | "quarantined" | "on_hold" | "failed" | "duplicate" | "discarded";
+            /**
+             * Tenant Id
+             * Format: uuid
+             */
+            tenant_id: string;
+            /** Tenant Name */
+            tenant_name: string;
         };
         /** InviteIn */
         InviteIn: {
@@ -513,6 +1055,37 @@ export interface components {
             id: string;
             /** Name */
             name: string;
+        };
+        /** PdfLink */
+        PdfLink: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Url */
+            url: string;
+        };
+        /** RegisteredFile */
+        RegisteredFile: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "pdf" | "companion";
+            /** Name */
+            name: string;
+            upload: components["schemas"]["UploadOut"];
+        };
+        /** RegisteredFiles */
+        RegisteredFiles: {
+            /** Files */
+            files: components["schemas"]["RegisteredFile"][];
         };
         /** SelectionIn */
         SelectionIn: {
@@ -608,6 +1181,26 @@ export interface components {
             /** Users */
             users: number;
         };
+        /** UploadOut */
+        UploadOut: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Headers */
+            headers: {
+                [key: string]: string;
+            };
+            /**
+             * Method
+             * @default PUT
+             * @constant
+             */
+            method: "PUT";
+            /** Url */
+            url: string;
+        };
         /**
          * UserChange
          * @description Change the role, or disable or enable the user. At least one field.
@@ -696,6 +1289,77 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["AuditPage"];
                     "text/csv": string;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingestion_history_api_admin_ingestion_get: {
+        parameters: {
+            query?: {
+                from?: string | null;
+                to?: string | null;
+                tenant_id?: string | null;
+                status?: ("uploaded" | "scanning" | "processing" | "ready" | "needs_review" | "quarantined" | "on_hold" | "failed" | "duplicate" | "discarded")[] | null;
+                batch_id?: string | null;
+                sort?: "received" | "-received" | "tenant" | "-tenant" | "batch" | "-batch" | "document" | "-document" | "pages" | "-pages" | "size" | "-size" | "companion" | "-companion" | "status" | "-status" | "forms" | "-forms" | "duration" | "-duration";
+                page?: number;
+                page_size?: number;
+                format?: "json" | "csv";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestionPage"];
+                    "text/csv": string;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingestion_detail_api_admin_ingestion__document_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestionDetail"];
                 };
             };
             /** @description Validation Error */
@@ -1023,6 +1687,329 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_batches_api_batches_get: {
+        parameters: {
+            query?: {
+                status?: ("open" | "closed" | "discarded") | null;
+                mine?: boolean;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    open_batch_api_batches_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_batch_api_batches__batch_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    discard_batch_api_batches__batch_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    close_batch_api_batches__batch_id__close_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    register_files_api_batches__batch_id__files_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                batch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FilesIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegisteredFiles"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_file_api_batches__batch_id__files__file_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                batch_id: string;
+                file_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_documents_api_documents_get: {
+        parameters: {
+            query?: {
+                from?: string | null;
+                to?: string | null;
+                status?: ("uploaded" | "scanning" | "processing" | "ready" | "needs_review" | "quarantined" | "on_hold" | "failed" | "duplicate" | "discarded")[] | null;
+                batch_id?: string | null;
+                sort?: "received" | "-received" | "batch" | "-batch" | "file_name" | "-file_name" | "pages" | "-pages" | "size" | "-size" | "companion" | "-companion" | "status" | "-status" | "forms" | "-forms" | "duration" | "-duration" | "uploaded_by" | "-uploaded_by";
+                page?: number;
+                page_size?: number;
+                format?: "json" | "csv";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentPage"];
+                    "text/csv": string;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_document_api_documents__document_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pdf_url_api_documents__document_id__pdf_url_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PdfLink"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

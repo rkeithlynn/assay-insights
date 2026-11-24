@@ -22,6 +22,8 @@ def environment(**overrides: str) -> dict[str, str]:
         "DB_CA_BUNDLE": "/opt/rds-ca/global-bundle.pem",
         "COGNITO_ADMIN_FUNCTION": "arn:aws:lambda:us-east-1:000000000000:function:cognito-admin",
         "PROVISIONING_STATE_MACHINE_ARN": "arn:aws:states:us-east-1:000000000000:stateMachine:p",
+        "TSS_ENDPOINT_URL": "https://tss.execute-api.us-east-1.amazonaws.com/v1",
+        "INGEST_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/000000000000/ingest",
     }
     for kind in ("tenant", "platform"):
         settings = make_issuer(kind).settings

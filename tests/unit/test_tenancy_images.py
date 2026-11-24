@@ -146,6 +146,8 @@ def test_every_dockerfile_copies_every_workspace_manifest() -> None:
         "tss/Dockerfile",
         "tss/provision.Dockerfile",
         "tests/isolation/Dockerfile",
+        "api/lambda.Dockerfile",
+        "workers/lambda.Dockerfile",
     ):
         text = (REPO_ROOT / path).read_text(encoding="utf-8")
         for member in members:
@@ -195,9 +197,13 @@ settings = ProvisionSettings(
     },
     backend_url=f"file://{state}",
     secrets_provider="passphrase",
+    upload_origins=("https://portal.example.test",),
 )
-changes = StackRunner(settings).preview(uuid.UUID("7f3a91c2-0000-4000-8000-000000000001"))
-print(json.dumps({"uid": os.getuid(), "changes": changes}))
+tenant = uuid.UUID("7f3a91c2-0000-4000-8000-000000000001")
+runner = StackRunner(settings)
+changes = runner.preview(tenant)
+planned = sorted([c.name, c.op] for c in runner.plan(tenant))
+print(json.dumps({"uid": os.getuid(), "changes": changes, "planned": planned}))
 """
 
 
@@ -237,8 +243,15 @@ def test_task_previews_the_tenant_stack_offline_on_a_read_only_filesystem(
     )
     result = last_json(output)
     assert result["uid"] == 10001
-    # The stack, the provider and the tenant's 14 resources; nothing else, nothing changed.
-    assert result["changes"] == {"create": 16}
+    # The stack, the provider and the tenant's 15 resources (the CORS rule since build step
+    # 6); nothing else, nothing changed.
+    assert result["changes"] == {"create": 17}
+    # The update command's preview (assay_tss.provision.update) sees each resource and its
+    # operation through the engine's events.
+    planned = {name: op for name, op in result["planned"]}
+    assert planned["bucket-cors"] == "create"
+    assert planned["malware-protection"] == "create"
+    assert len(planned) >= 15
 
 
 @requires_docker
@@ -289,6 +302,7 @@ TASK_ENVIRONMENT = {
     "DEFAULT_TAGS": '{"app":"assay-insights"}',
     "DEFAULT_INGEST_MODEL": "us.example.ingest-v1:0",
     "DEFAULT_QUERY_MODEL": "us.example.query-v1",
+    "UPLOAD_ORIGINS": '["https://portal.example.test"]',
 }
 
 
@@ -465,3 +479,48 @@ def test_ops_image_runs_the_consumer_and_the_seed_without_fastapi(ops_image: str
     assert result["bundle"] is True
     assert result["fastapi"] is False
     assert "unknown command" in result["seed"]["error"]
+
+
+# --- Build step 6: the pipeline's Lambda image ------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def workers_image() -> Iterator[str]:
+    yield from _build("workers/lambda.Dockerfile")
+
+
+@requires_docker
+def test_workers_image_runs_every_handler_as_lambdas_user(workers_image: str) -> None:
+    """Every pipeline handler imports as uid 993 on a read-only filesystem; PDFium works; the
+    image has the TSS client and nothing of the service or the provisioning code; and the
+    reserved document ID is refused before anything is reached (no network here)."""
+    code = (
+        "import importlib.util, io, json, os\n"
+        "import pypdfium2\n"
+        "from assay_workers import scan, starter, steps, sweeper\n"
+        "from assay_tss import keys\n"
+        "pdf = pypdfium2.PdfDocument.new(); pdf.new_page(612, 792)\n"
+        "buf = io.BytesIO(); pdf.save(buf); pdf.close()\n"
+        "opened = pypdfium2.PdfDocument(buf.getvalue())\n"
+        "reserved = str(keys.RESERVED_DOCUMENT_ID)\n"
+        "refused = steps.handle(\n"
+        "    {'step': 'fingerprint', 'tenant_id': reserved, 'document_id': reserved}, None)\n"
+        "print(json.dumps({'uid': os.getuid(), 'pages': len(opened),\n"
+        "    'bundle': os.access(os.environ['DB_CA_BUNDLE'], os.R_OK),\n"
+        "    'service': importlib.util.find_spec('assay_tss.service') is not None,\n"
+        "    'provision': importlib.util.find_spec('assay_tss.provision') is not None,\n"
+        "    'pulumi': importlib.util.find_spec('pulumi') is not None,\n"
+        "    'fastapi': importlib.util.find_spec('fastapi') is not None,\n"
+        "    'refused': refused}))\n"
+    )
+    result = lambda_python(workers_image, code)
+    assert result["uid"] == 993
+    assert result["pages"] == 1
+    assert result["bundle"] is True
+    assert (result["service"], result["provision"], result["pulumi"], result["fastapi"]) == (
+        False,
+        False,
+        False,
+        False,
+    )
+    assert result["refused"] == {"outcome": "refused"}

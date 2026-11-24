@@ -72,6 +72,8 @@ def _environment() -> dict[str, str]:
         "DB_NAME": "assay",
         "COGNITO_ADMIN_FUNCTION": "cognito-admin-api",
         "PROVISIONING_STATE_MACHINE_ARN": "arn:aws:states:us-east-1:000000000000:stateMachine:p",
+        "TSS_ENDPOINT_URL": "https://tss.execute-api.us-east-1.amazonaws.com/v1",
+        "INGEST_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/000000000000/ingest",
     }
     for kind in ("tenant", "platform"):
         settings = make_issuer(kind).settings

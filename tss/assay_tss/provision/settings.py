@@ -40,6 +40,9 @@ class ProvisionSettings:
     # set when the tenant is activated. Always set in the task; None only in tests that
     # never activate a tenant.
     default_models: DefaultModels | None = None
+    # Origins allowed to PUT uploads and GET originals through presigned links (bucket CORS):
+    # the tenant portal, from stack config `tenantHost` (build step 6).
+    upload_origins: tuple[str, ...] = ()
     # Extra arguments for the AWS provider. Empty in the task; the image test uses it to
     # run a preview with no network.
     provider_args: Mapping[str, Any] = field(default_factory=dict)
@@ -61,6 +64,13 @@ class ProvisionSettings:
         tags = json.loads(env["DEFAULT_TAGS"])
         if not isinstance(tags, dict):
             raise ValueError("DEFAULT_TAGS must be a JSON object")
+        origins = json.loads(env["UPLOAD_ORIGINS"])
+        if not (
+            isinstance(origins, list)
+            and origins
+            and all(isinstance(o, str) and o.startswith("https://") for o in origins)
+        ):
+            raise ValueError("UPLOAD_ORIGINS must be a JSON list of https origins")
         return cls(
             region=env["AWS_REGION"],
             account_id=env["ACCOUNT_ID"],
@@ -80,4 +90,5 @@ class ProvisionSettings:
             default_models=DefaultModels(
                 ingest=env["DEFAULT_INGEST_MODEL"], query=env["DEFAULT_QUERY_MODEL"]
             ),
+            upload_origins=tuple(origins),
         )

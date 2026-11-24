@@ -31,3 +31,6 @@ Thumbs.db
 
 # Rendered portal checks (scripts/check_portal_render.py)
 .portal-render/
+
+# Synthetic browser-check files (scripts/make_test_files.py).
+.test-files/

@@ -38,9 +38,14 @@ class StorageStatus(StrEnum):
 
 
 class StorageAccess(StrEnum):
-    """What the credentials may do. Each maps to one session policy (assay_tss.policies)."""
+    """What the credentials may do. Each maps to one session policy (assay_tss.policies).
 
-    # Read objects and query vectors.
+    No access may list a bucket: callers work from database rows and scan events, never from
+    a listing. Only PIPELINE may read `inbox/` and `quarantine/` (unscanned and infected
+    files), current or noncurrent versions.
+    """
+
+    # Read objects under originals/, derived/ and chat/, and query vectors.
     READ = "read"
     # Write new objects under inbox/ only. For presigned upload links.
     UPLOAD = "upload"
@@ -175,6 +180,9 @@ class StorageContext(BaseModel):
 
     def quarantine_key(self, doc_id: uuid.UUID) -> str:
         return keys.quarantine_key(doc_id)
+
+    def quarantine_companion_key(self, file_id: uuid.UUID) -> str:
+        return keys.quarantine_companion_key(file_id)
 
     def text_key(self, doc_id: uuid.UUID) -> str:
         return keys.text_key(doc_id)

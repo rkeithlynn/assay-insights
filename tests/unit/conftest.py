@@ -116,3 +116,6 @@ pulumi.runtime.set_mocks(Mocks(), preview=False)
 
 # The one throwaway database for every module that needs PostgreSQL (see pgtest.py).
 from tests.unit.pgtest import db  # noqa: E402, F401
+
+# The build step 6 tests' database (see step6.py).
+from tests.unit.step6 import step6_db  # noqa: E402, F401

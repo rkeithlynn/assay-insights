@@ -63,6 +63,10 @@ class Settings:
     # through the `lambda` endpoint) and the tenant provisioning state machine.
     cognito_admin_function: str
     provisioning_state_machine: str
+    # Build step 6: the Tenant Storage Service's private API (upload and view links) and the
+    # ingest queue (one job per eligible PDF).
+    tss_endpoint_url: str
+    ingest_queue_url: str
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -90,4 +94,6 @@ class Settings:
             db=db,
             cognito_admin_function=_required(env, "COGNITO_ADMIN_FUNCTION"),
             provisioning_state_machine=_required(env, "PROVISIONING_STATE_MACHINE_ARN"),
+            tss_endpoint_url=_required(env, "TSS_ENDPOINT_URL"),
+            ingest_queue_url=_required(env, "INGEST_QUEUE_URL"),
         )

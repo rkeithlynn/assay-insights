@@ -57,6 +57,7 @@ def _stack(prefix: str) -> AuthEvents:
         database_name=DB.database_name,
         pool_ids=(auth.tenant.pool.id, auth.platform.pool.id),
     )
+    events.sqs_endpoint_access()
     return events
 
 
