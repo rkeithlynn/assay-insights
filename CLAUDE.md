@@ -33,7 +33,7 @@ change. Where this file and the spec differ, the spec wins.
 | 2. Network, database, migrations, database roles and RLS | **Complete** (2026-11-23) |
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
-| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **First half deployed and verified** (2026-11-23). **Second half (Audit history, Models) deployed**, migration `0005` applied, checked in a browser by the owner (2026-11-24). **Audit-trail follow-ups** (session start, first sign-in label, MFA enrolment, migration `0006`) deployed and checked in a browser by the owner (2026-11-24). **Portal layout fixes, rendered checks and migration `0007`** built on `build-step-5`; waiting for the owner's `pulumi up` and `migrate.py` |
+| 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
 | 6–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -133,7 +133,65 @@ Step 5, first half, was verified on 2026-11-23:
   `status`. No existing read path can (see "Reading audit_log" below). The evidence is
   indirect: `auth_events.record()` returns `recorded` only after it has written the audit row
   and updated the user, and the API writes each change and its audit row in the transaction
-  it commits before answering 204.
+  it commits before answering 204. (Since read directly: Audit history, second half.)
+
+Step 5 was completed and verified on 2026-11-24:
+
+- **Second half** (Audit history, CSV export, Models; migration `0005`): deployed; the owner
+  used Audit history, a full CSV export and the Models panel in a browser, and reviewed the
+  export. `model_selected` rows are written.
+- **Audit-trail follow-ups** (migration `0006`, `session_started`, `mfa_enabled`,
+  `temporary_password_accepted`): verified in a browser by the owner. `session_started` rows
+  carry the IP address and browser; a sign-in from managed login's session cookie produced a
+  `session_started` row and no `sign_in` row, so a cookie sign-in has its own `auth_time`
+  and its own row; `mfa_enabled` is written. The trigger's own log (`user_status`, read on
+  2026-11-24) settles the `FORCE_CHANGE_PASSWORD` assumption: every first sign-in on the
+  tenant pool logged `temporary_password_accepted` with `FORCE_CHANGE_PASSWORD`, then
+  `sign_in` with `CONFIRMED` 9 to 15 seconds later (3 first sign-ins; 12 `sign_in` and 1
+  `password_reset`, all `CONFIRMED`, and no other status).
+- **Portal layout fixes** (banner, row menus, navigation, Audit table at 1280 px): deployed;
+  the owner confirmed them on both portals.
+- **Cross-tab sign-out** and the **invited users' "Resend invitation"** menu: deployed, and
+  covered by the unit and rendered tests; not separately checked in a browser.
+- **Migration `0007`** applied by `uv run scripts/migrate.py`. The owner checked the abandoned
+  new-password form on the tenant pool: the user stays Invited, and the next attempt returns
+  them to the new-password screen. `uv run scripts/migrate.py --command verify` (read-only,
+  2026-11-24) reported revision `0007`, `rls_verified: true` and `roles_verified: true`.
+- Read-only checks (2026-11-24): the auth-event queue and its dead-letter queue are empty;
+  all 7 alarms are `OK` (`api-5xx`, the four auth-event alarms, `break-glass-assumed`,
+  `provision-failed`).
+- `pulumi preview` on the `dev` stack shows 278 unchanged.
+- CI on the `build-step-5` pull request (#4), including the `portal-render` job, must pass
+  before `main` is fast-forwarded.
+- Known limits: "Known limits (owner decisions, build step 5)" below. What carries forward:
+  "Carried forward to step 6" below.
+
+### Carried forward to step 6
+
+- **Isolation and storage (step 4 notes):** no file name in any S3 key
+  (`StorageContext.inbox_key(batch_id, file_id)`); move the reserved fixture document ID into
+  `assay_tss.keys`, make the isolation tests import it, refuse it in the pipeline, and test
+  both refusals; work only from database rows and scan events, never from a listing.
+- **New callers need their grants:** the API and the workers become TSS callers (`callers` in
+  `TenantStorage`, `infra/__main__.py`); every pipeline queue goes into `sqs_endpoint_policy`
+  (today it admits only the auth-event trigger); a new platform KMS key goes into
+  `platform_key_arns`; a new alarm passes the alarm topic.
+- **Bucket CORS for browser uploads** reaches existing tenants only when their stacks run
+  again: step 6 needs an "update every tenant" command (step 4 note).
+- **Rule 6:** re-check the AI services opt-out policy and that Bedrock invocation logging is
+  off before any content first goes to Bedrock, Textract or Rekognition.
+- **Portal:** add every new screen to `SCREENS` in `portal/e2e/layout.e2e.ts` (and its data
+  to `e2e/fixtures.ts`); use `RowActions` for any row menu; the navigation width follows the
+  longest title (a title such as "Ingestion history" widens it to 218 px), and the rendered
+  check catches one that no longer fits. Run `uv run scripts/check_portal_render.py` after any
+  visible change and look at the screenshots. Not covered by it: the CloudFront CSP.
+- **Still to check:** whether Cognito's `amr` claim shows MFA (it could replace the
+  pre-token trigger's `AdminGetUser`, step 3 note).
+- **Dependencies:** bump ESLint to 10.15.0 and `typescript-eslint` to 8.74.0 after
+  2026-12-07 (dev-only `minimatch` advisory). Raise the `fastapi` and `pydantic` caps
+  deliberately.
+- **Before production (unchanged):** VPC flow logs to the Log Archive account; an
+  approval-gated break-glass role; a Cognito signing-key rotation needs a `pulumi up`.
 
 ### Reading audit_log
 
@@ -151,6 +209,8 @@ schema `platform` shows a business tenant's non-admin users") applies to the adm
 views, not to the audit record.
 
 ## Known limits (owner decisions, build step 5)
+
+These stay as they are into step 6 unless the owner decides otherwise.
 
 - **A sign-out from a session already ended by an MFA reset or a disable is not recorded**:
   the account check refuses the token (`session_revoked`), so `POST /auth/signed-out` answers
