@@ -43,6 +43,14 @@ ALLOWED_CHANGES: Mapping[tuple[str, str], frozenset[str] | None] = {
     ("bucket-cors", "create"): None,
     ("malware-protection", "update"): frozenset({"protectedResource"}),
 }
+# Output-only properties a provider recomputes on an update, by resource. One is allowed in
+# a diff only if the program does not send it as an input and the provider's detailed diff
+# does not call it an input difference. The malware protection plan's `status` is computed
+# only (no UseStateForUnknown in the provider), so any update shows it as known only after
+# the update; scripts/update_tenants.py then checks that the plan is ACTIVE.
+ALLOWED_OUTPUTS: Mapping[str, frozenset[str]] = {
+    "malware-protection": frozenset({"status"}),
+}
 
 
 class Stacks(Protocol):
@@ -76,6 +84,13 @@ def active_tenants(engine: Engine) -> list[uuid.UUID]:
     return [uuid.UUID(str(r.id)) for r in rows]
 
 
+def _output_only(change: PlannedChange, key: str) -> bool:
+    """`key` changed as an allowed output: the program does not set it, nor is it an input
+    difference."""
+    allowed = ALLOWED_OUTPUTS.get(change.name, frozenset())
+    return key in allowed and key not in change.inputs and key not in change.input_diffs
+
+
 def unexpected(changes: Sequence[PlannedChange]) -> list[PlannedChange]:
     out = []
     for change in changes:
@@ -84,7 +99,10 @@ def unexpected(changes: Sequence[PlannedChange]) -> list[PlannedChange]:
             out.append(change)
             continue
         allowed = ALLOWED_CHANGES[key]
-        if allowed is not None and not set(change.diffs) <= allowed:
+        if allowed is None:
+            continue
+        extra = [d for d in change.diffs if d not in allowed]
+        if any(not _output_only(change, d) for d in extra):
             out.append(change)
     return out
 
@@ -120,6 +138,9 @@ def update_tenant(
                 "type": change.type,
                 "op": change.op,
                 "diffs": change.diffs,
+                "input_diffs": change.input_diffs,
+                # Output-only properties, from and to (their values are IDs and statuses).
+                "outputs": [f"{k}: {before} -> {after}" for k, before, after in change.outputs],
             },
         )
     refused = unexpected(changes)
@@ -136,11 +157,14 @@ def update_tenant(
         log.info("previewed; not applied", extra=fields | {"changes": len(changes)})
         return True
     try:
-        _check_names(settings, tenant_id, stacks.apply(tenant_id, [c.urn for c in changes]))
+        outputs = stacks.apply(tenant_id, [c.urn for c in changes])
+        _check_names(settings, tenant_id, outputs)
     except Exception as exc:
         log.error("tenant update failed", extra=fields | {"error": type(exc).__name__})
         return False
-    log.info("tenant updated", extra=fields | {"changes": len(changes)})
+    # The bucket lets scripts/update_tenants.py find the tenant's malware protection plan and
+    # check that it is ACTIVE.
+    log.info("tenant updated", extra=fields | {"changes": len(changes), "bucket": outputs.bucket})
     return True
 
 

@@ -1279,6 +1279,22 @@ Notes:
   `--target` set to exactly those resources. Anything else refuses that tenant. `--preview`
   applies nothing; `--tenant <id>` limits it to one tenant. Change `ALLOWED_CHANGES` with
   the tenant program.
+  - **The plan's `status` in the diff** (first `--preview` on Isolation Test A, 2026-11-24,
+    refused correctly). `status` is an output only: Computed in the provider, with no
+    UseStateForUnknown, so any update marks it unknown; it is not among
+    `MalwareProtectionPlanArgs`, and the program never sets it. AWS showed the plan `ACTIVE`
+    with no prefixes. `update.ALLOWED_OUTPUTS` admits `status` for `malware-protection`
+    only, and only while it is not an input the program sends and not an input difference
+    in the provider's detailed diff. Every planned change now logs each output's value
+    before and after.
+  - **Scanning during the update.** It is an in-place `UpdateMalwareProtectionPlan` (only
+    the bucket name forces a replacement), and the provider reads the plan once afterwards
+    with no waiter. AWS does not document whether scanning pauses during an update. So after
+    applying, the script reads each updated tenant's plan with the owner's credentials and
+    requires `ACTIVE` and exactly `inbox/`. It waits up to two minutes for the status to
+    settle, and otherwise prints a "MALWARE PROTECTION IS NOT ACTIVE" banner and exits 1.
+    A file that is never scanned is still caught: after 30 minutes the sweeper puts it
+    `on_hold` (`scan_timeout`) and raises an alarm.
 - **Every Dockerfile that runs `uv export --locked`** copies `schemas/` and `workers/`
   manifests, and `.dockerignore` admits both packages; every image rebuilds on the first
   `pulumi up` of step 6.

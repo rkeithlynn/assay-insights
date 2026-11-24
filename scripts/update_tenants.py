@@ -13,7 +13,13 @@ previews its stack (`assay-tenant/<tenant_id>`) as the provisioning role and app
 every planned change is one `assay_tss.provision.update.ALLOWED_CHANGES` lists. Build step 6
 allows exactly two: create the bucket's CORS rule, and update the malware protection plan's
 protected resource (scan `inbox/` only). The update then targets exactly those resources.
-Any other planned change refuses that tenant, prints the change and applies nothing.
+Any other planned change refuses that tenant, prints the change and applies nothing. The
+plan's `status` may also show in the diff: it is an output the provider recomputes on every
+update, and it is allowed only as that (`update.ALLOWED_OUTPUTS`).
+
+After an update, this script reads each updated tenant's malware protection plan from
+GuardDuty with your credentials and requires `ACTIVE`, with exactly `inbox/` as its prefix.
+A status still settling gets up to two minutes; anything else fails loudly (exit 1).
 
 `--preview` only previews and prints the planned changes. Without it this changes AWS
 resources, as `pulumi up` does: the owner runs it, after `pulumi up` of the platform stack.
@@ -29,7 +35,9 @@ import shutil
 # Runs the Pulumi CLI with fixed arguments and no shell.
 import subprocess  # nosec B404
 import sys
+import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +51,12 @@ COMMAND = "update"
 STARTED_BY = "update-tenants"
 # A tenant's stack takes a few minutes; allow an hour for all of them.
 WAIT = {"Delay": 15, "MaxAttempts": 240}
+# assay_tss.provision.program.SCANNED_PREFIXES: what every plan must scan after the update.
+SCANNED_PREFIXES = ["inbox/"]
+ACTIVE = "ACTIVE"
+# A plan's status may take a moment to settle after an update.
+SETTLE_SECONDS = 120
+SETTLE_POLL_SECONDS = 15
 
 
 def pulumi(*args: str, stack: str) -> str:
@@ -87,7 +101,10 @@ def describe(entry: dict[str, Any]) -> str:
     if entry["message"] == "planned change":
         diffs = ", ".join(entry.get("diffs") or [])
         changed = f" [{diffs}]" if diffs else ""
-        return f"  {tenant}: {entry['op']} {entry['resource']} ({entry['type']}){changed}"
+        line = f"  {tenant}: {entry['op']} {entry['resource']} ({entry['type']}){changed}"
+        for output in entry.get("outputs") or []:
+            line += f"\n      output {output}"
+        return line
     if entry["message"] == "update finished":
         return f"update finished: {entry.get('tenants')} tenants, {entry.get('failed')} failed"
     detail = entry.get("changes") or entry.get("error") or ""
@@ -105,6 +122,52 @@ def results(messages: list[str]) -> list[dict[str, Any]]:
         if isinstance(entry, dict) and entry.get("message") in REPORTED:
             found.append(entry)
     return found
+
+
+def plan_for_bucket(guardduty: Any, bucket: str) -> dict[str, Any] | None:
+    """The malware protection plan that protects this bucket, or None."""
+    token: str | None = None
+    while True:
+        page = guardduty.list_malware_protection_plans(**({"NextToken": token} if token else {}))
+        for summary in page.get("MalwareProtectionPlans", []):
+            plan: dict[str, Any] = guardduty.get_malware_protection_plan(
+                MalwareProtectionPlanId=summary["MalwareProtectionPlanId"]
+            )
+            if plan.get("ProtectedResource", {}).get("S3Bucket", {}).get("BucketName") == bucket:
+                return {"id": summary["MalwareProtectionPlanId"], **plan}
+        token = page.get("NextToken")
+        if not token:
+            return None
+
+
+def check_plan(
+    guardduty: Any,
+    bucket: str,
+    *,
+    settle_seconds: int = SETTLE_SECONDS,
+    poll_seconds: int = SETTLE_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str | None:
+    """None when the bucket's plan is ACTIVE and scans exactly inbox/; otherwise what is wrong.
+
+    A status other than ACTIVE is read again until `settle_seconds` have passed.
+    """
+    waited = 0
+    while True:
+        plan = plan_for_bucket(guardduty, bucket)
+        if plan is None:
+            return f"no malware protection plan protects {bucket}"
+        prefixes = plan.get("ProtectedResource", {}).get("S3Bucket", {}).get("ObjectPrefixes")
+        if sorted(prefixes or []) != SCANNED_PREFIXES:
+            return f"plan {plan['id']} scans {prefixes!r}, not {SCANNED_PREFIXES!r}"
+        status = plan.get("Status")
+        if status == ACTIVE:
+            return None
+        if waited >= settle_seconds:
+            reasons = plan.get("StatusReasons") or []
+            return f"plan {plan['id']} is {status}, not {ACTIVE} (reasons: {reasons})"
+        sleep(poll_seconds)
+        waited += poll_seconds
 
 
 def log_messages(logs: Any, group: str, stream: str) -> list[str]:
@@ -176,9 +239,32 @@ def main() -> int:
     task = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])["tasks"][0]
     exit_code = task["containers"][0].get("exitCode")
     stream = f"{CONTAINER}/{CONTAINER}/{task_arn.rsplit('/', 1)[-1]}"
-    for entry in results(log_messages(session.client("logs"), log_group, stream)):
+    entries = results(log_messages(session.client("logs"), log_group, stream))
+    for entry in entries:
         print(describe(entry))
     print(f"Task exit code {exit_code}. Log stream {stream} in {log_group}.")
+
+    # After an update: every updated tenant's plan must be ACTIVE and scan inbox/ only.
+    problems = []
+    updated = [e for e in entries if e["message"] == "tenant updated"]
+    if updated:
+        guardduty = session.client("guardduty")
+        for entry in updated:
+            problem = check_plan(guardduty, str(entry.get("bucket")))
+            if problem:
+                problems.append(f"{entry['tenant_id']}: {problem}")
+            else:
+                print(f"  {entry['tenant_id']}: malware protection plan ACTIVE, scanning inbox/")
+    if problems:
+        print("\n" + "!" * 72, file=sys.stderr)
+        print(
+            "MALWARE PROTECTION IS NOT ACTIVE AS EXPECTED. Uploads may go unscanned:",
+            file=sys.stderr,
+        )
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        print("!" * 72, file=sys.stderr)
+        return 1
     return 0 if exit_code == 0 else 1
 
 

@@ -36,20 +36,38 @@ SETTINGS = ProvisionSettings(
 )
 
 
-def change(name: str, op: str, *diffs: str, type_: str = "aws:x/y:Z") -> PlannedChange:
+def change(
+    name: str,
+    op: str,
+    *diffs: str,
+    type_: str = "aws:x/y:Z",
+    inputs: tuple[str, ...] = (),
+    input_diffs: tuple[str, ...] = (),
+) -> PlannedChange:
     return PlannedChange(
         urn=f"urn:pulumi:t::assay-tenant::{type_}::{name}",
         name=name,
         type=type_,
         op=op,
         diffs=tuple(diffs),
+        inputs=inputs,
+        input_diffs=input_diffs,
     )
 
 
-# What build step 6's program change makes: the CORS rule, and the plan's prefix.
+PLAN_INPUTS = ("actions", "protectedResource", "role", "tags")
+# What build step 6's program change makes: the CORS rule, and the plan's prefix. The plan's
+# status shows too, as the provider recomputes it on any update (as seen on 2026-11-24).
 STEP_6 = [
     change("bucket-cors", "create"),
-    change("malware-protection", "update", "protectedResource"),
+    change(
+        "malware-protection",
+        "update",
+        "protectedResource",
+        "status",
+        inputs=PLAN_INPUTS,
+        input_diffs=("protectedResource",),
+    ),
 ]
 
 
@@ -95,6 +113,8 @@ def test_parse_tenants_and_apply() -> None:
 
 def test_step_6_allows_exactly_the_cors_rule_and_the_plan_prefix() -> None:
     assert update.unexpected(STEP_6) == []
+    # The prefix alone (a provider that kept the status) is fine too.
+    assert update.unexpected([change("malware-protection", "update", "protectedResource")]) == []
     for refused in (
         change("malware-protection", "replace", "protectedResource"),
         change("malware-protection", "update", "protectedResource", "role"),
@@ -105,6 +125,78 @@ def test_step_6_allows_exactly_the_cors_rule_and_the_plan_prefix() -> None:
         change("vector-index", "replace"),
     ):
         assert update.unexpected([*STEP_6, refused]) == [refused], refused
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        # The program sets status: then it is an input, and not allowed.
+        change(
+            "malware-protection",
+            "update",
+            "protectedResource",
+            "status",
+            inputs=(*PLAN_INPUTS, "status"),
+        ),
+        # The provider calls the status change an input difference.
+        change(
+            "malware-protection",
+            "update",
+            "protectedResource",
+            "status",
+            inputs=PLAN_INPUTS,
+            input_diffs=("protectedResource", "status"),
+        ),
+        # Another output of the same resource is not allowed.
+        change("malware-protection", "update", "protectedResource", "arn", inputs=PLAN_INPUTS),
+        # The status of any other resource is not allowed.
+        change("bucket-policy", "update", "status"),
+    ],
+)
+def test_status_passes_only_as_the_plans_output_the_program_does_not_set(
+    refused: PlannedChange,
+) -> None:
+    assert update.unexpected([refused]) == [refused]
+
+
+def test_the_plans_status_is_an_output_of_the_provider_not_an_input() -> None:
+    """What `ALLOWED_OUTPUTS` relies on: status cannot be sent, so the program never sets it."""
+    import inspect
+
+    import pulumi_aws as aws
+
+    inputs = inspect.signature(aws.guardduty.MalwareProtectionPlanArgs.__init__).parameters
+    assert "status" not in inputs
+    assert "status" in inspect.signature(aws.guardduty.MalwareProtectionPlan.get).parameters
+
+
+def test_a_planned_change_reads_inputs_input_diffs_and_output_values() -> None:
+    from types import SimpleNamespace
+
+    from assay_tss.provision.stack import UNKNOWN, UNKNOWN_SENTINEL, planned_change
+
+    meta = SimpleNamespace(
+        op=SimpleNamespace(value="update"),
+        urn="urn:pulumi:t::assay-tenant::aws:guardduty/malwareProtectionPlan:MalwareProtectionPlan::malware-protection",
+        type="aws:guardduty/malwareProtectionPlan:MalwareProtectionPlan",
+        diffs=["status", "protectedResource"],
+        detailed_diff={
+            "protectedResource[0].s3Bucket[0].objectPrefixes": SimpleNamespace(input_diff=True),
+            "status": SimpleNamespace(input_diff=False),
+        },
+        old=SimpleNamespace(inputs={"role": "r"}, outputs={"status": "ACTIVE"}),
+        new=SimpleNamespace(
+            inputs={"role": "r", "protectedResource": [], "actions": [], "tags": {}},
+            outputs={"status": UNKNOWN_SENTINEL},
+        ),
+    )
+    planned = planned_change(meta)
+    assert planned.name == "malware-protection" and planned.op == "update"
+    assert planned.diffs == ("protectedResource", "status")
+    assert planned.input_diffs == ("protectedResource",)
+    assert "status" not in planned.inputs
+    assert planned.outputs == (("status", "ACTIVE", UNKNOWN),)
+    assert update.unexpected([planned]) == []
 
 
 def test_a_tenant_with_only_the_allowed_changes_is_updated_with_those_targets() -> None:
