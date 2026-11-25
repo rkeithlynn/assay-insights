@@ -1,8 +1,12 @@
-"""The ingestion pipeline's infrastructure, first half of build step 6 (Pulumi mocks).
+"""The ingestion pipeline's infrastructure, build step 6 (Pulumi mocks).
 
 What it must never get: an S3, KMS or AI-service permission of its own (tenant data is
 reached only with TSS-issued credentials), a queue anyone may send to, a state machine that
 logs execution data, or an alarm that notifies no one.
+
+The worker task (second half) on top of that: a role that may only sign in as `app_worker`,
+a container with exactly three capabilities on a read-only root filesystem, and a state
+machine that may pass only the worker's two roles.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ def _stack(prefix: str) -> pipeline.Pipeline:
         network=network,
         database=database,
         database_name=DB.database_name,
-        roles=pipeline.pipeline_roles(f"{prefix}-pipeline", ACCOUNT_ID),
+        roles=pipeline.pipeline_roles(f"{prefix}-pipeline", ACCOUNT_ID, REGION),
         tss_endpoint_url=TSS,
         api_task_role=api_task_role(f"{prefix}-api", account_id=ACCOUNT_ID, region=REGION),
         alarm_topic_arn=TOPIC,
@@ -77,6 +81,10 @@ def _ready(p: pipeline.Pipeline) -> pulumi.Output[list[Any]]:
         p.starter_source.id,
         p.schedule.id,
         p.schedule_policy.id,
+        p.worker_task_definition.id,
+        p.worker_policy.id,
+        p.worker_cluster.id,
+        p.worker_execution_role.id,
         *[f.id for f in p.functions.values()],
         *[a.id for a in p.alarms],
     )
@@ -144,6 +152,10 @@ def test_functions_run_in_the_vpc_as_x86_64_images() -> Any:
             assert fn["loggingConfig"]["logFormat"] == "JSON"
         steps = _one("aws:lambda/function:Function", "pl3-pipeline-steps-fn")
         assert steps["ephemeralStorage"]["size"] >= 1024  # a 100 MB PDF in /tmp
+        # The claim step's cap and the grant's lifetime: the task's timeout and a margin.
+        variables = steps["environment"]["variables"]
+        assert variables["WORKER_MAX_PER_TENANT"] == "5"
+        assert int(variables["WORKER_GRANT_SECONDS"]) > pipeline.WORKER_TIMEOUT_SECONDS
 
     return _ready(p).apply(check)
 
@@ -204,6 +216,12 @@ def test_scan_results_come_from_guardduty_about_tenant_buckets_only() -> Any:
     return _ready(p).apply(check)
 
 
+def _definition(prefix: str) -> dict[str, Any]:
+    sm = _one("aws:sfn/stateMachine:StateMachine", f"{prefix}-pipeline-sfn")
+    definition: dict[str, Any] = json.loads(sm["definition"])
+    return definition
+
+
 @pulumi.runtime.test
 def test_the_state_machine_never_logs_execution_data_and_only_runs_its_steps() -> Any:
     p = _stack("pl6")
@@ -211,14 +229,15 @@ def test_the_state_machine_never_logs_execution_data_and_only_runs_its_steps() -
     def check(_: list[Any]) -> None:
         sm = _one("aws:sfn/stateMachine:StateMachine", "pl6-pipeline-sfn")
         assert sm["type"] == "STANDARD"
+        # Errors only, and never the execution's data: the grant's token is in that data.
         assert sm["loggingConfiguration"]["includeExecutionData"] is False
         assert sm["loggingConfiguration"]["level"] == "ERROR"
-        definition = json.loads(sm["definition"])
-        resources = {
-            s.get("Resource") for s in definition["States"].values() if s["Type"] == "Task"
+        states = _definition("pl6")["States"]
+        resources = {s.get("Resource") for s in states.values() if s["Type"] == "Task"}
+        assert resources == {
+            "arn:aws:states:::lambda:invoke",
+            "arn:aws:states:::ecs:runTask.sync",
         }
-        assert resources == {"arn:aws:states:::lambda:invoke"}
-        states = definition["States"]
         # A failure names its step (fixed text), and passes the error's name, never its Cause.
         assert states["Fingerprint"]["Catch"][0]["Next"] == "FingerprintFailed"
         assert states["FingerprintFailed"] == {
@@ -231,19 +250,220 @@ def test_the_state_machine_never_logs_execution_data_and_only_runs_its_steps() -
         assert payload["failed_step.$"] == "$.failed_step"
         assert payload["error_type.$"] == "$.error.Error"
         assert not any("Cause" in str(v) or v == "$.error" for v in payload.values())
-        # Every task's catch goes through a Pass state that names it.
+        # Every Lambda step's catch goes through a Pass state that names it. The worker
+        # task's goes through `release` first, whose own catch does the same.
         for name, state in states.items():
             for catch in state.get("Catch", []):
+                assert catch["ResultPath"] == "$.error", name
+                if name == "Worker":
+                    assert catch["Next"] == "ReleaseAfterFailure"
+                    continue
                 assert states[catch["Next"]]["Type"] == "Pass", name
                 assert states[catch["Next"]]["Next"] == "Failed", name
-        policy = json.loads(
-            _one("aws:iam/rolePolicy:RolePolicy", "pl6-pipeline-sfn-policy")["policy"]
+        named = {s["Result"] for s in states.values() if s["Type"] == "Pass"}
+        assert named == {"fingerprint", "claim", "worker"}
+        from assay_workers.steps import PIPELINE_STEPS
+
+        assert named <= PIPELINE_STEPS
+
+    return _ready(p).apply(check)
+
+
+@pulumi.runtime.test
+def test_the_worker_task_gets_three_values_and_its_result_is_discarded() -> Any:
+    p = _stack("pl10")
+
+    def check(_: list[Any]) -> None:
+        states = _definition("pl10")["States"]
+        worker = states["Worker"]
+        assert worker["Resource"] == "arn:aws:states:::ecs:runTask.sync"
+        parameters = worker["Parameters"]
+        assert parameters["LaunchType"] == "FARGATE"
+        assert parameters["NetworkConfiguration"]["AwsvpcConfiguration"]["AssignPublicIp"] == (
+            "DISABLED"
         )
+        [override] = parameters["Overrides"]["ContainerOverrides"]
+        assert override["Name"] == pipeline.WORKER_CONTAINER
+        # The document, the attempt and the token. No tenant: the worker never names one.
+        assert override["Environment"] == [
+            {"Name": "DOCUMENT_ID", "Value.$": "$.document_id"},
+            {"Name": "ATTEMPT", "Value.$": "States.Format('{}', $.claim.result.attempt)"},
+            {"Name": "WORKER_TOKEN", "Value.$": "$.claim.result.token"},
+        ]
+        assert "tenant" not in json.dumps(override).lower()
+        # The task's description repeats the overrides: it is not kept in the state.
+        assert worker["ResultPath"] is None
+        assert worker["TimeoutSeconds"] == pipeline.WORKER_TIMEOUT_SECONDS
+        # The token leaves the state as soon as the task is over, either way.
+        for release in ("Release", "ReleaseAfterFailure"):
+            assert states[release]["ResultPath"] == "$.claim"
+            assert states[release]["Parameters"]["Payload"]["step"] == "release"
+        assert worker["Next"] == "Release"
+
+    return _ready(p).apply(check)
+
+
+@pulumi.runtime.test
+def test_a_document_waits_for_a_slot_or_for_capacity_and_never_fails_for_either() -> Any:
+    p = _stack("pl11")
+
+    def check(_: list[Any]) -> None:
+        definition = _definition("pl11")
+        states = definition["States"]
+        # No slot free: wait and claim again.
+        waits = {c["StringEquals"]: c["Next"] for c in states["Claimed"]["Choices"]}
+        assert waits == {"claimed": "Worker", "wait": "WaitForSlot"}
+        assert states["WaitForSlot"] == {
+            "Type": "Wait",
+            "Seconds": pipeline.SLOT_WAIT_SECONDS,
+            "Next": "Claim",
+        }
+        # The task failed. Only if it actually started is that the document's failure.
+        started = states["WorkerStarted"]
+        assert started["Choices"] == [
+            {
+                "Variable": "$.claim.result.worker_started",
+                "BooleanEquals": True,
+                "Next": "WorkerFailed",
+            }
+        ]
+        assert started["Default"] == "WaitForCapacity"
+        assert states["WaitForCapacity"] == {
+            "Type": "Wait",
+            "Seconds": pipeline.CAPACITY_WAIT_SECONDS,
+            "Next": "Claim",
+        }
+        # The RunTask call itself is retried first.
+        [retry] = states["Worker"]["Retry"]
+        assert "ECS.AmazonECSException" in retry["ErrorEquals"]
+        # No path from a wait to `Failed`: only the execution's own timeout ends the waiting,
+        # and that leaves the document `processing`.
+        assert states["WaitForSlot"]["Next"] == states["WaitForCapacity"]["Next"] == "Claim"
+        assert definition["TimeoutSeconds"] == pipeline.EXECUTION_TIMEOUT_SECONDS
+        # Within a Standard execution's 25,000 history events, at about 13 a wait.
+        loops = pipeline.EXECUTION_TIMEOUT_SECONDS / pipeline.SLOT_WAIT_SECONDS
+        assert loops * 13 < 25_000
+
+    return _ready(p).apply(check)
+
+
+@pulumi.runtime.test
+def test_the_state_machine_may_pass_only_the_workers_two_roles() -> Any:
+    p = _stack("pl12")
+
+    def check(_: list[Any]) -> None:
+        policy = _policy(ROLE_POLICY, "pl12-pipeline-sfn-policy")
+        by_sid = {s["Sid"]: s for s in policy["Statement"]}
         assert _actions(policy) - {a for a in _actions(policy) if a.startswith("logs:")} == {
-            "lambda:InvokeFunction"
+            "lambda:InvokeFunction",
+            "ecs:RunTask",
+            "ecs:StopTask",
+            "ecs:DescribeTasks",
+            "iam:PassRole",
+            "events:PutTargets",
+            "events:PutRule",
+            "events:DescribeRule",
+        }
+        passed = by_sid["PassTheWorkerTaskRoles"]
+        assert len(passed["Resource"]) == 2 and "*" not in json.dumps(passed["Resource"])
+        assert all("worker" in arn for arn in passed["Resource"])
+        assert passed["Condition"] == {
+            "StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}
+        }
+        run = by_sid["RunTheWorkerTask"]
+        assert run["Resource"].endswith(":task-definition/pl12-pipeline-worker:*")
+        assert "ecs:cluster" in run["Condition"]["ArnEquals"]
+        assert by_sid["WatchAndStopIt"]["Resource"].endswith(":task/pl12-pipeline-worker/*")
+        assert by_sid["TaskStateChangeRule"]["Resource"].endswith(
+            ":rule/StepFunctionsGetEventsForECSTaskRule"
+        )
+
+    return _ready(p).apply(check)
+
+
+@pulumi.runtime.test
+def test_the_worker_role_may_only_sign_in_as_app_worker() -> Any:
+    p = _stack("pl13")
+
+    def check(_: list[Any]) -> None:
+        policy = _policy(ROLE_POLICY, "pl13-pipeline-worker-task-policy")
+        # Nothing of its own but the database sign-in. No storage, no key, no queue, no AI
+        # service (those arrive with the stages that use them), not even logs: the task's
+        # execution role writes them.
+        assert _actions(policy) == {"rds-db:connect"}
+        [statement] = policy["Statement"]
+        assert statement["Resource"].endswith("/app_worker")
+        assert not statement["Resource"].endswith("/app_tenant")
+        role = _one("aws:iam/role:Role", "pl13-pipeline-worker-task-role")
+        trust = json.loads(role["assumeRolePolicy"])
+        assert trust["Statement"][0]["Principal"] == {"Service": "ecs-tasks.amazonaws.com"}
+        execution = _policy(ROLE_POLICY, "pl13-pipeline-worker-execution-policy")
+        assert _actions(execution) == {
+            "ecr:GetAuthorizationToken",
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:BatchGetImage",
+            "ecr:GetDownloadUrlForLayer",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents",
         }
 
     return _ready(p).apply(check)
+
+
+@pulumi.runtime.test
+def test_the_worker_container_has_three_capabilities_and_a_read_only_root() -> Any:
+    p = _stack("pl14")
+
+    def check(_: list[Any]) -> None:
+        task = _one("aws:ecs/taskDefinition:TaskDefinition", "pl14-pipeline-worker-task")
+        assert task["requiresCompatibilities"] == ["FARGATE"]
+        assert task["runtimePlatform"]["cpuArchitecture"] == "X86_64"
+        assert task["networkMode"] == "awsvpc"
+        [container] = json.loads(task["containerDefinitions"])
+        assert container["readonlyRootFilesystem"] is True
+        assert container["privileged"] is False
+        assert container["user"] == "0:0"
+        capabilities = container["linuxParameters"]["capabilities"]
+        assert capabilities["add"] == []
+        dropped = set(capabilities["drop"])
+        # Everything but the three the sandbox needs to start and stop its child.
+        assert set(pipeline.ALL_CAPABILITIES) - dropped == {"SETUID", "SETGID", "KILL"}
+        assert {"NET_RAW", "NET_ADMIN", "SYS_ADMIN", "SYS_PTRACE", "DAC_OVERRIDE", "CHOWN"} <= (
+            dropped
+        )
+        assert container["mountPoints"] == [
+            {"sourceVolume": "work", "containerPath": "/work", "readOnly": False}
+        ]
+        names = {e["name"] for e in container["environment"]}
+        assert names == set(pipeline.WORKER_VARIABLES)
+        # Nothing about any document or tenant, and no credentials, in the definition.
+        assert not names & {"DOCUMENT_ID", "ATTEMPT", "WORKER_TOKEN", "TENANT_ID"}
+        assert container["logConfiguration"]["options"]["awslogs-group"] == (
+            "/aws/ecs/pl14-pipeline-worker"
+        )
+
+    return _ready(p).apply(check)
+
+
+def test_the_worker_definition_refuses_a_missing_setting() -> None:
+    import pytest
+
+    environment = {name: "x" for name in pipeline.WORKER_VARIABLES}
+    del environment["TSS_ENDPOINT_URL"]
+    with pytest.raises(pipeline.WorkerEnvironmentError, match="TSS_ENDPOINT_URL"):
+        pipeline.worker_container_definitions(
+            image="i", log_group="g", region=REGION, environment=environment
+        )
+
+
+def test_the_dockerfile_and_the_sandbox_agree_on_the_user() -> None:
+    from assay_workers.sandbox import runner
+
+    dockerfile = (REPO_ROOT / pipeline.WORKER_DOCKERFILE).read_text(encoding="utf-8")
+    assert f"--gid {runner.SANDBOX_GID} sandbox" in dockerfile
+    assert f"--uid {runner.SANDBOX_UID} --gid sandbox" in dockerfile
+    assert "USER 0:0" in dockerfile and pipeline.WORKER_USER == "0:0"
+    assert f"install -d -m 0755 /opt/rds-ca {pipeline.WORK_DIR}" in dockerfile
 
 
 @pulumi.runtime.test
@@ -257,6 +477,7 @@ def test_every_alarm_notifies_the_alarm_topic() -> Any:
         assert {"pl7-pipeline-executionsfailed", "pl7-pipeline-executionstimedout"} <= names
         for function in pipeline.FUNCTIONS:
             assert {f"pl7-pipeline-{function}-errors", f"pl7-pipeline-{function}-failed"} <= names
+        assert "pl7-pipeline-worker-errors" in names
         for _name, inputs in alarms:
             assert inputs["alarmActions"] == [TOPIC], inputs["name"]
 

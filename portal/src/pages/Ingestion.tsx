@@ -166,10 +166,10 @@ export function Steps({
       ]}
       />
       {laterStepsPending(documentStatus, events) && (
-        // TODO(build step 6, second half): remove with laterStepsPending.
+        // TODO(build step 6, second half, stage 4): remove with laterStepsPending.
         <Alert type="info">
-          This document passed the fingerprint step. The steps after it are not available yet, so it shows as
-          Processing for now.
+          This document passed every step there is so far. The steps after them are not available yet, so it
+          shows as Processing for now.
         </Alert>
       )}
     </SpaceBetween>

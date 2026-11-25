@@ -172,6 +172,8 @@ const EVENTS = [
   { step: "queued", status: "queued", at: "2026-11-24T15:02:00Z", error_code: null, viewer: null },
   { step: "start", status: "started", at: "2026-11-24T15:02:05Z", error_code: null, viewer: null },
   { step: "fingerprint", status: "continue", at: "2026-11-24T15:02:09Z", error_code: null, viewer: null },
+  // The processing task's first step (build step 6, second half): it opened the PDF.
+  { step: "inspect", status: "continue", at: "2026-11-24T15:03:20Z", error_code: null, viewer: null },
   // Who opened it: sent to tenant admins only. A long address, to check it wraps.
   { step: "viewed", status: "pdf_url", at: "2026-11-24T15:10:00Z", error_code: null, viewer: "alexandra.richardson-whitfield@infinityloans.example" },
 ];
@@ -248,6 +250,9 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
         // Both kinds of failure, to check both fit: a row from before step-level codes, and one after.
         { step: "failed", status: "failed", at: "2026-11-24T15:03:40Z", error_code: "pipeline_error", error_type: null },
         { step: "failed", status: "failed", at: "2026-11-24T15:04:40Z", error_code: "fingerprint_failed", error_type: "Lambda.TooManyRequestsException" },
+        // The processing task's own marks and codes: a step that stopped, and why.
+        { step: "inspect", status: "error", at: "2026-11-24T15:05:10Z", error_code: null, error_type: "TssRequestError" },
+        { step: "failed", status: "failed", at: "2026-11-24T15:05:12Z", error_code: "inspect_failed", error_type: "TssRequestError" },
       ],
     };
   }

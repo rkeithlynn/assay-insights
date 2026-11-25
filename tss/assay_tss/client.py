@@ -89,6 +89,14 @@ class TssClient:
         body = json.dumps(request.model_dump(mode="json")).encode()
         return StorageContext.from_wire(self.send(self.signed_request("/resolve", body)))
 
+    def resolve_worker(self, document_id: uuid.UUID, attempt: int, token: str) -> StorageContext:
+        """The worker task's only way to storage: one document's keys, for the tenant its
+        attempt grant names (the TSS reads it; the worker names no tenant)."""
+        body = json.dumps(
+            {"document_id": str(document_id), "attempt": attempt, "token": token}
+        ).encode()
+        return StorageContext.from_wire(self.send(self.signed_request("/resolve-worker", body)))
+
     def provision(self, tenant_id: uuid.UUID, mode: IsolationMode) -> TenantStorageProfile:
         raise NotImplementedError("tenant storage is created only by the provisioning task")
 

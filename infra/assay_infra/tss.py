@@ -18,6 +18,7 @@ policies they have to agree with.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -47,6 +48,27 @@ class TssCaller:
     role: aws.iam.Role
     access: Sequence[str]
 
+    @property
+    def is_worker(self) -> bool:
+        """The pipeline's worker task: `/resolve-worker` only, against an attempt grant."""
+        return WORKER_ACCESS in self.access
+
+    @property
+    def path(self) -> str:
+        return WORKER_PATH if self.is_worker else RESOLVE_PATH
+
+
+# assay_tss.models.StorageAccess.WORKER: never combined with another access.
+WORKER_ACCESS = "worker"
+
+
+def check_callers(callers: Mapping[str, TssCaller]) -> None:
+    """A worker caller has worker access and nothing else: it must never be able to name a
+    tenant on `/resolve`, and no other caller may use `/resolve-worker`."""
+    for service, caller in callers.items():
+        if caller.is_worker and set(caller.access) != {WORKER_ACCESS}:
+            raise ValueError(f"TSS caller {service!r}: worker access cannot be combined")
+
 
 def caller_grants(names: Mapping[str, str], callers: Mapping[str, TssCaller]) -> str:
     """`TSS_CALLERS` (assay_tss.service.parse_callers): role name -> service and accesses.
@@ -66,6 +88,8 @@ IMAGE_TREES = ("db/assay_db", "tss/assay_tss")
 
 STAGE = "v1"
 RESOLVE_PATH = "resolve"
+# The worker task's own route (build step 6, second half): by document, attempt and token.
+WORKER_PATH = "resolve-worker"
 # API Gateway waits at most 29 seconds for an integration. A paused database takes about
 # 15 seconds to resume, so the function gets the whole window.
 FUNCTION_TIMEOUT_SECONDS = 29
@@ -243,10 +267,22 @@ def events_to_logs_policy(log_group_arn: str) -> str:
 THIS_API = "execute-api:"
 
 
+def _principals(callers: Sequence[str], *, as_stored: bool) -> str | list[str]:
+    names = sorted(callers)
+    # API Gateway stores a one-item principal list as a string.
+    return names[0] if as_stored and len(names) == 1 else names
+
+
 def api_resource_policy(
-    *, vpc_endpoint_id: str, callers: list[str], execution_arn: str | None = None
+    *,
+    vpc_endpoint_id: str,
+    callers: list[str],
+    worker_callers: Sequence[str] = (),
+    execution_arn: str | None = None,
 ) -> str:
-    """Only through the VPC's endpoint, and only the caller roles named here.
+    """Only through the VPC's endpoint, and only the caller roles named here, each on its own
+    route: `callers` on `/resolve`, `worker_callers` (the pipeline's worker task) on
+    `/resolve-worker` and nowhere else.
 
     With `execution_arn`, the policy is written exactly as API Gateway stores it: every
     resource is a full ARN under the API's own, and a single principal is a string, not a
@@ -256,9 +292,7 @@ def api_resource_policy(
     AWS; it is what the redeploy fingerprint is taken from.
     """
     api = execution_arn if execution_arn is not None else THIS_API
-    principals: str | list[str] = sorted(callers)
-    if execution_arn is not None and len(callers) == 1:
-        principals = callers[0]
+    as_stored = execution_arn is not None
     statements: list[dict[str, object]] = [
         {
             "Sid": "OnlyThroughTheVpcEndpoint",
@@ -274,15 +308,30 @@ def api_resource_policy(
             {
                 "Sid": "KnownCallers",
                 "Effect": "Allow",
-                "Principal": {"AWS": principals},
+                "Principal": {"AWS": _principals(callers, as_stored=as_stored)},
                 "Action": "execute-api:Invoke",
                 "Resource": f"{api}/{STAGE}/POST/{RESOLVE_PATH}",
+            }
+        )
+    if worker_callers:
+        statements.append(
+            {
+                "Sid": "WorkerTask",
+                "Effect": "Allow",
+                "Principal": {"AWS": _principals(worker_callers, as_stored=as_stored)},
+                "Action": "execute-api:Invoke",
+                "Resource": f"{api}/{STAGE}/POST/{WORKER_PATH}",
             }
         )
     return _json({"Version": "2012-10-17", "Statement": statements})
 
 
-def invoke_policy(execution_arn: str) -> str:
+def _caller_policy(path: str, execution_arn: str) -> str:
+    return invoke_policy(execution_arn, path)
+
+
+def invoke_policy(execution_arn: str, path: str = RESOLVE_PATH) -> str:
+    """A caller's own permission: its one route of the private API."""
     return _json(
         {
             "Version": "2012-10-17",
@@ -291,7 +340,7 @@ def invoke_policy(execution_arn: str) -> str:
                     "Sid": "CallTheTenantStorageService",
                     "Effect": "Allow",
                     "Action": "execute-api:Invoke",
-                    "Resource": f"{execution_arn}/{STAGE}/POST/{RESOLVE_PATH}",
+                    "Resource": f"{execution_arn}/{STAGE}/POST/{path}",
                 }
             ],
         }
@@ -514,7 +563,10 @@ class TenantStorage(pulumi.ComponentResource):
 
         # --- Private API -----------------------------------------------------------------
         endpoint = network.interface_endpoints["execute-api"]
-        caller_arns = [caller.role.arn for caller in callers.values()]
+        check_callers(callers)
+        caller_arns = [caller.role.arn for caller in callers.values() if not caller.is_worker]
+        worker_arns = [caller.role.arn for caller in callers.values() if caller.is_worker]
+        resolvers = len(caller_arns)
         self.api = aws.apigateway.RestApi(
             f"{name}-api",
             name=name,
@@ -530,9 +582,14 @@ class TenantStorage(pulumi.ComponentResource):
         self.api_policy = aws.apigateway.RestApiPolicy(
             f"{name}-api-policy",
             rest_api_id=self.api.id,
-            policy=pulumi.Output.all(self.api.execution_arn, endpoint.id, *caller_arns).apply(
+            policy=pulumi.Output.all(
+                self.api.execution_arn, endpoint.id, *caller_arns, *worker_arns
+            ).apply(
                 lambda v: api_resource_policy(
-                    execution_arn=v[0], vpc_endpoint_id=v[1], callers=list(v[2:])
+                    execution_arn=v[0],
+                    vpc_endpoint_id=v[1],
+                    callers=list(v[2 : 2 + resolvers]),
+                    worker_callers=list(v[2 + resolvers :]),
                 )
             ),
             opts=child,
@@ -571,6 +628,42 @@ class TenantStorage(pulumi.ComponentResource):
             source_arn=pulumi.Output.concat(self.api.execution_arn, f"/*/POST/{RESOLVE_PATH}"),
             opts=child,
         )
+        # The worker task's route (build step 6, second half): the same function, which
+        # tells the two apart by the request's resource.
+        worker_resource = aws.apigateway.Resource(
+            f"{name}-api-resolve-worker",
+            rest_api=self.api.id,
+            parent_id=self.api.root_resource_id,
+            path_part=WORKER_PATH,
+            opts=child,
+        )
+        worker_method = aws.apigateway.Method(
+            f"{name}-api-resolve-worker-post",
+            rest_api=self.api.id,
+            resource_id=worker_resource.id,
+            http_method="POST",
+            authorization="AWS_IAM",
+            opts=child,
+        )
+        worker_integration = aws.apigateway.Integration(
+            f"{name}-api-resolve-worker-lambda",
+            rest_api=self.api.id,
+            resource_id=worker_resource.id,
+            http_method=worker_method.http_method,
+            type="AWS_PROXY",
+            integration_http_method="POST",
+            uri=self.function.invoke_arn,
+            timeout_milliseconds=FUNCTION_TIMEOUT_SECONDS * 1000,
+            opts=child,
+        )
+        aws.lambda_.Permission(
+            f"{name}-api-invoke-worker",
+            action="lambda:InvokeFunction",
+            function=self.function.name,
+            principal="apigateway.amazonaws.com",
+            source_arn=pulumi.Output.concat(self.api.execution_arn, f"/*/POST/{WORKER_PATH}"),
+            opts=child,
+        )
 
         # Account-wide (one per Region): the role API Gateway writes its logs with. It was
         # unset in this account before build step 4.
@@ -601,11 +694,22 @@ class TenantStorage(pulumi.ComponentResource):
         )
         # A new deployment whenever the route, its integration or the resource policy changes.
         # The policy enters the fingerprint in its portable form (endpoint and callers).
-        portable_policy = pulumi.Output.all(endpoint.id, *caller_arns).apply(
-            lambda v: api_resource_policy(vpc_endpoint_id=v[0], callers=list(v[1:]))
+        portable_policy = pulumi.Output.all(endpoint.id, *caller_arns, *worker_arns).apply(
+            lambda v: api_resource_policy(
+                vpc_endpoint_id=v[0],
+                callers=list(v[1 : 1 + resolvers]),
+                worker_callers=list(v[1 + resolvers :]),
+            )
         )
         redeploy = pulumi.Output.all(
-            resource.id, method.id, integration.id, integration.uri, portable_policy
+            resource.id,
+            method.id,
+            integration.id,
+            integration.uri,
+            portable_policy,
+            worker_resource.id,
+            worker_method.id,
+            worker_integration.id,
         ).apply(lambda parts: hashlib.sha256(_json(parts).encode()).hexdigest())
         # A private API cannot be deployed before it has its policy.
         deployment = aws.apigateway.Deployment(
@@ -613,7 +717,14 @@ class TenantStorage(pulumi.ComponentResource):
             rest_api=self.api.id,
             triggers={"redeploy": redeploy},
             opts=pulumi.ResourceOptions(
-                parent=self, depends_on=[method, integration, self.api_policy]
+                parent=self,
+                depends_on=[
+                    method,
+                    integration,
+                    worker_method,
+                    worker_integration,
+                    self.api_policy,
+                ],
             ),
         )
         self.stage = aws.apigateway.Stage(
@@ -637,7 +748,8 @@ class TenantStorage(pulumi.ComponentResource):
             aws.iam.RolePolicy(
                 f"{name}-caller-{service}",
                 role=caller.role.id,
-                policy=self.api.execution_arn.apply(invoke_policy),
+                # Its own route only: `/resolve`, or for the worker task `/resolve-worker`.
+                policy=self.api.execution_arn.apply(functools.partial(_caller_policy, caller.path)),
                 opts=child,
             )
 

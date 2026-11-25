@@ -43,12 +43,37 @@ s3.get_object(Bucket=ctx.bucket, Key=ctx.text_key(document_id))
 | `UPLOAD` | Put new objects under `inbox/` only (for presigned upload links) |
 | `READ` | Read objects under `originals/`, `derived/` and `chat/` (never `inbox/` or `quarantine/`), and query vectors |
 | `PIPELINE` | Read and write every object, by key, and vectors; use the face collection |
+| `WORKER` | One document's own keys: read its inbox files, read and write its original, companion, text and fields objects. Nothing else in the bucket, no vectors, no face collection |
 
-| Caller (service) | Accesses |
-| --- | --- |
-| `api` (the API's task role) | `UPLOAD`, `READ` |
-| `scan`, `pipeline`, `sweeper` (the pipeline's Lambdas) | `PIPELINE` |
-| `isolation` (the isolation test runner, development stacks only) | all three |
+| Caller (service) | Route | Accesses |
+| --- | --- | --- |
+| `api` (the API's task role) | `/resolve` | `UPLOAD`, `READ` |
+| `scan`, `pipeline`, `sweeper` (the pipeline's Lambdas) | `/resolve` | `PIPELINE` |
+| `worker` (the pipeline's worker task) | `/resolve-worker` | `WORKER` |
+| `isolation` (the isolation test runner, development stacks only) | `/resolve` | `UPLOAD`, `READ`, `PIPELINE` |
+
+### The worker task's route
+
+The worker task opens tenants' PDFs, so it is trusted least (build step 6, second half). It
+never names a tenant and never asks for an access:
+
+```python
+ctx = tss.resolve_worker(document_id, attempt, token)
+```
+
+- `token` is the one-time token of the attempt's grant (`assay_db.grants`), which the
+  pipeline's `claim` step created and Step Functions passed to that one task.
+- The TSS takes the tenant from the grant's database row (`pipeline.worker_grant`, migration
+  0010), and only while the grant is live: not ended, not expired, for the document's current
+  attempt, with the document still `processing`. Anything else is `worker_grant_refused`,
+  with no more detail than that.
+- The credentials reach that one document's keys (`policies.worker_session_policy`): no
+  wildcard, nothing under `quarantine/` or `chat/`, no other document.
+- `/resolve` refuses the worker for every access, and `/resolve-worker` refuses every other
+  caller: in the service, in each caller's own IAM policy, and in the API's resource policy,
+  each of which names one route per caller.
+- Credentials issued just before an attempt ends still last their 15 minutes (the shortest
+  AWS STS allows).
 
 ## Who can do what to a tenant's storage
 

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { errorCodeText, errorText, fileProblemText, laterStepsPending, resultText } from "./ingestionFormat";
+import {
+  errorCodeText,
+  errorText,
+  fileProblemText,
+  laterStepsPending,
+  resultText,
+  stepText,
+} from "./ingestionFormat";
 
 describe("resultText", () => {
   it("shows plain words, never the stored codes", () => {
@@ -16,15 +23,43 @@ describe("resultText", () => {
   });
 });
 
-describe("laterStepsPending (first half of build step 6 only)", () => {
-  const passed = [{ step: "fingerprint", status: "continue" }];
-  it("is shown for a processing document that passed fingerprint", () => {
-    expect(laterStepsPending("processing", passed)).toBe(true);
+describe("laterStepsPending (until steps 5 to 10 exist)", () => {
+  const now = new Date("2026-11-25T12:00:00Z").getTime();
+  const fingerprint = (at: string) => ({ step: "fingerprint", status: "continue", at });
+  const old = fingerprint("2026-11-24T15:02:09Z");
+  const fresh = fingerprint("2026-11-25T11:58:00Z");
+  const inspected = [fresh, { step: "inspect", status: "continue", at: "2026-11-25T11:59:30Z" }];
+
+  it("is shown for a processing document that passed inspection", () => {
+    expect(laterStepsPending("processing", inspected, now)).toBe(true);
+  });
+  it("is shown for one that passed fingerprint before inspection existed", () => {
+    expect(laterStepsPending("processing", [old], now)).toBe(true);
+    expect(laterStepsPending("processing", [{ step: "fingerprint", status: "continue" }], now)).toBe(true);
+  });
+  it("is not shown while a document waits for its task or the task runs", () => {
+    expect(laterStepsPending("processing", [fresh], now)).toBe(false);
+    expect(laterStepsPending("processing", [old, { step: "worker", status: "running" }], now)).toBe(false);
+    expect(laterStepsPending("processing", [old, { step: "inspect", status: "running" }], now)).toBe(false);
   });
   it("is not shown otherwise", () => {
-    expect(laterStepsPending("processing", [{ step: "start", status: "started" }])).toBe(false);
-    expect(laterStepsPending("duplicate", [{ step: "fingerprint", status: "duplicate" }])).toBe(false);
-    expect(laterStepsPending("ready", passed)).toBe(false);
+    expect(laterStepsPending("processing", [{ step: "start", status: "started" }], now)).toBe(false);
+    expect(laterStepsPending("duplicate", [{ step: "fingerprint", status: "duplicate" }], now)).toBe(false);
+    expect(laterStepsPending("ready", inspected, now)).toBe(false);
+    expect(laterStepsPending("on_hold", [fresh, { step: "inspect", status: "on_hold" }], now)).toBe(false);
+  });
+});
+
+describe("the processing task's steps", () => {
+  it("have plain names and results", () => {
+    expect(stepText("inspect")).toBe("Inspection");
+    expect(stepText("worker")).toBe("Processing task");
+    expect(resultText("running")).toBe("Running");
+    expect(resultText("error")).toBe("Failed");
+    expect(errorText("inspect_failed")).toBe("The inspection step failed.");
+    expect(errorText("worker_failed")).toBe("The processing task step failed.");
+    expect(errorText("claim_failed")).toBe("The scheduling step failed.");
+    expect(errorText("pdf_unreadable")).toBe("The PDF could not be opened. Check the file and upload it again.");
   });
 });
 

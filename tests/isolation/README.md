@@ -25,11 +25,35 @@ pulumi config set isolationTenantIds "<tenant id>,<tenant id>" --cwd infra --sta
 
 The script exits 1 unless every test passed. A skipped test counts as a failure.
 
-The script runs two things and waits for both:
+The script runs three things and waits for each:
 
 1. The isolation test Lambda, which runs the tests in this directory.
 2. The provisioning task with its `probe` command (`tss/assay_tss/provision/probe.py`).
    This part has to run as the provisioning role, and only that task can be it.
+3. The worker task with its `probe` command (`workers/assay_workers/worker/probe.py`, build
+   step 6, second half). Only that task's role may call the TSS's `/resolve-worker` route or
+   sign in to the database as `app_worker`, and only a Fargate task shows whether the PDF
+   sandbox's confinement holds on Fargate. It checks that:
+   - `/resolve` refuses the worker, and `/resolve-worker` refuses an ended, an expired, a
+     wrong-attempt and a wrong-token grant;
+   - a live grant's credentials read that document's original and are refused another
+     document of the same tenant, the other tenant's document, and the tenant's
+     `quarantine/` and `derived/` fixtures;
+   - an unbound `app_worker` session sees no rows; a bound one sees its one document and may
+     not read `users`, the chat tables, `audit_log` or any file name; a session whose grant
+     ends while it is connected sees nothing from then on;
+   - the sandbox child has no network, no credentials, no AWS or database library, and
+     cannot read the parent's environment or memory; it is stopped at the timeout, the
+     memory limit and the output limit;
+   - the task's main process has exactly CAP_SETUID, CAP_SETGID and CAP_KILL, on a read-only
+     root filesystem.
+
+   The isolation Lambda prepares its fixture first (`worker_fixture.py`): three documents
+   with fixed IDs in the two test tenants, one small object at each one's `originals/` key
+   (written once, kept by Object Lock), and grants in every state. It ends one grant when
+   the probe says it is watching, and clears the grants afterwards. The fixture documents
+   are `discarded` between runs, so they show in no history view by default, and each has a
+   `start` event, so the pipeline never queues or processes them.
 
 ## What they show
 

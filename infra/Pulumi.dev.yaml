@@ -33,6 +33,13 @@ config:
   # Alarm notifications (break-glass use, failed tenant provisioning) are emailed here.
   # SNS sends a confirmation link first; nothing is delivered until it is followed.
   assay-platform:alarmEmail: keith.lynn@pilartech.com
+  # Security notices (a quarantined upload) are emailed here, on their own topic, apart from
+  # the alarms. Blank until you set it; SNS then sends a confirmation link at `pulumi up`,
+  # to follow within 48 hours. Not used before build step 6, second half, part 2.
+  assay-platform:securityNoticeEmail: ""
+  # The most worker tasks one tenant's documents may have running at once (1 to 50). A
+  # document waits for a slot; it never fails for lack of one.
+  assay-platform:workerMaxPerTenant: "5"
   # AWS WAF on CloudFront: requests allowed per IP address in any 5-minute window.
   assay-platform:wafRateLimit: "1000"
   # The portal signs a user out after this many minutes without activity in any of its tabs,

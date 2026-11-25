@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from assay_tss import keys, policies
-from assay_tss.models import IsolationMode, StorageAccess, TenantStorageProfile
+from assay_tss.models import (
+    REQUESTABLE_ACCESS,
+    IsolationMode,
+    StorageAccess,
+    TenantStorageProfile,
+)
 from assay_tss.policies import Principals
 
 REGION = "us-east-1"
@@ -233,7 +238,7 @@ def test_role_policy_never_allows_tags_sessions_or_object_lock_bypass() -> None:
 # --- Session policy: the exact bucket, key, index and collection ------------------------------
 
 
-@pytest.mark.parametrize("access", list(StorageAccess))
+@pytest.mark.parametrize("access", REQUESTABLE_ACCESS)
 def test_session_policy_names_only_this_tenants_resources(access: StorageAccess) -> None:
     a, b = profile(TENANT_A), profile(TENANT_B)
     policy = policies.session_policy(access, a, account_id=ACCOUNT)
@@ -251,7 +256,7 @@ def test_session_policy_names_only_this_tenants_resources(access: StorageAccess)
             assert "*" not in trimmed
 
 
-@pytest.mark.parametrize("access", list(StorageAccess))
+@pytest.mark.parametrize("access", REQUESTABLE_ACCESS)
 def test_session_policy_allows_nothing_the_role_template_does_not(access: StorageAccess) -> None:
     template = policies.tenant_role_policy(region=REGION, account_id=ACCOUNT)
     template_allows = set().union(*(actions(s) for s in statements(template, "Allow")))
@@ -298,7 +303,7 @@ def test_read_access_reads_only_originals_derived_and_chat() -> None:
         assert not resource.startswith((f"{bucket}/inbox", f"{bucket}/quarantine", f"{bucket}/*"))
 
 
-@pytest.mark.parametrize("access", list(StorageAccess))
+@pytest.mark.parametrize("access", REQUESTABLE_ACCESS)
 def test_no_session_may_list_the_bucket(access: StorageAccess) -> None:
     """The pipeline and the API work from database rows and scan events, never a listing."""
     policy = policies.session_policy(access, profile(TENANT_A), account_id=ACCOUNT)
@@ -312,7 +317,7 @@ def test_no_session_may_list_the_bucket(access: StorageAccess) -> None:
 def test_only_pipeline_access_reads_inbox_and_quarantine() -> None:
     a = profile(TENANT_A)
     bucket = f"arn:aws:s3:::{a.bucket}"
-    for access in StorageAccess:
+    for access in REQUESTABLE_ACCESS:
         policy = policies.session_policy(access, a, account_id=ACCOUNT)
         reads = {
             r
@@ -336,11 +341,141 @@ def test_pipeline_access_reaches_the_exact_index_and_collection() -> None:
     assert a.vector_index_arn(ACCOUNT).endswith(f"bucket/{a.vector_bucket}/index/documents")
 
 
-@pytest.mark.parametrize("access", list(StorageAccess))
+@pytest.mark.parametrize("access", REQUESTABLE_ACCESS)
 def test_session_policy_fits_the_sts_limit(access: StorageAccess) -> None:
     text = policies.session_policy_json(access, profile(TENANT_A), account_id=ACCOUNT)
     assert len(text) <= policies.SESSION_POLICY_MAX_CHARS
     assert json.loads(text)["Version"] == "2012-10-17"
+
+
+# --- The worker's session policy: one document's keys ------------------------------------------
+
+DOC_1 = uuid.UUID("d0000000-0000-4000-8000-000000000001")
+DOC_2 = uuid.UUID("d0000000-0000-4000-8000-000000000002")
+BATCH = uuid.UUID("b0000000-0000-4000-8000-000000000001")
+COMPANION_FILE = uuid.UUID("c0000000-0000-4000-8000-000000000001")
+
+
+def worker_policy(
+    document: uuid.UUID = DOC_1, tenant: uuid.UUID = TENANT_A, companion: bool = True
+) -> dict[str, Any]:
+    inbox = [keys.inbox_key(BATCH, document)]
+    if companion:
+        inbox.append(keys.inbox_key(BATCH, COMPANION_FILE))
+    return policies.worker_session_policy(profile(tenant), document_id=document, inbox_keys=inbox)
+
+
+def object_resources(policy: dict[str, Any]) -> set[str]:
+    return {
+        r
+        for s in policy["Statement"]
+        for r in as_list(s["Resource"])
+        if r.startswith("arn:aws:s3:::")
+    }
+
+
+def test_requestable_access_is_every_access_but_the_workers() -> None:
+    assert set(REQUESTABLE_ACCESS) == set(StorageAccess) - {StorageAccess.WORKER}
+    with pytest.raises(ValueError, match="worker_session_policy"):
+        policies.session_policy(StorageAccess.WORKER, profile(TENANT_A), account_id=ACCOUNT)
+
+
+def test_worker_policy_names_exactly_its_documents_keys() -> None:
+    a = profile(TENANT_A)
+    bucket = f"arn:aws:s3:::{a.bucket}"
+    policy = worker_policy()
+    assert object_resources(policy) == {
+        f"{bucket}/inbox/{BATCH}/{DOC_1}",
+        f"{bucket}/inbox/{BATCH}/{COMPANION_FILE}",
+        f"{bucket}/originals/{DOC_1}.pdf",
+        f"{bucket}/originals/{DOC_1}.companion.json",
+        f"{bucket}/derived/text/{DOC_1}.json",
+        f"{bucket}/derived/fields/{DOC_1}.json",
+    }
+    other = {r for s in policy["Statement"] for r in as_list(s["Resource"])} - object_resources(
+        policy
+    )
+    assert other == {a.kms_key_arn}
+    # Not one wildcard, not the bucket itself, nothing under quarantine/ or chat/.
+    text = json.dumps(policy)
+    assert "*" not in text
+    assert bucket not in {r for s in policy["Statement"] for r in as_list(s["Resource"])}
+    assert "quarantine/" not in text and "chat/" not in text
+    assert "s3vectors" not in text and "rekognition" not in text
+
+
+def test_worker_policy_reads_the_inbox_and_writes_only_its_own_objects() -> None:
+    policy = worker_policy()
+    inbox, own, key = policy["Statement"]
+    assert actions(inbox) == {"s3:GetObject", "s3:GetObjectVersion"}
+    assert all("/inbox/" in r for r in as_list(inbox["Resource"]))
+    assert actions(own) == {"s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"}
+    assert not any("/inbox/" in r for r in as_list(own["Resource"]))
+    assert actions(key) == {"kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"}
+    allowed = set().union(*(actions(s) for s in policy["Statement"]))
+    for action in allowed:
+        assert not action.startswith(("s3:List", "s3:Delete")), action
+        assert "Tagging" not in action, action
+
+
+def test_worker_policy_allows_nothing_the_role_template_does_not() -> None:
+    template = policies.tenant_role_policy(region=REGION, account_id=ACCOUNT)
+    template_allows = set().union(*(actions(s) for s in statements(template, "Allow")))
+    allowed = set().union(*(actions(s) for s in worker_policy()["Statement"]))
+    assert allowed <= template_allows
+    assert not allowed & set(policies.TENANT_DENIED_ACTIONS)
+
+
+def test_two_documents_worker_policies_share_no_object() -> None:
+    same_tenant = object_resources(worker_policy(DOC_1, companion=False)) & object_resources(
+        worker_policy(DOC_2, companion=False)
+    )
+    assert same_tenant == set()
+    other_tenant = object_resources(worker_policy(DOC_1)) & object_resources(
+        worker_policy(DOC_1, tenant=TENANT_B)
+    )
+    assert other_tenant == set()
+
+
+def test_worker_policy_with_no_inbox_file_has_no_inbox_statement() -> None:
+    policy = policies.worker_session_policy(profile(TENANT_A), document_id=DOC_1, inbox_keys=[])
+    assert not any("/inbox/" in r for r in object_resources(policy))
+    assert len(policy["Statement"]) == 2
+
+
+@pytest.mark.parametrize(
+    "inbox_keys",
+    [
+        ["inbox/*"],
+        ["originals/x.pdf"],
+        [f"inbox/{BATCH}/secret-name.pdf"],
+        [f"inbox/{BATCH}/{DOC_1}/extra"],
+        [f"quarantine/{DOC_1}.pdf"],
+        [keys.isolation_fixture_inbox_key()],
+        [keys.inbox_key(BATCH, uuid.UUID(int=n)) for n in (1, 2, 3)],
+    ],
+)
+def test_worker_policy_refuses_anything_that_is_not_its_upload_keys(inbox_keys: list[str]) -> None:
+    with pytest.raises(ValueError):
+        policies.worker_session_policy(profile(TENANT_A), document_id=DOC_1, inbox_keys=inbox_keys)
+
+
+def test_worker_policy_refuses_the_reserved_document() -> None:
+    with pytest.raises(keys.ReservedId):
+        policies.worker_session_policy(
+            profile(TENANT_A), document_id=keys.RESERVED_DOCUMENT_ID, inbox_keys=[]
+        )
+
+
+def test_worker_policy_fits_the_sts_limit() -> None:
+    a = profile(TENANT_A)
+    text = policies.worker_session_policy_json(
+        a,
+        document_id=DOC_1,
+        inbox_keys=[keys.inbox_key(BATCH, DOC_1), keys.inbox_key(BATCH, COMPANION_FILE)],
+    )
+    assert len(text) <= policies.SESSION_POLICY_MAX_CHARS
+    assert json.loads(text) == worker_policy()
 
 
 def test_session_tags_are_the_three_the_trust_policy_expects() -> None:

@@ -9,7 +9,7 @@ dependencies = [
     "assay-infra",
     "assay-schemas",
     "assay-tss[service,provision,isolation-tests]",
-    "assay-workers",
+    "assay-workers[worker]",
 ]
 
 [tool.uv]

@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. Second half not started (plan first) |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) built, not deployed. See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -216,7 +216,8 @@ Still open:
   invocation logging is off before any content first goes to Bedrock or Textract (checked on
   2026-11-24 for the plan: `optOut` for every service, logging off). The first half sends no
   content to any AI service.
-- **The second-half plan must include** (owner, 2026-11-24), before anything is built:
+- **The second-half plan** (owner, 2026-11-24) is approved; its decisions are under "Step 6,
+  second half". What it had to include, for the record:
   - **The worker (owner decision 8, deferred):** compare the always-on worker with Step
     Functions starting one ECS task per document (`runTask.sync`): cost, start-up delay,
     complexity and every permission each needs. Do not build it before the owner chooses.
@@ -1548,3 +1549,251 @@ Notes:
 - **Every Dockerfile that runs `uv export --locked`** copies `schemas/` and `workers/`
   manifests, and `.dockerignore` admits both packages; every image rebuilds on the first
   `pulumi up` of step 6.
+
+### Step 6, second half (pipeline steps 5 to 10)
+
+Plan approved by the owner on 2026-11-24. Every later stage follows these.
+
+Stages, each one `pulumi up`, then `uv run scripts/migrate.py` if it has a migration, then the
+owner's checks:
+
+| Stage | Builds | Content to AI services |
+| --- | --- | --- |
+| 1, part 1 | The worker task, the attempt grant, the PDF sandbox, `app_worker`, migration `0010` | None |
+| 1, part 2 | Attempts and "Process again", step 9 (companion), companion attach and replace, the quarantine notice, refresh-token rotation, migration `0011` | None |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score | Textract |
+| 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) |
+| 4 | Step 10: chunk, embed, index; final statuses; Titan catalog row (migration `0012`) | Bedrock (Titan) |
+
+Owner decisions (2026-11-24):
+
+- **1. One ECS task per document**, started by Step Functions (`ecs:runTask.sync`), at most
+  `workerMaxPerTenant` (5) at once per tenant. A document never fails for lack of capacity:
+  it waits and tries again.
+- **2. Old results on reprocessing:** attempt columns and pointers; `app_tenant` still has no
+  DELETE anywhere.
+- **3. Two tenant-admin routes** (`POST /documents/{id}/reprocess`,
+  `POST /documents/{id}/companion`); no reprocessing by master roles. Multi-select "Process
+  again" in the tenant history. Each writes an audit row; a companion replace names both
+  versions. Confirm before reprocessing a `ready` document (it costs money).
+- **4. A second SNS topic for security notices**, apart from the alarm topic, with its own
+  endpoint policy statement. The address is stack config `securityNoticeEmail` (blank until
+  the owner sets it; SNS then sends a confirmation link to follow within 48 hours).
+- **5. Widenings approved:** the `sns` endpoint and the scan role's publish and
+  KMS-through-SNS permissions; the state machine's ECS permissions with `iam:PassRole` for
+  the worker's two roles only; the worker's Textract and Bedrock permissions, each only in
+  the stage that needs it; the database column grants.
+- **6. The tenant document panel shows each form's extracted fields** with page and
+  confidence. Master views never show extracted values; add a test.
+- **7. Only `ready` documents are retrieved.** A "Mark as reviewed" action for tenant admins
+  moves `needs_review` to `ready`, with an audit row naming the user. `needs_review`
+  documents are still indexed.
+- **8. No `pdfplumber`.**
+- **A. The worker is bound to one tenant, and to one document** (below).
+- **B. PDF parsing is isolated** in a sandbox child, and the worker's database session is
+  bound to its grant (below).
+- **C.** Every AI call writes an `ai_usage` row (tenant, model, tokens, document). No prompt
+  or response content is logged anywhere. Bedrock and Textract throttling is retried with
+  backoff.
+- **D.** Document text is untrusted input to the model: forced tool choice and schema
+  validation stay, and a test uses a document that contains instructions.
+- **E.** Before stage 2's deploy: re-run the opt-out and invocation-logging checks and show
+  the owner the output. (Run on 2026-11-25 03:58 UTC for the plan: `optOut` for every
+  service, last updated 2026-11-24 04:37:58 UTC; no invocation logging configuration.)
+- **Conditions on part 1** (a to f): the token's visibility recorded as a known limit; the
+  isolation tests below, run in AWS; the sandbox image tests below; the parent distrusts the
+  child's output; stage 1 split in two; every new grant and permission listed in the pull
+  request's permission changes.
+
+#### Stage 1, part 1: the worker task, the attempt grant, the sandbox, `app_worker`
+
+Built on `build-step-6`; **not deployed**. `pulumi preview` (2026-11-25): 18 to create, 15 to
+update, 11 to replace, 311 unchanged.
+
+How it works:
+
+- **Fingerprint no longer opens a PDF** (owner decision B4). A Lambda has one user and its
+  credentials in its environment, so no Lambda may run a PDF parser, and the Lambda image
+  ships none (`pypdfium2` is the `worker` extra of `assay-workers`). Fingerprint keeps the
+  hash, the duplicate check and a comparison of the first bytes with `%PDF-`. Opening the
+  PDF (password-protected, not a PDF that opens, page count) and the copy to `originals/`
+  moved to the worker task's `inspect` step. So a password-protected PDF now waits for a
+  task before it shows On hold.
+- **State machine:** `Fingerprint` (Lambda), `Claim` (Lambda), `Worker`
+  (`ecs:runTask.sync`), `Release` (Lambda).
+  - `claim` takes one of the tenant's worker slots and creates the attempt grant
+    (`assay_db.grants`, table `worker_grants`): a random token of which only the SHA-256 is
+    stored. With no slot free it answers `wait`, and the execution waits 30 seconds and asks
+    again. A live grant is the slot.
+  - The task gets `DOCUMENT_ID`, `ATTEMPT` and `WORKER_TOKEN` as overrides and nothing else
+    about the document. Its result is discarded.
+  - `release` ends the grant. After a failed task it also says whether the task ever started
+    (the task writes a `worker`/`running` event when it has bound its session). If it never
+    did (no Fargate capacity, an image that could not be pulled), the execution waits 60
+    seconds and claims again; `release` logs that at WARNING, and at ERROR every tenth try.
+  - The execution's timeout (12 hours, inside a Standard execution's 25,000 history events)
+    is the only limit on waiting. It leaves the document `processing`, never `failed`, and
+    raises `executionstimedout`.
+- **Failed steps still name themselves.** The task writes a `running` mark before each of
+  its steps and an `error` mark, with the exception's type, when it can
+  (`assay_workers.progress`). For a failed task the `failed` handler reads the step from
+  those marks in the database (`inspect_failed`), never from the error; with no mark it is
+  `worker_failed`. The history views leave out a `running` mark once its step has a later
+  row (`assay_schemas.pipeline.visible_events`). **Later stages: add each new step to
+  `progress.WORKER_STEPS`, to the portal's `STEP_TEXT` and `RESULT_TEXT`, and to
+  `PIPELINE_STEPS`.**
+- **A stopped sandbox child fails the document** (`pdf_unreadable`) and logs at ERROR, which
+  raises `worker-errors`: it is what a broken file looks like, and what an attack on the
+  parser looks like.
+
+Binding the worker (owner decisions A1, A2, B5):
+
+- **Storage.** The worker calls the TSS at `POST /resolve-worker` with the document ID, the
+  attempt and the token. It names no tenant. The TSS takes the tenant from the grant's row
+  (`pipeline.worker_grant`) and only while the grant is live: not ended, not expired, the
+  document's current attempt, the document `processing`. Access `worker`: a session policy
+  with that document's exact keys and no wildcard (its inbox files, read; its original,
+  companion, text and fields objects, read and write). No `quarantine/`, no other document,
+  no vectors (they arrive in stage 4, tenant-wide: S3 Vectors has no per-key permission), no
+  face collection. `/resolve` refuses the worker; `/resolve-worker` refuses every other
+  caller; each caller's IAM policy and the API's resource policy name one route per caller.
+- **Database.** The worker signs in as `app_worker`, not `app_tenant`. `app.tenant_id` means
+  nothing to it. It calls `pipeline.bind_worker(document, attempt, token)`, and its policies
+  read `pipeline.bound_tenant()` and `pipeline.bound_document()`, which check the grant
+  again on every use. An unbound session, or one whose grant ended, sees nothing. A bound
+  one sees one document. Column-level grants on `documents`, `batch_files` and
+  `document_events` only: no file name, no `users`, no chat tables, no `audit_log`. **Later
+  stages add `app_worker`'s grants and policies for each table their steps use, in that
+  stage's migration.**
+- The binding is a session setting that holds the token, checked against the stored hash.
+  A session cannot forge it without the token. It is set in its own committed transaction,
+  because a session setting made in a transaction that rolls back is undone.
+
+The sandbox (owner decisions B3, B4; `assay_workers.sandbox`):
+
+- The task's main process runs as root with CAP_SETUID, CAP_SETGID and CAP_KILL only, on a
+  read-only root filesystem. Fargate cannot add capabilities, so the task definition drops
+  the other 34 by name. It holds the credentials and the database session and never opens a
+  PDF.
+- Each job runs in a child: user `sandbox` (uid 10002), no groups, an empty environment,
+  `python -I -B`, its own session, limits (60 s wall clock, 45 s CPU, 2 GiB address space,
+  no file writes, 16 processes, 64 KB of output), `no_new_privs`, and a seccomp filter set
+  between fork and exec that refuses `socket` and the calls that reach other processes. The
+  child then forbids itself `exec`.
+- CPython sets `LC_CTYPE` for itself under the "C" locale, so a child's environment is not
+  literally empty; that one name is allowed (`runner.SET_BY_THE_INTERPRETER`).
+- The parent distrusts the child: one JSON object, at most 64 KB, validated against a model
+  with only numbers and codes from fixed sets. No path or key comes from the child. If the
+  child cannot be started as the sandbox user, the job does not run.
+- Not available on Fargate: a cgroup, network namespace or firewall rule for one process; a
+  task-level seccomp or AppArmor profile; a second container with another role.
+- Residual risk (accepted by the owner, 2026-11-24): a parser exploit runs as the sandbox
+  user for at most the timeout, with the one PDF it was given; it can return wrong values
+  for that document or make it fail. To reach credentials it needs a second exploit, against
+  the kernel in the task's microVM, and would then hold one document's worker credentials.
+
+Known limit (owner condition a, 2026-11-24):
+
+- **The grant's token is visible** in the execution's history (Step Functions keeps the
+  state), in the task's description (the container overrides) and in CloudTrail (the
+  `RunTask` request parameters), to principals that can read those. Accepted, because the
+  token is useless without the worker task's role (only that role may call
+  `/resolve-worker` or sign in as `app_worker`), and dead when the attempt ends (`release`)
+  or the grant expires (40 minutes at most). The state machine's log still records no
+  execution data (`includeExecutionData: false`, level `ERROR`; tested). Credentials issued
+  just before an attempt ends still last their 15 minutes, the STS minimum.
+
+New grants and permissions (all approved 2026-11-24; also in the pull request):
+
+- **Database (migration `0010`):** role `app_worker` (login, IAM) with SELECT on ten columns
+  of `documents`, nine of `batch_files`, five of `document_events`; UPDATE on six columns of
+  `documents`; INSERT on `document_events`; EXECUTE on `bind_worker`, `bound_tenant`,
+  `bound_document`. `tss`: USAGE on schema `pipeline`, EXECUTE on `worker_grant`.
+  `pipeline_lookup`: SELECT on `documents.attempt`, `batch_files.document_id` and six
+  columns of `worker_grants`. `app_tenant`: SELECT, INSERT, UPDATE on the new
+  `worker_grants`.
+- **IAM:** the worker task role (`rds-db:connect` as `app_worker`; `execute-api:Invoke` on
+  `/resolve-worker`); its execution role (pull its image, write its logs); the state
+  machine role gains `ecs:RunTask` (the worker task definition, its cluster),
+  `ecs:StopTask` and `ecs:DescribeTasks` (that cluster's tasks), `iam:PassRole` (those two
+  roles, to ECS tasks) and the three `events` actions on Step Functions' managed rule.
+- **Resource policies:** the TSS API admits the worker role on `/resolve-worker`; API
+  Gateway may invoke the TSS Lambda for that route.
+- No change to the tenant role, the bucket, key or vector bucket policies, any endpoint
+  policy or any queue. No new KMS key. No `update_tenants.py` run.
+
+Deploy order (owner): `pulumi up`; `uv run scripts/migrate.py` straight away (the bootstrap
+creates `app_worker`, then `0010`); `uv run scripts/run_isolation.py ...`; browser checks.
+Every image rebuilds (the lock file changed). Until `0010` is in, a document that reaches
+`claim` fails there, so upload nothing in between.
+
+Tests:
+
+- `tests/unit/test_db_worker.py`: the grant, the TSS's lookup and `app_worker`, against a
+  real PostgreSQL, signed in as each role.
+- `tests/unit/test_worker_image.py` (Docker; condition c): the real child, run as the task
+  runs it. No socket, no parent environment or memory, no AWS or database library, stopped
+  at the timeout and the limits, a malformed PDF, memory exhaustion. 16 of 16 pass locally.
+- `tests/unit/test_worker_probe.py`: the isolation probe passes every check on a correct
+  system and fails the right one when what it guards is broken. That includes its four
+  `inspection:` checks (see "A password-protected upload may never reach the worker").
+- **Not yet run in AWS** (condition b): `scripts/run_isolation.py` now also runs the worker
+  task with `WORKER_COMMAND=probe`. The isolation Lambda prepares three fixture documents
+  with fixed IDs in the two test tenants (`tests/isolation/worker_fixture.py`), each with a
+  small object at its `originals/` key (written once, kept by Object Lock), and ends one
+  grant while the probe watches. The fixture documents are `discarded` between runs and have
+  a `start` event, so the pipeline never queues them. They do have `documents` rows, unlike
+  the reserved ID.
+
+Not verified until deployed:
+
+- That the seccomp filter and the switch of user work on Fargate as they do under Docker
+  (the probe checks both).
+- That a Fargate task's effective capabilities are exactly the three (the probe reads
+  `CapEff`, `CapPrm` and `CapBnd`).
+- How a RunTask refused for the vCPU quota reaches Step Functions. The design does not
+  depend on it: any failed task with no `worker`/`running` event is waited out.
+- A worker task's start-up time (estimated 30 to 90 seconds).
+- That the task definition's container definition round-trips with no preview difference
+  (34 capability names in `drop`; ECS may store them in another order). The names are the
+  ones the ECS API reference lists (KernelCapabilities, read 2026-11-25), which states no
+  Fargate limit on `drop`.
+
+Notes:
+
+- **GuardDuty's scan result event carries the threat name**:
+  `detail.scanResultDetails.threats[0].name` (user guide, read 2026-11-25: "contains only
+  one threat ... the first detected threat"). The note under "Carried forward to step 6" says
+  the event lacks it; `scan.parse` just does not read it. Part 2 reads it there, with no
+  GuardDuty permission. Not yet seen in a real event here: the part 2 EICAR run confirms it.
+  The same page shows `scanStatus: SKIPPED` with `statusReasons` such as
+  `PASSWORD_PROTECTED`, which could make `scan_unsupported`'s wording certain.
+- **Linux-only code and mypy.** The sandbox uses `resource`, `os.killpg` and `signal.SIGKILL`,
+  which do not exist on the Windows development machine. Each function that uses them starts
+  with `if sys.platform != "linux": raise OSError(...)`, which mypy understands: it checks
+  the rest on Linux (CI) and skips it on Windows.
+- **`preexec_fn` runs after the switch of user** in CPython's `subprocess`, so the limits and
+  the filter are set by the sandbox user itself, before the child's interpreter starts.
+- **Bash heredocs halve backslashes** on this machine: write a script with the Write tool
+  and run it, or use Edit.
+- **Test files that are never duplicates** (owner's request, 2026-11-25).
+  `uv run scripts/make_test_files.py --fresh` adds a new run ID to every page of every PDF,
+  so a tenant that already holds the plain set (Infinity Loans does) gets new documents.
+  Within one run 02 is still byte for byte 01, so the duplicate check still shows.
+- **A password-protected upload may never reach the worker.** GuardDuty held
+  `03-password-protected.pdf` (40-bit RC4) at the scan on 2026-11-24 (`scan_unsupported`).
+  AWS documents that password-protected files are not scanned, and not how it recognises
+  one, so it is not known that it catches every kind. The worker's own check
+  (`pdf_encrypted`, owner decision 13: "whatever GuardDuty said") is the backstop for a kind
+  it misses. It is exercised three ways, none of which depends on GuardDuty missing one:
+  - `tests/unit/test_worker_step6.py`: the real job on the real protected file, with the
+    document ending `on_hold` in a real PostgreSQL;
+  - `tests/unit/test_worker_image.py`: the real sandbox child, in the task's image, on both
+    protected files;
+  - in AWS, the worker probe's four `inspection:` checks (`run_isolation.py`): the real job,
+    in the real sandbox, on Fargate, on a plain PDF, both protected PDFs and a broken one
+    (`assay_workers/worker/probe_files.py`, the test-file script's own output).
+  `07-password-protected-128.pdf` (128-bit RC4) is a second kind to try through the browser.
+  If GuardDuty passes it, the panel shows Inspection: On hold. If it holds it too, the panel
+  shows the scan's "Could not be scanned", as for 03. Record which here once it is tried.
+

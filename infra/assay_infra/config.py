@@ -58,6 +58,17 @@ class AuthConfig:
 class AlertsConfig:
     # Where alarm notifications are emailed. The owner confirms the subscription.
     email: str
+    # Where security notices (a quarantined upload) are emailed, on their own topic. Blank
+    # until the owner sets it; the topic and its subscription arrive with the notice itself
+    # (build step 6, second half, part 2).
+    security_notice_email: str = ""
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    # The most worker tasks one tenant's documents may have running at once (owner decision,
+    # 2026-11-24). The account's Fargate vCPU quota is the ceiling across tenants.
+    worker_max_per_tenant: int = 5
 
 
 @dataclass(frozen=True)
@@ -103,6 +114,7 @@ class PlatformConfig:
     alerts: AlertsConfig
     edge: EdgeConfig
     models: ModelsConfig
+    pipeline: PipelineConfig = PipelineConfig()
 
 
 def _within_zone(host: str, zone: str) -> bool:
@@ -170,6 +182,18 @@ _EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
 def validate_alerts(cfg: AlertsConfig) -> AlertsConfig:
     if not _EMAIL.match(cfg.email):
         raise ValueError("alarmEmail must be an email address")
+    if cfg.security_notice_email and not _EMAIL.match(cfg.security_notice_email):
+        raise ValueError("securityNoticeEmail must be an email address, or blank")
+    return cfg
+
+
+WORKER_MAX_PER_TENANT_RANGE = (1, 50)
+
+
+def validate_pipeline(cfg: PipelineConfig) -> PipelineConfig:
+    low, high = WORKER_MAX_PER_TENANT_RANGE
+    if not low <= cfg.worker_max_per_tenant <= high:
+        raise ValueError(f"workerMaxPerTenant must be between {low} and {high}")
     return cfg
 
 
@@ -268,7 +292,15 @@ def load_config() -> PlatformConfig:
                 default_tags={str(k): str(v) for k, v in default_tags.items()},
             )
         ),
-        alerts=validate_alerts(AlertsConfig(email=conf.require("alarmEmail"))),
+        alerts=validate_alerts(
+            AlertsConfig(
+                email=conf.require("alarmEmail"),
+                security_notice_email=(conf.get("securityNoticeEmail") or "").strip(),
+            )
+        ),
+        pipeline=validate_pipeline(
+            PipelineConfig(worker_max_per_tenant=conf.require_int("workerMaxPerTenant"))
+        ),
         edge=validate_edge(
             EdgeConfig(
                 waf_rate_limit=conf.require_int("wafRateLimit"),

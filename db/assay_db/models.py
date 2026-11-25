@@ -286,6 +286,7 @@ class Document(Base):
     __table_args__ = (
         one_of("status", DOCUMENT_STATUSES),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256"),
+        CheckConstraint("attempt >= 1", name="attempt"),
         UniqueConstraint("tenant_id", "id"),
         child_of("batches", "batch_id"),
         child_of("users", "uploaded_by"),
@@ -332,6 +333,40 @@ class Document(Base):
     # When the document became eligible and was sent to the ingest queue (build step 6). The
     # sweeper queues it again if no execution started within a while.
     queued_at: Mapped[tstz | None]
+    # Which run of the pipeline is current (build step 6, second half). A worker's grant
+    # names an attempt, and is good only while that attempt is the document's current one.
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
+
+
+class WorkerGrant(Base):
+    """One run of the worker task for one document's attempt (build step 6, second half).
+
+    The pipeline's `claim` step creates the row just before it starts the task, with a random
+    token of which only the SHA-256 is kept here. The task gets the token from Step Functions
+    and presents it, with the document ID and attempt, to the Tenant Storage Service
+    (`/resolve-worker`) and to the database (`pipeline.bind_worker`). Both take the tenant
+    from this row, never from the worker, and only while the grant is live: not ended, not
+    expired, and for the document's current attempt. A live grant is also the tenant's slot
+    in the cap on concurrent workers.
+    """
+
+    __tablename__ = "worker_grants"
+    __table_args__ = (
+        CheckConstraint("token_hash ~ '^[0-9a-f]{64}$'", name="token_hash"),
+        CheckConstraint("attempt >= 1", name="attempt"),
+        UniqueConstraint("token_hash"),
+        child_of("documents", "document_id"),
+        Index("ix_worker_grants_tenant_id_document_id", "tenant_id", "document_id"),
+    )
+
+    id: Mapped[uuid_pk]
+    tenant_id: Mapped[uuid.UUID] = tenant_fk()
+    document_id: Mapped[uuid_col]
+    attempt: Mapped[int]
+    token_hash: Mapped[str]
+    created_at: Mapped[tstz_now]
+    expires_at: Mapped[tstz]
+    ended_at: Mapped[tstz | None]
 
 
 class BatchFile(Base):

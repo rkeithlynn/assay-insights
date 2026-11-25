@@ -148,6 +148,7 @@ def test_every_dockerfile_copies_every_workspace_manifest() -> None:
         "tests/isolation/Dockerfile",
         "api/lambda.Dockerfile",
         "workers/lambda.Dockerfile",
+        "workers/worker.Dockerfile",
     ):
         text = (REPO_ROOT / path).read_text(encoding="utf-8")
         for member in members:
@@ -491,21 +492,21 @@ def workers_image() -> Iterator[str]:
 
 @requires_docker
 def test_workers_image_runs_every_handler_as_lambdas_user(workers_image: str) -> None:
-    """Every pipeline handler imports as uid 993 on a read-only filesystem; PDFium works; the
-    image has the TSS client and nothing of the service or the provisioning code; and the
-    reserved document ID is refused before anything is reached (no network here)."""
+    """Every pipeline handler imports as uid 993 on a read-only filesystem; the image has no
+    PDF library at all (a Lambda never opens a PDF: build step 6, second half); it has the
+    TSS client and nothing of the service or the provisioning code; and the reserved
+    document ID is refused before anything is reached (no network here)."""
     code = (
-        "import importlib.util, io, json, os\n"
-        "import pypdfium2\n"
+        "import importlib.util, json, os\n"
         "from assay_workers import scan, starter, steps, sweeper\n"
         "from assay_tss import keys\n"
-        "pdf = pypdfium2.PdfDocument.new(); pdf.new_page(612, 792)\n"
-        "buf = io.BytesIO(); pdf.save(buf); pdf.close()\n"
-        "opened = pypdfium2.PdfDocument(buf.getvalue())\n"
         "reserved = str(keys.RESERVED_DOCUMENT_ID)\n"
-        "refused = steps.handle(\n"
-        "    {'step': 'fingerprint', 'tenant_id': reserved, 'document_id': reserved}, None)\n"
-        "print(json.dumps({'uid': os.getuid(), 'pages': len(opened),\n"
+        "event = {'tenant_id': reserved, 'document_id': reserved}\n"
+        "refused = steps.handle({'step': 'fingerprint', **event}, None)\n"
+        "others = [steps.handle({'step': s, **event}, None) for s in ('claim', 'release')]\n"
+        "print(json.dumps({'uid': os.getuid(),\n"
+        "    'pdfium': importlib.util.find_spec('pypdfium2') is not None,\n"
+        "    'others': others,\n"
         "    'bundle': os.access(os.environ['DB_CA_BUNDLE'], os.R_OK),\n"
         "    'service': importlib.util.find_spec('assay_tss.service') is not None,\n"
         "    'provision': importlib.util.find_spec('assay_tss.provision') is not None,\n"
@@ -515,7 +516,8 @@ def test_workers_image_runs_every_handler_as_lambdas_user(workers_image: str) ->
     )
     result = lambda_python(workers_image, code)
     assert result["uid"] == 993
-    assert result["pages"] == 1
+    assert result["pdfium"] is False
+    assert result["others"] == [{"outcome": "refused"}, {"outcome": "refused"}]
     assert result["bundle"] is True
     assert (result["service"], result["provision"], result["pulumi"], result["fastapi"]) == (
         False,

@@ -13,16 +13,18 @@ import pytest
 from botocore.exceptions import ClientError
 
 from assay_tss import handler as tss_handler
-from assay_tss import naming, service
+from assay_tss import keys, naming, service
 from assay_tss.client import TssClient
 from assay_tss.models import (
+    REQUESTABLE_ACCESS,
     IsolationMode,
     ResolveRequest,
     StorageAccess,
     StorageStatus,
     TenantStorageProfile,
+    WorkerResolveRequest,
 )
-from assay_tss.service import CallerGrant, Resolver, ServiceSettings
+from assay_tss.service import CallerGrant, Resolver, ServiceSettings, WorkerGrant
 
 REGION = "us-east-1"
 ACCOUNT = "000000000000"
@@ -31,7 +33,7 @@ TENANT_ROLE = f"arn:aws:iam::{ACCOUNT}:role/assay-dev-tenant"
 TENANT_A = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
 TENANT_B = uuid.UUID("bbbbbbbb-0000-4000-8000-000000000002")
 # A caller allowed every access, so the tests below can ask for any of them.
-API = CallerGrant(service="api", access=frozenset(StorageAccess))
+API = CallerGrant(service="api", access=frozenset(REQUESTABLE_ACCESS))
 API_NARROW = CallerGrant(
     service="api", access=frozenset({StorageAccess.READ, StorageAccess.UPLOAD})
 )
@@ -41,10 +43,22 @@ SETTINGS = ServiceSettings(
     tenant_role_arn=TENANT_ROLE,
     callers={
         "api-task-role-1a2b3c": API_NARROW,
-        "worker-role-9z": CallerGrant(service="worker", access=frozenset({StorageAccess.PIPELINE})),
+        "steps-role-9z": CallerGrant(
+            service="pipeline", access=frozenset({StorageAccess.PIPELINE})
+        ),
+        "worker-task-role-7q": CallerGrant(
+            service="worker", access=frozenset({StorageAccess.WORKER})
+        ),
     },
 )
+WORKER = SETTINGS.callers["worker-task-role-7q"]
+STEPS = SETTINGS.callers["steps-role-9z"]
 API_CALLER = f"arn:aws:sts::{ACCOUNT}:assumed-role/api-task-role-1a2b3c/session-1"
+WORKER_CALLER = f"arn:aws:sts::{ACCOUNT}:assumed-role/worker-task-role-7q/0123456789abcdef"
+STEPS_CALLER = f"arn:aws:sts::{ACCOUNT}:assumed-role/steps-role-9z/assay-dev-pipeline-steps"
+DOCUMENT = uuid.UUID("d0000000-0000-4000-8000-000000000001")
+BATCH = uuid.UUID("b0000000-0000-4000-8000-000000000001")
+TOKEN = "t0ken-" + "A" * 40
 EXPIRATION = dt.datetime(2026, 11, 23, 12, 15, tzinfo=dt.UTC)
 
 
@@ -66,10 +80,22 @@ class FakeReader:
     def __init__(self, *profiles: TenantStorageProfile) -> None:
         self.rows = {p.tenant_id: p for p in profiles}
         self.asked: list[uuid.UUID] = []
+        self.grants = {}
+        self.grant_lookups = []
 
     def profile(self, tenant_id: uuid.UUID) -> TenantStorageProfile | None:
         self.asked.append(tenant_id)
         return self.rows.get(tenant_id)
+
+    # (document, attempt, SHA-256 of the token) -> the live grant.
+    grants: dict[tuple[uuid.UUID, int, str], WorkerGrant]
+    grant_lookups: list[tuple[uuid.UUID, int, str]]
+
+    def worker_grant(
+        self, document_id: uuid.UUID, attempt: int, token_sha256: str
+    ) -> WorkerGrant | None:
+        self.grant_lookups.append((document_id, attempt, token_sha256))
+        return self.grants.get((document_id, attempt, token_sha256))
 
 
 class FakeSts:
@@ -420,3 +446,234 @@ def test_client_does_not_provision_or_offboard() -> None:
         client().provision(TENANT_A, IsolationMode.DEDICATED)
     with pytest.raises(NotImplementedError):
         client().offboard(TENANT_A)
+
+
+# --- resolve_worker: one document, for the tenant its grant names -----------------------------
+
+
+def worker_request(
+    document: uuid.UUID = DOCUMENT, attempt: int = 1, token: str = TOKEN
+) -> WorkerResolveRequest:
+    return WorkerResolveRequest.model_validate(
+        {"document_id": str(document), "attempt": attempt, "token": token}
+    )
+
+
+def worker_resolver(
+    tenant: uuid.UUID = TENANT_A, inbox_keys: tuple[str, ...] | None = None
+) -> tuple[Resolver, FakeReader, FakeSts]:
+    subject, reader, sts = resolver(profile(TENANT_A), profile(TENANT_B))
+    reader.grants[(DOCUMENT, 1, service.token_hash(TOKEN))] = WorkerGrant(
+        tenant_id=tenant,
+        inbox_keys=(keys.inbox_key(BATCH, DOCUMENT),) if inbox_keys is None else inbox_keys,
+    )
+    return subject, reader, sts
+
+
+def test_resolve_worker_takes_the_tenant_from_the_grant_and_scopes_to_the_document() -> None:
+    subject, reader, sts = worker_resolver(TENANT_B)
+    context = subject.resolve_worker(worker_request(), caller=WORKER)
+
+    # The tenant is the grant's: the request named none.
+    assert context.tenant_id == TENANT_B and context.bucket == "assay-dev-t-bbbbbbbb"
+    assert context.access is StorageAccess.WORKER and context.document_id == DOCUMENT
+    assert reader.asked == [TENANT_B]
+    # The database is asked for the token's hash, never the token.
+    assert reader.grant_lookups == [(DOCUMENT, 1, service.token_hash(TOKEN))]
+
+    call = sts.calls[0]
+    assert call["DurationSeconds"] == 900
+    assert call["RoleSessionName"] == "t-bbbbbbbb-worker"
+    assert call["SourceIdentity"] == f"worker.{DOCUMENT.hex[:12]}-a1"
+    assert {t["Key"]: t["Value"] for t in call["Tags"]}["tenant_id"] == str(TENANT_B)
+    policy = json.loads(call["Policy"])
+    resources = {r for s in policy["Statement"] for r in _as_list(s["Resource"])}
+    assert f"arn:aws:s3:::assay-dev-t-bbbbbbbb/originals/{DOCUMENT}.pdf" in resources
+    assert f"arn:aws:s3:::assay-dev-t-bbbbbbbb/inbox/{BATCH}/{DOCUMENT}" in resources
+    assert "*" not in call["Policy"] and TOKEN not in call["Policy"]
+    assert "assay-dev-t-aaaaaaaa" not in call["Policy"]
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else [value]
+
+
+@pytest.mark.parametrize(
+    "presented",
+    [
+        {"token": TOKEN + "x"},
+        {"attempt": 2},
+        {"document": uuid.UUID("d0000000-0000-4000-8000-000000000002")},
+    ],
+)
+def test_a_grant_that_does_not_match_gets_nothing(presented: dict[str, Any]) -> None:
+    subject, _, sts = worker_resolver()
+    with pytest.raises(service.WorkerGrantRefused) as refused:
+        subject.resolve_worker(worker_request(**presented), caller=WORKER)
+    assert refused.value.status == 403 and refused.value.code == "worker_grant_refused"
+    assert sts.calls == []
+
+
+def test_the_reserved_document_never_gets_worker_credentials() -> None:
+    subject, reader, sts = worker_resolver()
+    reader.grants[(keys.RESERVED_DOCUMENT_ID, 1, service.token_hash(TOKEN))] = WorkerGrant(
+        tenant_id=TENANT_A, inbox_keys=()
+    )
+    with pytest.raises(service.WorkerGrantRefused):
+        subject.resolve_worker(worker_request(keys.RESERVED_DOCUMENT_ID), caller=WORKER)
+    assert reader.grant_lookups == [] and sts.calls == []
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        API_NARROW,
+        API,
+        STEPS,
+        # Worker access among others is still not the worker.
+        CallerGrant(service="isolation", access=frozenset(StorageAccess)),
+    ],
+)
+def test_resolve_worker_serves_only_the_worker(caller: CallerGrant) -> None:
+    subject, reader, sts = worker_resolver()
+    with pytest.raises(service.AccessNotAllowed):
+        subject.resolve_worker(worker_request(), caller=caller)
+    assert reader.grant_lookups == [] and sts.calls == []
+
+
+@pytest.mark.parametrize("access", list(StorageAccess))
+def test_resolve_never_serves_the_worker(access: StorageAccess) -> None:
+    subject, reader, sts = worker_resolver()
+    with pytest.raises(service.AccessNotAllowed):
+        subject.resolve(request(access=access, source="worker.job-1"), caller=WORKER)
+    assert reader.asked == [] and sts.calls == []
+
+
+def test_no_one_is_issued_worker_access_by_name() -> None:
+    subject, _, sts = worker_resolver()
+    everything = CallerGrant(service="api", access=frozenset(REQUESTABLE_ACCESS))
+    with pytest.raises(service.AccessNotAllowed):
+        subject.resolve(request(access=StorageAccess.WORKER), caller=everything)
+    assert sts.calls == []
+
+
+def test_a_grant_row_with_a_key_that_is_not_an_upload_key_is_refused() -> None:
+    subject, _, sts = worker_resolver(inbox_keys=("quarantine/x.pdf",))
+    with pytest.raises(service.StorageProfileInvalid):
+        subject.resolve_worker(worker_request(), caller=WORKER)
+    assert sts.calls == []
+
+
+def test_a_worker_request_carries_no_tenant_and_a_plausible_token() -> None:
+    body = {"document_id": str(DOCUMENT), "attempt": 1, "token": TOKEN}
+    assert WorkerResolveRequest.model_validate(body).token.get_secret_value() == TOKEN
+    assert TOKEN not in repr(WorkerResolveRequest.model_validate(body))
+    for bad in (
+        body | {"tenant_id": str(TENANT_B)},
+        body | {"access": "pipeline"},
+        body | {"token": "short"},
+        body | {"token": "has:colon" + "A" * 40},
+        body | {"attempt": 0},
+        {"document_id": str(DOCUMENT), "attempt": 1},
+    ):
+        with pytest.raises(ValueError):
+            WorkerResolveRequest.model_validate(bad)
+
+
+def worker_body(**changes: Any) -> dict[str, Any]:
+    return {"document_id": str(DOCUMENT), "attempt": 1, "token": TOKEN} | changes
+
+
+def test_handler_serves_the_worker_route(caplog: pytest.LogCaptureFixture) -> None:
+    subject, _, _ = worker_resolver()
+    caplog.set_level(logging.INFO)
+    response = tss_handler.handle(
+        event(worker_body(), user_arn=WORKER_CALLER, resource="/resolve-worker"), SETTINGS, subject
+    )
+    assert response["statusCode"] == 200
+    body = json.loads(response["body"])
+    assert body["access"] == "worker" and body["document_id"] == str(DOCUMENT)
+    assert body["tenant_id"] == str(TENANT_A)
+    # The token and the credentials are never logged; the document and attempt are.
+    assert TOKEN not in caplog.text and "secret-from-sts" not in caplog.text
+    record = caplog.records[-1]
+    assert record.document_id == str(DOCUMENT) and record.attempt == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("request_event", "status", "error"),
+    [
+        # Every other caller is refused on the worker's route...
+        (event(worker_body(), resource="/resolve-worker"), 403, "access_not_allowed"),
+        (
+            event(worker_body(), user_arn=STEPS_CALLER, resource="/resolve-worker"),
+            403,
+            "access_not_allowed",
+        ),
+        (
+            event(worker_body(), user_arn=None, resource="/resolve-worker"),
+            403,
+            "caller_not_allowed",
+        ),
+        # ...and the worker is refused on everyone else's.
+        (
+            event(good_body(source_identity="worker.x"), user_arn=WORKER_CALLER),
+            403,
+            "access_not_allowed",
+        ),
+        (
+            event(good_body(source_identity="worker.x", access="pipeline"), user_arn=WORKER_CALLER),
+            403,
+            "access_not_allowed",
+        ),
+        (
+            event(
+                worker_body(token=TOKEN + "x"), user_arn=WORKER_CALLER, resource="/resolve-worker"
+            ),
+            403,
+            "worker_grant_refused",
+        ),
+        (
+            event(worker_body(attempt=2), user_arn=WORKER_CALLER, resource="/resolve-worker"),
+            403,
+            "worker_grant_refused",
+        ),
+        (
+            event(
+                worker_body(tenant_id=str(TENANT_B)),
+                user_arn=WORKER_CALLER,
+                resource="/resolve-worker",
+            ),
+            400,
+            "invalid_request",
+        ),
+    ],
+)
+def test_worker_route_refusals(
+    request_event: dict[str, Any], status: int, error: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    subject, _, sts = worker_resolver()
+    caplog.set_level(logging.INFO)
+    response = tss_handler.handle(request_event, SETTINGS, subject)
+    assert response["statusCode"] == status
+    assert json.loads(response["body"]) == {"error": error}
+    assert sts.calls == []
+    assert TOKEN not in caplog.text
+
+
+def test_client_sends_a_worker_request_to_its_own_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    subject, _, _ = worker_resolver()
+    wire = subject.resolve_worker(worker_request(), caller=WORKER).to_wire()
+    tss = client()
+    seen: list[tuple[str, bytes]] = []
+
+    def fake_signed(path: str, body: bytes) -> Any:
+        seen.append((path, body))
+        return object()
+
+    monkeypatch.setattr(tss, "signed_request", fake_signed)
+    monkeypatch.setattr(tss, "send", lambda _request: wire)
+    context = tss.resolve_worker(DOCUMENT, 1, TOKEN)
+    assert seen[0][0] == "/resolve-worker"
+    assert json.loads(seen[0][1]) == {"document_id": str(DOCUMENT), "attempt": 1, "token": TOKEN}
+    assert context.access is StorageAccess.WORKER and context.document_id == DOCUMENT

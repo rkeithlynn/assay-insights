@@ -25,6 +25,7 @@ from assay_api.routes.audit import Dbs
 from assay_api.routes.documents import DocumentStatus
 from assay_api.security import PlatformMember
 from assay_db import audit
+from assay_schemas.pipeline import visible_events
 
 router = APIRouter(prefix="/admin")
 
@@ -203,13 +204,16 @@ def ingestion_detail(document_id: uuid.UUID, caller: PlatformMember) -> Ingestio
     ).first()
     if exists is None:
         raise HTTPException(status_code=http.HTTP_404_NOT_FOUND, detail="document_not_found")
-    events = caller.conn.execute(
-        text(
-            "SELECT step, status, at, error_code, error_type FROM platform.ingestion_events_v "
-            "WHERE document_id = :id ORDER BY at"
-        ),
-        {"id": document_id},
-    ).all()
+    # A step that is finished shows its result, not also the mark that it had started.
+    events = visible_events(
+        caller.conn.execute(
+            text(
+                "SELECT step, status, at, error_code, error_type "
+                "FROM platform.ingestion_events_v WHERE document_id = :id ORDER BY at"
+            ),
+            {"id": document_id},
+        ).all()
+    )
     return IngestionDetail(
         document_id=document_id,
         events=[

@@ -30,6 +30,7 @@ from assay_infra.pipeline import (
     SCAN_SERVICE,
     STEPS_SERVICE,
     SWEEPER_SERVICE,
+    WORKER_SERVICE,
     Pipeline,
     pipeline_roles,
 )
@@ -130,13 +131,16 @@ auth_events.add_consumer(
 api_name = f"{prefix}-api"
 api_role = api_task_role(api_name, account_id=account_id, region=config.region)
 pipeline_name = f"{prefix}-pipeline"
-pipeline_role = pipeline_roles(pipeline_name, account_id)
+pipeline_role = pipeline_roles(pipeline_name, account_id, config.region)
 PIPELINE_ACCESS = ("pipeline",)
 tss_callers: dict[str, TssCaller] = {
     "api": TssCaller(role=api_role, access=("read", "upload")),  # assay_api.storage.SERVICE
     SCAN_SERVICE: TssCaller(role=pipeline_role.scan, access=PIPELINE_ACCESS),
     STEPS_SERVICE: TssCaller(role=pipeline_role.steps, access=PIPELINE_ACCESS),
     SWEEPER_SERVICE: TssCaller(role=pipeline_role.sweeper, access=PIPELINE_ACCESS),
+    # The worker task (build step 6, second half): its own route, /resolve-worker, against
+    # an attempt grant, for one document's keys. It can never name a tenant.
+    WORKER_SERVICE: TssCaller(role=pipeline_role.worker, access=("worker",)),
 }
 isolation_name = f"{prefix}-isolation-tests"
 if config.tenancy.isolation_tests:
@@ -205,6 +209,7 @@ pipeline = Pipeline(
     tss_endpoint_url=storage.endpoint_url,
     api_task_role=api_role,
     alarm_topic_arn=alerts.topic.arn,
+    worker_max_per_tenant=config.pipeline.worker_max_per_tenant,
     aws_profile=aws_profile,
 )
 
@@ -366,3 +371,7 @@ pulumi.export("ingest_dlq_url", pipeline.ingest_dlq.url)
 pulumi.export("scan_dlq_url", pipeline.scan_dlq.url)
 pulumi.export("pipeline_state_machine_arn", pipeline.state_machine.arn)
 pulumi.export("pipeline_function_names", {k: f.name for k, f in pipeline.functions.items()})
+# Read by scripts/run_isolation.py, which runs the worker task's probe command.
+pulumi.export("worker_cluster_name", pipeline.worker_cluster.name)
+pulumi.export("worker_task_definition_arn", pipeline.worker_task_definition.arn)
+pulumi.export("worker_log_group", pipeline.worker_log_group.name)

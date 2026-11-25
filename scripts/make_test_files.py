@@ -4,18 +4,32 @@ Usage (PowerShell, from the repository root):
 
     uv run scripts/make_test_files.py
     uv run scripts/make_test_files.py --tenant-id <tenant id> --out .test-files
+    uv run scripts/make_test_files.py --fresh
 
 Every file is synthetic: made-up names, no real person, nothing from a real loan. The PDFs
 are written by hand (no PDF library), so the script needs nothing beyond Python.
 
     01-normal.pdf                    a plain three-page loan package
     02-normal-again.pdf              the same bytes, another name: the duplicate check
-    03-password-protected.pdf        needs a password to open (on_hold, pdf_encrypted)
+    03-password-protected.pdf        needs a password to open (40-bit RC4)
     04-with-companion.pdf/.json      a PDF and a valid companion file
     05-invalid-companion.pdf/.json   a PDF and a companion file that blocks the batch
+    06-not-a-pdf.pdf                 plain text named .pdf (failed, not_a_pdf)
+    07-password-protected-128.pdf    needs a password to open (128-bit RC4)
 
 With `--tenant-id` (the tenant you upload as), the valid companion carries that `TenantID`;
 the invalid one always carries another tenant's ID, a text loan term and a nested value.
+
+Without `--fresh` the files are the same bytes on every run, so a tenant that already holds
+one sees the next upload stop as a duplicate. `--fresh` adds a line with a new run ID to
+every page of every PDF (and prints the ID), so each run's PDFs are new documents. Within one
+run, 02 is still byte for byte 01, so the duplicate check still shows.
+
+The two password-protected files differ only in their encryption. GuardDuty holds a
+password-protected file at the malware scan when it recognises one (`scan_unsupported`),
+before the pipeline's own check. AWS does not document how it recognises one, so two kinds
+are here to try. One that GuardDuty passes is held by the worker's inspection step instead
+(`on_hold`, `pdf_encrypted`).
 
 The EICAR test file is not written here: see the build step 6 notes in CLAUDE.md for how to
 make it on a machine with Windows Defender. The output directory `.test-files/` is ignored by
@@ -25,11 +39,14 @@ git.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
+import secrets
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / ".test-files"
@@ -69,19 +86,54 @@ def _md5(data: bytes) -> bytes:
     return hashlib.md5(data, usedforsecurity=False).digest()
 
 
-class Encryption:
-    """Standard security handler, revision 2: the O and U entries and per-object keys."""
+def _rc4_rounds(key: bytes, data: bytes) -> bytes:
+    """Revision 3: RC4 twenty times, the key XORed with the round number (ISO 32000-1,
+    algorithms 3 and 5)."""
+    for i in range(20):
+        data = rc4(bytes(b ^ i for b in key), data)
+    return data
 
-    def __init__(self, user_password: str, file_id: bytes) -> None:
-        owner_key = _md5(_padded(user_password))[:KEY_BYTES]
-        self.owner = rc4(owner_key, _padded(user_password))
+
+class Encryption:
+    """The standard security handler's O and U entries and per-object keys (ISO 32000-1,
+    7.6.3): revision 2 with a 40-bit key, or revision 3 with a 128-bit key. Both RC4."""
+
+    def __init__(self, user_password: str, file_id: bytes, *, bits: int = 40) -> None:
+        if bits not in (40, 128):
+            raise ValueError("40 or 128 bits")
+        self.bits = bits
+        self.revision = 2 if bits == 40 else 3
+        size = bits // 8
         p = PERMISSIONS.to_bytes(4, "little", signed=True)
-        self.key = _md5(_padded(user_password) + self.owner + p + file_id)[:KEY_BYTES]
-        self.user = rc4(self.key, PAD)
+        owner_hash = _md5(_padded(user_password))
+        key_hash = None
+        if self.revision == 2:
+            self.owner = rc4(owner_hash[:size], _padded(user_password))
+            key_hash = _md5(_padded(user_password) + self.owner + p + file_id)
+            self.key = key_hash[:size]
+            self.user = rc4(self.key, PAD)
+        else:
+            for _ in range(50):
+                owner_hash = _md5(owner_hash)
+            self.owner = _rc4_rounds(owner_hash[:size], _padded(user_password))
+            key_hash = _md5(_padded(user_password) + self.owner + p + file_id)
+            for _ in range(50):
+                key_hash = _md5(key_hash[:size])
+            self.key = key_hash[:size]
+            # Sixteen bytes that matter, padded to 32 with anything (zeros here).
+            self.user = _rc4_rounds(self.key, _md5(PAD + file_id)) + bytes(16)
+
+    def dictionary(self) -> str:
+        """The encryption dictionary, as the trailer's /Encrypt entry points at it."""
+        version = "/V 1 /R 2" if self.revision == 2 else f"/V 2 /R 3 /Length {self.bits}"
+        return (
+            f"<< /Filter /Standard {version} /O <{self.owner.hex()}> "
+            f"/U <{self.user.hex()}> /P {PERMISSIONS} >>"
+        )
 
     def object_key(self, number: int, generation: int = 0) -> bytes:
         material = self.key + number.to_bytes(3, "little") + generation.to_bytes(2, "little")
-        return _md5(material)[: KEY_BYTES + 5]
+        return _md5(material)[: min(len(self.key) + 5, 16)]
 
     def encrypt(self, number: int, data: bytes) -> bytes:
         return rc4(self.object_key(number), data)
@@ -91,10 +143,13 @@ def _text(value: str) -> str:
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def pdf(pages: list[list[str]], *, password: str | None = None, seed: str = "") -> bytes:
-    """A small PDF: one page per list of lines, in Helvetica. `seed` makes the bytes unique."""
+def pdf(
+    pages: list[list[str]], *, password: str | None = None, seed: str = "", bits: int = 40
+) -> bytes:
+    """A small PDF: one page per list of lines, in Helvetica. `seed` makes the bytes unique.
+    With a password it is encrypted with RC4 at `bits` (40 or 128)."""
     file_id = hashlib.sha256(f"assay-test:{seed}".encode()).digest()[:16]
-    encryption = Encryption(password, file_id) if password is not None else None
+    encryption = Encryption(password, file_id, bits=bits) if password is not None else None
     objects: dict[int, bytes] = {}
     # 1 catalog, 2 pages, 3 font; then a page and its contents per page.
     kids = []
@@ -122,10 +177,7 @@ def pdf(pages: list[list[str]], *, password: str | None = None, seed: str = "") 
     trailer_extra = ""
     if encryption is not None:
         number = max(objects) + 1
-        objects[number] = (
-            f"<< /Filter /Standard /V 1 /R 2 /O <{encryption.owner.hex()}> "
-            f"/U <{encryption.user.hex()}> /P {PERMISSIONS} >>"
-        ).encode()
+        objects[number] = encryption.dictionary().encode()
         trailer_extra = f" /Encrypt {number} 0 R"
 
     out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
@@ -145,9 +197,18 @@ def pdf(pages: list[list[str]], *, password: str | None = None, seed: str = "") 
     return bytes(out)
 
 
-def package(title: str, applicant: str, loan: str) -> list[list[str]]:
-    """Three pages of an obviously synthetic loan package."""
+def package(title: str, applicant: str, loan: str, run: str | None = None) -> list[list[str]]:
+    """Three pages of an obviously synthetic loan package. `run` adds a line that makes this
+    run's pages unlike any other run's."""
     note = "SYNTHETIC TEST DOCUMENT - not a real application. Assay Insights build checks."
+    pages = _package(note, title, applicant, loan)
+    if run is not None:
+        for page in pages:
+            page.insert(1, f"Test run: {run}")
+    return pages
+
+
+def _package(note: str, title: str, applicant: str, loan: str) -> list[list[str]]:
     return [
         [
             note,
@@ -176,8 +237,15 @@ def package(title: str, applicant: str, loan: str) -> list[list[str]]:
     ]
 
 
-def files(tenant_id: uuid.UUID | None) -> dict[str, bytes]:
-    normal = pdf(package("Package 001", "Jane Testperson", "TEST-001"), seed="normal")
+def files(tenant_id: uuid.UUID | None, run: str | None = None) -> dict[str, bytes]:
+    """Every file, by name. With `run` (a short ID), every PDF's pages carry it, so the PDFs
+    are new documents; without it they are the same bytes on every call."""
+    suffix = "" if run is None else f":{run}"
+
+    def document(title: str, applicant: str, loan: str, seed: str, **options: Any) -> bytes:
+        return pdf(package(title, applicant, loan, run), seed=seed + suffix, **options)
+
+    normal = document("Package 001", "Jane Testperson", "TEST-001", "normal")
     valid_companion = {
         **({"TenantID": str(tenant_id)} if tenant_id else {}),
         "ApplicationId": "APP-TEST-004",
@@ -202,29 +270,47 @@ def files(tenant_id: uuid.UUID | None) -> dict[str, bytes]:
     return {
         "01-normal.pdf": normal,
         "02-normal-again.pdf": normal,
-        "03-password-protected.pdf": pdf(
-            package("Package 003", "Pat Testperson", "TEST-003"), password=PASSWORD, seed="locked"
+        "03-password-protected.pdf": document(
+            "Package 003", "Pat Testperson", "TEST-003", "locked", password=PASSWORD
         ),
-        "04-with-companion.pdf": pdf(
-            package("Package 004", "Sam Testperson", "TEST-004"), seed="companion"
-        ),
+        "04-with-companion.pdf": document("Package 004", "Sam Testperson", "TEST-004", "companion"),
         "04-with-companion.json": json.dumps(valid_companion, indent=2).encode(),
-        "05-invalid-companion.pdf": pdf(
-            package("Package 005", "Lee Testperson", "TEST-005"), seed="invalid"
+        "05-invalid-companion.pdf": document(
+            "Package 005", "Lee Testperson", "TEST-005", "invalid"
         ),
         "05-invalid-companion.json": json.dumps(invalid_companion, indent=2).encode(),
         # Plain text named .pdf: scans clean, then fails at fingerprint (`not_a_pdf`).
         "06-not-a-pdf.pdf": b"This is plain text named .pdf, for the not_a_pdf browser check.\n",
+        # The same protection with a 128-bit key: another kind for the malware scan to
+        # recognise or miss. Whichever step holds it, it is never processed.
+        "07-password-protected-128.pdf": document(
+            "Package 007", "Kim Testperson", "TEST-007", "locked-128", password=PASSWORD, bits=128
+        ),
     }
+
+
+def new_run_id() -> str:
+    """The time to the second and a few random characters: short enough to read back."""
+    stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{secrets.token_hex(3)}"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--tenant-id", type=uuid.UUID, default=None)
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="add a new run ID to every page of every PDF, so none is a duplicate of an "
+        "earlier upload",
+    )
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    for name, body in files(args.tenant_id).items():
+    run = new_run_id() if args.fresh else None
+    if run is not None:
+        print(f"Test run {run}: these PDFs are unlike any written before.")
+    for name, body in files(args.tenant_id, run).items():
         (args.out / name).write_bytes(body)
         digest = hashlib.sha256(body).hexdigest()[:16]
         print(f"{args.out / name}  {len(body)} bytes  sha256 {digest}")

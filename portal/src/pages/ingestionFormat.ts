@@ -89,6 +89,7 @@ export const ERROR_TEXT: Record<string, string> = {
     "Its companion file couldn't be scanned, so the PDF is on hold. Upload the PDF and a new companion file in a new batch.",
   companion_unmatched: "No PDF in the batch has this name.",
   not_a_pdf: "The file is not a PDF.",
+  pdf_unreadable: "The PDF could not be opened. Check the file and upload it again.",
   pdf_encrypted: "This PDF is password-protected and can't be processed. Remove the password and upload it again.",
   not_uploaded: "The file was never uploaded.",
   removed: "Removed from the batch.",
@@ -141,7 +142,10 @@ export const RESULT_TEXT: Record<string, string> = {
   // Queue and execution
   queued: "Queued",
   started: "Started",
-  // Fingerprint
+  // The processing task's progress: under way, or stopped by an error.
+  running: "Running",
+  error: "Failed",
+  // Fingerprint, inspection
   continue: "Passed",
   duplicate: "Duplicate",
   on_hold: "On hold",
@@ -160,12 +164,26 @@ export function resultText(status: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+// A document that passed fingerprint before the inspection step existed has no task to
+// wait for. One uploaded since is waiting for its task, for a few minutes at most.
+const NO_TASK_COMING_MS = 10 * 60 * 1000;
+
 /**
- * Build step 6, first half only: no step after fingerprint exists yet, so a document that
- * passed it stays Processing. TODO(build step 6, second half): remove this and its note.
+ * Until steps 5 to 10 exist: a document that passed every step there is stays Processing.
+ * That is one that passed inspection, or (uploaded before inspection existed) one that
+ * passed fingerprint a while ago with nothing since.
+ * TODO(build step 6, second half, stage 4): remove this and its note.
  */
-export function laterStepsPending(status: string, events: { step: string; status: string }[]): boolean {
-  return status === "processing" && events.some((e) => e.step === "fingerprint" && e.status === "continue");
+export function laterStepsPending(
+  status: string,
+  events: { step: string; status: string; at?: string }[],
+  now: number = Date.now(),
+): boolean {
+  if (status !== "processing") return false;
+  if (events.some((e) => e.step === "inspect" && e.status === "continue")) return true;
+  const fingerprint = events.find((e) => e.step === "fingerprint" && e.status === "continue");
+  if (!fingerprint || events.some((e) => e.step === "worker" || e.step === "inspect")) return false;
+  return fingerprint.at === undefined || now - new Date(fingerprint.at).getTime() > NO_TASK_COMING_MS;
 }
 
 /** A pipeline step's name, for the step list. */
@@ -174,6 +192,11 @@ export const STEP_TEXT: Record<string, string> = {
   queued: "Queued",
   start: "Started",
   fingerprint: "Fingerprint",
+  // The processing task (build step 6, second half): waiting for it, the task itself, and
+  // its first step, which opens the PDF.
+  claim: "Scheduling",
+  worker: "Processing task",
+  inspect: "Inspection",
   companion: "Companion file",
   failed: "Failed",
   viewed: "PDF opened",

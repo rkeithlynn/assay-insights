@@ -8,8 +8,45 @@ from __future__ import annotations
 
 import base64
 import uuid
+from collections.abc import Sequence
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
+
+# How the worker task's progress is recorded in `document_events` (assay_workers.progress
+# says when each is written). `RUNNING` and `STEP_ERROR` are progress marks, not results.
+WORKER_STEP = "worker"
+RUNNING = "running"
+STEP_ERROR = "error"
+PROGRESS_MARKS = (RUNNING, STEP_ERROR)
+
+
+class StepEvent(Protocol):
+    @property
+    def step(self) -> str: ...
+
+    @property
+    def status(self) -> str: ...
+
+
+def visible_events[E: StepEvent](events: Sequence[E]) -> list[E]:
+    """The events a history view shows, from a document's events in time order.
+
+    A step's `running` mark is left out once the step has a later event (its result), so a
+    finished step shows one line, and one that is under way shows "running". The task's own
+    `worker` mark says only that the task started: it is left out once anything follows it.
+    A step's `error` mark stays: it is the last word on that step.
+    """
+    shown: list[E] = []
+    for index, event in enumerate(events):
+        later = events[index + 1 :]
+        if event.status == RUNNING:
+            if event.step == WORKER_STEP and later:
+                continue
+            if any(other.step == event.step for other in later):
+                continue
+        shown.append(event)
+    return shown
 
 
 def checksum_b64(sha256_hex: str) -> str:

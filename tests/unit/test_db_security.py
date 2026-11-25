@@ -20,6 +20,7 @@ from assay_db.models import SCHEMA, TENANT_TABLES, Base
 from assay_db.roles import (
     ALL_ROLES,
     APP_TENANT,
+    APP_WORKER,
     AUDIT_WRITER,
     AUTH_EVENT_RECORDER,
     LOGIN_ROLES,
@@ -50,7 +51,7 @@ from tests.unit.pgtest import (
 pytestmark = requires_db
 
 # Roles the application uses. None may change or remove an audit row.
-APPLICATION_ROLES = (APP_TENANT, PLATFORM_READER, PLATFORM_WRITER, AUDIT_WRITER, TSS)
+APPLICATION_ROLES = (APP_TENANT, APP_WORKER, PLATFORM_READER, PLATFORM_WRITER, AUDIT_WRITER, TSS)
 
 APP_TENANT_READ_WRITE = frozenset(TENANT_TABLES) - {
     "tenants",
@@ -71,6 +72,9 @@ EXPECTED_PRIVILEGES: dict[str, dict[str, set[str]]] = {
         "ai_models": {SEL},
         "audit_log": {INS},
     },
+    # The pipeline's worker task (migration 0010): otherwise column-level only, and bound to
+    # one document by its policies (tests/unit/test_db_worker.py).
+    APP_WORKER: {"document_events": {INS}},
     PLATFORM_READER: {"tenants": {SEL}, "audit_log": {SEL}},
     PLATFORM_WRITER: {
         "tenants": {SEL, INS, UPD},
@@ -133,7 +137,7 @@ def test_every_table_except_ai_models_has_tenant_id_and_forced_rls(db: TestDb) -
         ).fetchall()
     tables = {r[0]: r[1:] for r in rows}
     assert set(tables) == {*TENANT_TABLES, "ai_models"}
-    assert len(TENANT_TABLES) == 24
+    assert len(TENANT_TABLES) == 25
     for name, (rls, forced, has_tenant_id, policies) in tables.items():
         if name == "ai_models":
             assert not has_tenant_id

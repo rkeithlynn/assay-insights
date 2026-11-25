@@ -111,8 +111,11 @@ class StorageSource(Protocol):
 
 class S3Objects:
     def __init__(self, ctx: StorageContext) -> None:
-        if ctx.access is not StorageAccess.PIPELINE:
-            raise ValueError("the pipeline works with PIPELINE contexts only")
+        # WORKER: the worker task's context, for one document's keys (build step 6, second
+        # half). It may read and copy by key and version; it can neither head a key it was
+        # not given nor delete anything.
+        if ctx.access not in (StorageAccess.PIPELINE, StorageAccess.WORKER):
+            raise ValueError("the pipeline works with PIPELINE and WORKER contexts only")
         self._bucket = ctx.bucket
         self._s3: S3Client = ctx.session().client("s3", region_name=ctx.region, config=AWS_CONFIG)
 

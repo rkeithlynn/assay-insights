@@ -1082,6 +1082,10 @@ def test_tss_api_is_private_with_iam_authorization() -> Any:
             "t3-tss-api-resolve-lambda-id",
             _one("aws:apigateway/integration:Integration", "t3-tss-api-resolve-lambda")["uri"],
             portable,
+            # The worker task's route (build step 6, second half).
+            "t3-tss-api-resolve-worker-id",
+            "t3-tss-api-resolve-worker-post-id",
+            "t3-tss-api-resolve-worker-lambda-id",
         ]
         expected = hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
         assert deployment["triggers"] == {"redeploy": expected}
@@ -1101,6 +1105,22 @@ def test_tss_api_is_private_with_iam_authorization() -> Any:
         ]
         assert permission["principal"] == "apigateway.amazonaws.com"
         assert permission["sourceArn"].endswith("/*/POST/resolve")
+
+        # The worker task's route: the same authorization, its own method and permission.
+        worker = _one("aws:apigateway/method:Method", "t3-tss-api-resolve-worker-post")
+        assert (worker["httpMethod"], worker["authorization"]) == ("POST", "AWS_IAM")
+        assert (
+            _one("aws:apigateway/resource:Resource", "t3-tss-api-resolve-worker")["pathPart"]
+            == "resolve-worker"
+        )
+        [worker_permission] = [
+            inputs
+            for name, inputs in registered("aws:lambda/permission:Permission")
+            if name == "t3-tss-api-invoke-worker"
+        ]
+        assert worker_permission["sourceArn"].endswith("/*/POST/resolve-worker")
+        # With no worker caller in this stack, no one is admitted to it.
+        assert "resolve-worker" not in attached["policy"]
 
         caller = _one("aws:iam/rolePolicy:RolePolicy", "t3-tss-caller-isolation")["policy"]
         [statement] = json.loads(caller)["Statement"]
@@ -1553,3 +1573,81 @@ def test_alarm_topic_is_encrypted_and_emails_the_configured_address() -> Any:
     return pulumi.Output.all(
         stack.ready(), stack.alerts.subscription.id, stack.alerts.topic.arn
     ).apply(check)
+
+
+# --- The worker task's route: its own, and no one else's (build step 6, second half) -----------
+
+WORKER_ROLE = f"{ROLE}/pl-pipeline-worker-task-role-9f8e7d"
+API_ROLE = f"{ROLE}/pl-api-task-role-1a2b3c"
+STEPS_ROLE = f"{ROLE}/pl-pipeline-steps-role-4d5e6f"
+ENDPOINT = "vpce-0123456789abcdef0"
+
+
+def test_each_caller_is_admitted_to_its_own_route_only() -> None:
+    api_arn = f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:abc123"
+    policy = json.loads(
+        tss.api_resource_policy(
+            vpc_endpoint_id=ENDPOINT,
+            callers=[STEPS_ROLE, API_ROLE],
+            worker_callers=[WORKER_ROLE],
+            execution_arn=api_arn,
+        )
+    )
+    assert [s["Sid"] for s in policy["Statement"]] == [
+        "OnlyThroughTheVpcEndpoint",
+        "KnownCallers",
+        "WorkerTask",
+    ]
+    known, worker = by_sid(policy, "KnownCallers"), by_sid(policy, "WorkerTask")
+    assert known["Resource"] == f"{api_arn}/v1/POST/resolve"
+    assert known["Principal"] == {"AWS": sorted([API_ROLE, STEPS_ROLE])}
+    assert WORKER_ROLE not in json.dumps(known)
+    assert worker["Resource"] == f"{api_arn}/v1/POST/resolve-worker"
+    # One caller: a string, as AWS stores it.
+    assert worker["Principal"] == {"AWS": WORKER_ROLE}
+    assert API_ROLE not in json.dumps(worker) and STEPS_ROLE not in json.dumps(worker)
+    # The portable form (the redeploy fingerprint) names both routes too.
+    portable = json.loads(
+        tss.api_resource_policy(
+            vpc_endpoint_id=ENDPOINT, callers=[API_ROLE], worker_callers=[WORKER_ROLE]
+        )
+    )
+    assert by_sid(portable, "WorkerTask")["Resource"] == "execute-api:/v1/POST/resolve-worker"
+
+
+def test_a_callers_own_policy_names_its_one_route() -> None:
+    api_arn = f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:abc123"
+    [resolve] = json.loads(tss.invoke_policy(api_arn))["Statement"]
+    assert resolve["Resource"] == f"{api_arn}/v1/POST/resolve"
+    [worker] = json.loads(tss.invoke_policy(api_arn, tss.WORKER_PATH))["Statement"]
+    assert worker["Resource"] == f"{api_arn}/v1/POST/resolve-worker"
+    assert worker["Action"] == resolve["Action"] == "execute-api:Invoke"
+
+
+def test_worker_access_is_never_combined_with_another() -> None:
+    role: Any = object()
+    worker = TssCaller(role=role, access=("worker",))
+    assert worker.is_worker and worker.path == "resolve-worker"
+    api = TssCaller(role=role, access=("read", "upload"))
+    assert not api.is_worker and api.path == "resolve"
+    tss.check_callers({"worker": worker, "api": api})
+    for mixed in (("worker", "pipeline"), ("pipeline", "read", "upload", "worker")):
+        with pytest.raises(ValueError, match="worker access cannot be combined"):
+            tss.check_callers({"runner": TssCaller(role=role, access=mixed)})
+
+
+def test_the_tss_is_told_each_callers_accesses() -> None:
+    role: Any = object()
+    grants = json.loads(
+        tss.caller_grants(
+            {"worker": "pl-worker-role", "api": "pl-api-role"},
+            {
+                "worker": TssCaller(role=role, access=("worker",)),
+                "api": TssCaller(role=role, access=("upload", "read")),
+            },
+        )
+    )
+    assert grants == {
+        "pl-worker-role": {"service": "worker", "access": ["worker"]},
+        "pl-api-role": {"service": "api", "access": ["read", "upload"]},
+    }

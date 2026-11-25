@@ -1,7 +1,8 @@
 """The synthetic browser-check files (scripts/make_test_files.py) are what they claim to be.
 
-PDFium (the library the fingerprint step uses) opens the plain PDFs and refuses the protected
-one with its password error; the companion files pass and fail the real validator.
+PDFium (the library the worker's sandboxed inspect step uses) opens the plain PDFs and refuses
+the protected one with its password error; the companion files pass and fail the real
+validator.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ import pypdfium2
 import pytest
 
 from assay_schemas import companion
-from assay_workers.steps import PDFIUM_PASSWORD_ERROR, inspect_pdf
+from assay_workers import steps
+from assay_workers.sandbox import jobs
+from assay_workers.sandbox.jobs import PDFIUM_PASSWORD_ERROR
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "make_test_files.py"
 TENANT = uuid.UUID("7f3a91c2-0000-4000-8000-000000000001")
@@ -66,10 +69,11 @@ def test_the_protected_pdf_needs_its_password(
         assert "SYNTHETIC TEST DOCUMENT" in document[0].get_textpage().get_text_range()
     finally:
         document.close()
-    # And the fingerprint step holds it.
+    # It has a PDF header, so fingerprint passes it on; the inspect step holds it.
     path = tmp_path / "locked.pdf"
     path.write_bytes(body)
-    assert inspect_pdf(path) == ("pdf_encrypted", None)
+    assert steps.has_pdf_header(path)
+    assert jobs.inspect(path) == {"problem": "pdf_encrypted", "pages": None}
 
 
 def test_the_valid_companion_is_valid_and_the_invalid_one_is_not(made: dict[str, bytes]) -> None:
@@ -89,9 +93,93 @@ def test_the_valid_companion_is_valid_and_the_invalid_one_is_not(made: dict[str,
 def test_the_not_a_pdf_file_fails_fingerprint(made: dict[str, bytes], tmp_path: Path) -> None:
     path = tmp_path / "not.pdf"
     path.write_bytes(made["06-not-a-pdf.pdf"])
-    assert inspect_pdf(path) == ("not_a_pdf", None)
+    assert not steps.has_pdf_header(path)
+    assert jobs.inspect(path) == {"problem": "not_a_pdf", "pages": None}
 
 
 def test_without_a_tenant_id_the_valid_companion_has_none(script: ModuleType) -> None:
     body = script.files(None)["04-with-companion.json"]
     assert companion.validate(body, tenant_id=uuid.uuid4()).tenant_id is None
+
+
+def test_the_128_bit_protected_pdf_needs_its_password_too(
+    made: dict[str, bytes], script: ModuleType, tmp_path: Path
+) -> None:
+    """The same protection with a 128-bit key (revision 3), checked against PDFium: it
+    refuses without the password, opens with it, and the inspect job holds it."""
+    body = made["07-password-protected-128.pdf"]
+    assert b"/V 2 /R 3 /Length 128" in body and b"/V 1 /R 2" not in body
+    assert b"/V 1 /R 2" in made["03-password-protected.pdf"]
+    with pytest.raises(pypdfium2.PdfiumError) as raised:
+        pypdfium2.PdfDocument(body)
+    assert raised.value.err_code == PDFIUM_PASSWORD_ERROR
+    with pytest.raises(pypdfium2.PdfiumError):
+        pypdfium2.PdfDocument(body, password="not-the-password")
+    document = pypdfium2.PdfDocument(body, password=script.PASSWORD)
+    try:
+        assert len(document) == 3
+        assert "SYNTHETIC TEST DOCUMENT" in document[0].get_textpage().get_text_range()
+        assert "TEST-007" in document[0].get_textpage().get_text_range()
+    finally:
+        document.close()
+    path = tmp_path / "locked-128.pdf"
+    path.write_bytes(body)
+    assert steps.has_pdf_header(path)
+    assert jobs.inspect(path) == {"problem": "pdf_encrypted", "pages": None}
+
+
+def test_without_fresh_the_files_are_the_same_on_every_run(script: ModuleType) -> None:
+    assert script.files(TENANT) == script.files(TENANT)
+
+
+def test_fresh_pdfs_are_new_documents_every_run(script: ModuleType) -> None:
+    """`--fresh`: no PDF of one run has the bytes of any PDF of another run or of the plain
+    set, so none stops as a duplicate; within a run, 02 is still 01."""
+    plain = script.files(TENANT)
+    first, second = script.files(TENANT, "run-a"), script.files(TENANT, "run-b")
+    pdfs = [name for name in plain if name.endswith(".pdf") and name != "06-not-a-pdf.pdf"]
+    assert len(pdfs) == 6
+    for name in pdfs:
+        assert len({plain[name], first[name], second[name]}) == 3, name
+    assert first["01-normal.pdf"] == first["02-normal-again.pdf"]
+    # The companion files, and the text file, do not change.
+    for name in ("04-with-companion.json", "05-invalid-companion.json", "06-not-a-pdf.pdf"):
+        assert plain[name] == first[name] == second[name]
+    # Still PDFs that open, with the run's line on every page.
+    document = pypdfium2.PdfDocument(first["01-normal.pdf"])
+    try:
+        assert len(document) == 3
+        for page in range(3):
+            assert "Test run: run-a" in document[page].get_textpage().get_text_range()
+    finally:
+        document.close()
+    locked = pypdfium2.PdfDocument(first["03-password-protected.pdf"], password=script.PASSWORD)
+    try:
+        assert "Test run: run-a" in locked[0].get_textpage().get_text_range()
+    finally:
+        locked.close()
+
+
+def test_run_ids_do_not_repeat(script: ModuleType) -> None:
+    ids = {script.new_run_id() for _ in range(50)}
+    assert len(ids) == 50
+    assert all(len(run) == 22 for run in ids)
+
+
+def test_fresh_on_the_command_line_writes_new_pdfs(
+    script: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def run(*arguments: str) -> bytes:
+        monkeypatch.setattr(sys, "argv", ["make_test_files.py", "--out", str(tmp_path), *arguments])
+        assert script.main() == 0
+        return (tmp_path / "01-normal.pdf").read_bytes()
+
+    plain = run()
+    assert run() == plain
+    fresh = run("--fresh")
+    assert fresh != plain and run("--fresh") != fresh
+    assert "Test run " in capsys.readouterr().out
+    assert (tmp_path / "07-password-protected-128.pdf").exists()

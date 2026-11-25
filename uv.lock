@@ -131,7 +131,7 @@ dependencies = [
     { name = "assay-infra" },
     { name = "assay-schemas" },
     { name = "assay-tss", extra = ["isolation-tests", "provision", "service"] },
-    { name = "assay-workers" },
+    { name = "assay-workers", extra = ["worker"] },
 ]
 
 [package.dev-dependencies]
@@ -152,7 +152,7 @@ requires-dist = [
     { name = "assay-infra", editable = "infra" },
     { name = "assay-schemas", editable = "schemas" },
     { name = "assay-tss", extras = ["service", "provision", "isolation-tests"], editable = "tss" },
-    { name = "assay-workers", editable = "workers" },
+    { name = "assay-workers", extras = ["worker"], editable = "workers" },
 ]
 
 [package.metadata.requires-dev]
@@ -223,6 +223,10 @@ dependencies = [
     { name = "assay-tss" },
     { name = "aws-lambda-powertools" },
     { name = "boto3" },
+]
+
+[package.optional-dependencies]
+worker = [
     { name = "pypdfium2" },
 ]
 
@@ -233,8 +237,9 @@ requires-dist = [
     { name = "assay-tss", editable = "tss" },
     { name = "aws-lambda-powertools", specifier = ">=3.39,<3.40" },
     { name = "boto3", specifier = ">=1.40" },
-    { name = "pypdfium2", specifier = ">=5.15.2,<5.16" },
+    { name = "pypdfium2", marker = "extra == 'worker'", specifier = ">=5.15.2,<5.16" },
 ]
+provides-extras = ["worker"]
 
 [[package]]
 name = "ast-serialize"

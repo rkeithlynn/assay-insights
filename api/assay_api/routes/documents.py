@@ -34,6 +34,7 @@ from assay_api.security import TENANT_ADMIN, TenantMember
 from assay_api.storage import view_link
 from assay_db import audit, batches
 from assay_db.models import DOCUMENT_STATUSES
+from assay_schemas.pipeline import visible_events
 from assay_tss import keys
 from assay_tss.client import TssRequestError
 from assay_tss.models import StorageAccess
@@ -265,14 +266,17 @@ def _pdf_available(row: Any) -> bool:
 @router.get("/documents/{document_id}", response_model=DocumentDetail)
 def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail:
     row = _document(caller, document_id)
-    events = caller.conn.execute(
-        text(
-            "SELECT step, status, at, detail ->> 'error' AS error_code, "
-            "detail ->> 'viewer' AS viewer FROM assay.document_events "
-            "WHERE document_id = :id ORDER BY at, id"
-        ),
-        {"id": document_id},
-    ).all()
+    # A step that is finished shows its result, not also the mark that it had started.
+    events = visible_events(
+        caller.conn.execute(
+            text(
+                "SELECT step, status, at, detail ->> 'error' AS error_code, "
+                "detail ->> 'viewer' AS viewer FROM assay.document_events "
+                "WHERE document_id = :id ORDER BY at, id"
+            ),
+            {"id": document_id},
+        ).all()
+    )
     parts = caller.conn.execute(
         text(
             "SELECT start_page, end_page, form_type, method, confidence "

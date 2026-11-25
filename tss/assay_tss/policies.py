@@ -9,6 +9,8 @@ One module, so the pieces can be read and tested together:
   whose `tenant_id` tag equals its own.
 - `session_policy`: the inline policy passed to AssumeRole. It names the exact bucket, key,
   index and collection, and narrows the actions to what the caller asked for.
+- `worker_session_policy`: the same for the pipeline's worker task, narrowed further to one
+  document's own object keys.
 - `tenant_bucket_policy` and `tenant_key_policy`: the resource side. They deny or withhold
   access from every principal except the four named in `Principals`, each for its own job.
 - `tenant_vector_bucket_policy`: the same for the vector bucket, admitting only the tenant
@@ -23,6 +25,8 @@ cannot change.
 from __future__ import annotations
 
 import json
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -370,7 +374,77 @@ def session_policy(
                 allow((*VECTOR_READ, *VECTOR_WRITE), index),
                 allow(FACE_COLLECTION, collection),
             ]
+        case StorageAccess.WORKER:
+            raise ValueError("a worker's policy names its document: use worker_session_policy")
     return {"Version": VERSION, "Statement": statements}
+
+
+# What a worker session may do with the inbox files it was given: read them, by version.
+WORKER_INBOX_READ = ("s3:GetObject", "s3:GetObjectVersion")
+# And with its document's own stored objects: read them and write new versions. No delete,
+# no tagging, no listing.
+WORKER_OWN_OBJECTS = (*WORKER_INBOX_READ, "s3:PutObject")
+# A PDF and its companion file. A grant row with more is not one the pipeline wrote.
+WORKER_MAX_INBOX_KEYS = 2
+
+
+def worker_document_keys(document_id: uuid.UUID) -> tuple[str, ...]:
+    """The stored objects of one document: its original, companion, text and fields."""
+    return (
+        keys.original_key(document_id),
+        keys.companion_key(document_id),
+        keys.text_key(document_id),
+        keys.fields_key(document_id),
+    )
+
+
+def worker_session_policy(
+    profile: TenantStorageProfile, *, document_id: uuid.UUID, inbox_keys: Sequence[str]
+) -> Policy:
+    """One document of one tenant: its inbox files (read) and its own stored objects.
+
+    Nothing under quarantine/ or chat/, no other document's keys, no vectors, no face
+    collection, no listing. `inbox_keys` come from the grant's database row; each must still
+    be an upload key (`inbox/{batch}/{file}`, IDs only), so a changed row cannot widen this.
+    The reserved isolation-test document ID is refused by the key builders.
+    """
+    if len(inbox_keys) > WORKER_MAX_INBOX_KEYS:
+        raise ValueError("a document has at most a PDF and a companion file in the inbox")
+    for key in inbox_keys:
+        if keys.parse_inbox_key(key) is None:
+            raise ValueError("not an inbox upload key")
+    bucket = f"arn:aws:s3:::{profile.bucket}"
+    statements: list[dict[str, Any]] = []
+    if inbox_keys:
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": list(WORKER_INBOX_READ),
+                "Resource": [f"{bucket}/{key}" for key in sorted(set(inbox_keys))],
+            }
+        )
+    statements += [
+        {
+            "Effect": "Allow",
+            "Action": list(WORKER_OWN_OBJECTS),
+            "Resource": [f"{bucket}/{key}" for key in worker_document_keys(document_id)],
+        },
+        {
+            "Effect": "Allow",
+            "Action": [*KEY_USE, *KEY_DESCRIBE],
+            "Resource": profile.kms_key_arn,
+        },
+    ]
+    return {"Version": VERSION, "Statement": statements}
+
+
+def worker_session_policy_json(
+    profile: TenantStorageProfile, *, document_id: uuid.UUID, inbox_keys: Sequence[str]
+) -> str:
+    text = to_json(worker_session_policy(profile, document_id=document_id, inbox_keys=inbox_keys))
+    if len(text) > SESSION_POLICY_MAX_CHARS:
+        raise ValueError(f"session policy is {len(text)} characters; the limit is 2048")
+    return text
 
 
 def session_policy_json(

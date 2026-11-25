@@ -29,7 +29,7 @@ import psycopg
 import pytest
 from sqlalchemy import Engine, create_engine
 
-from assay_db.roles import APP_TENANT, PLATFORM_READER, PLATFORM_WRITER
+from assay_db.roles import APP_TENANT, APP_WORKER, PLATFORM_READER, PLATFORM_WRITER
 from assay_schemas.pipeline import IngestJob
 from assay_tss import naming
 from assay_tss.models import Credentials, StorageAccess, StorageContext
@@ -90,6 +90,10 @@ class Db:
     def dispose(self) -> None:
         for engine in (self.app_tenant, self.platform_reader, self.platform_writer):
             engine.dispose()
+
+    def worker_connection(self) -> psycopg.Connection:
+        """A fresh session as app_worker, as the worker task opens one (unbound)."""
+        return psycopg.connect(_conninfo(self.name, APP_WORKER))
 
 
 @pytest.fixture(scope="module")
@@ -269,6 +273,14 @@ class FakeStorage:
     def pipeline(self, tenant_id: uuid.UUID, service: str, job: str) -> TenantStorage:
         self.asked.append((tenant_id, StorageAccess.PIPELINE, f"{service}.{job}"))
         ctx = context(tenant_id, StorageAccess.PIPELINE)
+        return TenantStorage(context=ctx, objects=FakeObjects(self.buckets, ctx.bucket))
+
+    def worker(self, tenant_id: uuid.UUID, document_id: uuid.UUID) -> TenantStorage:
+        """What `/resolve-worker` gives the worker task: a context for one document."""
+        self.asked.append((tenant_id, StorageAccess.WORKER, f"worker.{document_id.hex[:12]}"))
+        ctx = context(tenant_id, StorageAccess.WORKER).model_copy(
+            update={"document_id": document_id}
+        )
         return TenantStorage(context=ctx, objects=FakeObjects(self.buckets, ctx.bucket))
 
 

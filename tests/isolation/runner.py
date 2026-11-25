@@ -6,6 +6,10 @@ Started by `scripts/run_isolation.py` with the two test tenants:
 
 A skipped test counts against the run: `ok` is true only when every test passed. Failure
 details never include credentials (they are `SecretStr` values, and tracebacks are short).
+
+With an `action`, it prepares or clears the worker probe's fixture instead
+(`tests/isolation/worker_fixture.py`): `worker_fixture`, `end_worker_grant`,
+`worker_cleanup`. The probe itself runs as the worker task, not here.
 """
 
 from __future__ import annotations
@@ -41,7 +45,14 @@ class Collector:
         )
 
 
+FIXTURE_ACTIONS = frozenset({"worker_fixture", "end_worker_grant", "worker_cleanup"})
+
+
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    if event.get("action") in FIXTURE_ACTIONS:
+        from tests.isolation import worker_fixture
+
+        return worker_fixture.handle(event)
     os.environ["ISOLATION_TENANT_A"] = str(uuid.UUID(str(event["tenant_a"])))
     os.environ["ISOLATION_TENANT_B"] = str(uuid.UUID(str(event["tenant_b"])))
     collector = Collector()

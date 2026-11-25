@@ -1,7 +1,7 @@
 [project]
 name = "assay-workers"
 version = "0.1.0"
-description = "Assay Insights ingestion pipeline: Lambda handlers (and, from the second half of build step 6, the Fargate worker)"
+description = "Assay Insights ingestion pipeline: Lambda handlers and the Fargate worker task"
 requires-python = ">=3.14,<3.15"
 # Upper bounds keep releases younger than two weeks out; raise them deliberately.
 dependencies = [
@@ -10,6 +10,12 @@ dependencies = [
     "assay-tss",
     "aws-lambda-powertools>=3.39,<3.40",
     "boto3>=1.40",
+]
+
+[project.optional-dependencies]
+# The worker task only (workers/worker.Dockerfile). PDFium opens tenants' PDFs, and only in
+# the task's sandbox child (assay_workers.sandbox): the Lambda image does not ship it.
+worker = [
     "pypdfium2>=5.15.2,<5.16",
 ]
 

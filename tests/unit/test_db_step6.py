@@ -23,7 +23,16 @@ from tests.unit.pgtest import (
 
 pytestmark = requires_db
 
-FUNCTIONS = ("tenant_for_upload", "tenants_with_work")
+# function -> the one role, besides the owner, that may execute it. The last four are
+# migration 0010's (the worker's attempt grant); tests/unit/test_db_worker.py covers them.
+FUNCTIONS = {
+    "tenant_for_upload": APP_TENANT,
+    "tenants_with_work": APP_TENANT,
+    "bound_tenant": "app_worker",
+    "bound_document": "app_worker",
+    "bind_worker": "app_worker",
+    "worker_grant": "tss",
+}
 
 
 def _file(
@@ -54,9 +63,9 @@ def test_the_lookups_are_locked_down_security_definers(db: TestDb) -> None:
         assert definer, name
         assert config == ["search_path=pg_catalog, pg_temp"], name
         assert owner == PIPELINE_LOOKUP, name
-        # EXECUTE for app_tenant only (and the owner); not PUBLIC.
+        # EXECUTE for one role only (and the owner); not PUBLIC.
         grantees = {entry.split("=")[0] for entry in acl.strip("{}").split(",")}
-        assert grantees == {APP_TENANT, PIPELINE_LOOKUP}, (name, acl)
+        assert grantees == {FUNCTIONS[name], PIPELINE_LOOKUP}, (name, acl)
 
 
 @pytest.mark.parametrize("role", [PLATFORM_READER, PLATFORM_WRITER, "audit_writer", "tss"])
@@ -67,10 +76,19 @@ def test_no_other_role_may_call_the_lookups(db: TestDb, role: str) -> None:
 
 def test_the_lookup_owner_reads_only_the_columns_the_lookups_need(db: TestDb) -> None:
     expected = {
-        "batch_files": {"tenant_id", "s3_key", "status", "registered_at"},
+        # document_id, attempt and worker_grants: migration 0010.
+        "batch_files": {"tenant_id", "s3_key", "status", "registered_at", "document_id"},
         "batches": {"tenant_id", "status", "opened_at"},
-        "documents": {"id", "tenant_id", "status", "queued_at"},
+        "documents": {"id", "tenant_id", "status", "queued_at", "attempt"},
         "document_events": {"tenant_id", "document_id", "step"},
+        "worker_grants": {
+            "tenant_id",
+            "document_id",
+            "attempt",
+            "token_hash",
+            "expires_at",
+            "ended_at",
+        },
     }
     with psycopg.connect(db.url) as conn:
         rows = conn.execute(

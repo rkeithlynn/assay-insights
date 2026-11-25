@@ -265,9 +265,15 @@ def test_discarding_leaves_documents_out_of_the_default_history(w: World) -> Non
 
 
 @pytest.fixture(scope="module")
-def ready_doc(w: World) -> dict[str, Any]:
-    """One document fingerprinted into originals/ in tenant A."""
+def ready_doc(w: World, tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """One document fingerprinted, then inspected and copied into originals/ by the worker
+    task, in tenant A. (The sandbox child cannot run here; the job runs in this process.)"""
     from assay_workers import steps
+    from assay_workers.sandbox import jobs
+    from assay_workers.sandbox.runner import InspectResult
+    from assay_workers.worker import db as worker_db
+    from assay_workers.worker import run as worker_run
+    from assay_workers.worker.db import Job
 
     batch = fresh_batch(w, "a-admin2", "History")
     body = minimal_pdf(text="history")
@@ -276,14 +282,27 @@ def ready_doc(w: World) -> dict[str, Any]:
     ]
     upload_scan(w, "a", registered, body)
     w.req("POST", f"/api/batches/{batch['id']}/close", "a-admin2")
-    steps.handle(
-        {
-            "step": "fingerprint",
-            "tenant_id": str(w.db.tenants["a"]),
-            "document_id": registered["id"],
-        },
-        steps.Deps(engine=w.db.app_tenant, storage=w.storage),
-    )
+    tenant, document = w.db.tenants["a"], uuid.UUID(registered["id"])
+    deps = steps.Deps(engine=w.db.app_tenant, storage=w.storage)
+    event = {"tenant_id": str(tenant), "document_id": str(document)}
+    assert steps.handle({"step": "fingerprint", **event}, deps) == {"outcome": "continue"}
+    claim = steps.handle({"step": "claim", **event}, deps)
+    job = Job(document_id=document, attempt=claim["attempt"], token=claim["token"])
+    engine = worker_db.bound_engine(w.db.worker_connection, job)
+    try:
+        outcome = worker_run.run(
+            job,
+            worker_run.Deps(
+                engine=engine,
+                storage=lambda: w.storage.worker(tenant, document),
+                inspect=lambda path: InspectResult.model_validate(jobs.inspect(path)),
+                work_dir=tmp_path_factory.mktemp("worker"),
+            ),
+        )
+    finally:
+        engine.dispose()
+    assert outcome == "continue"
+    assert steps.handle({"step": "release", **event}, deps) == {"worker_started": True}
     return {"id": registered["id"], "batch_id": batch["id"]}
 
 

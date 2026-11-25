@@ -50,7 +50,8 @@ class World:
         )
 
     def steps_deps(self) -> steps.Deps:
-        return steps.Deps(engine=self.db.app_tenant, storage=self.storage)
+        # A high cap: these tests leave grants live. The cap itself has its own test.
+        return steps.Deps(engine=self.db.app_tenant, storage=self.storage, max_workers=1000)
 
     def sweeper_deps(self) -> sweeper.Deps:
         return sweeper.Deps(engine=self.db.app_tenant, storage=self.storage, queue=self.queue)
@@ -209,11 +210,11 @@ def test_only_the_version_that_scanned_clean_is_ever_used(w: World) -> None:
         {"step": "fingerprint", "tenant_id": str(b.tenant_id), "document_id": str(doc_id)},
         w.steps_deps(),
     ) == {"outcome": "continue"}
-    # Every read and copy named the first version.
+    # Every read named the first version. (The copy to originals/ is the worker task's, and
+    # names it too: tests/unit/test_worker_step6.py.)
     reads = [r for r in w.storage.buckets.reads if r[1] == pdf.key]
     assert reads and all(version == first for _, _, version in reads)
-    [copy] = [c for c in w.storage.buckets.copies if c[1] == pdf.key]
-    assert copy == (b.bucket, pdf.key, first, keys.original_key(doc_id))
+    assert [c for c in w.storage.buckets.copies if c[1] == pdf.key] == []
 
 
 def test_a_repeated_event_is_recorded_once(w: World) -> None:
@@ -353,7 +354,7 @@ def test_an_event_naming_another_tenants_bucket_is_refused(w: World) -> None:
 # --- Companion files and closing -------------------------------------------------------------
 
 
-def test_a_valid_companion_is_paired_and_copied_beside_its_pdf(w: World) -> None:
+def test_a_valid_companion_is_paired_with_its_pdf(w: World) -> None:
     tenant = w.db.tenants["a"]
     b = open_batch(
         w,
@@ -364,14 +365,17 @@ def test_a_valid_companion_is_paired_and_copied_beside_its_pdf(w: World) -> None
     upload_and_scan(w, b, "pair.pdf", "PAIR.json")
     [doc_id] = close(w, b)
     assert doc(w, doc_id)[5] is True  # has_companion
-    companion_version = file_row(w, b.files["PAIR.json"].id)[2]
+    assert file_row(w, b.files["PAIR.json"].id)[0] == "clean"
+    paired = w.db.row(
+        "SELECT document_id FROM assay.batch_files WHERE id = %s", b.files["PAIR.json"].id
+    )
+    assert paired == (doc_id,)
+    # Fingerprint copies nothing; the worker task copies both files once the PDF has opened.
     steps.handle(
         {"step": "fingerprint", "tenant_id": str(tenant), "document_id": str(doc_id)},
         w.steps_deps(),
     )
-    assert (b.bucket, b.files["PAIR.json"].key, companion_version, keys.companion_key(doc_id)) in (
-        w.storage.buckets.copies
-    )
+    assert w.storage.buckets.copies == []
 
 
 def test_an_invalid_companion_blocks_the_batch_from_closing(w: World) -> None:
@@ -566,16 +570,41 @@ def fingerprint(w: World, tenant_id: uuid.UUID, doc_id: uuid.UUID) -> dict[str, 
     )
 
 
-def test_fingerprint_copies_the_pdf_to_originals(w: World) -> None:
+def test_fingerprint_records_the_hash_and_size_and_copies_nothing(w: World) -> None:
+    """It no longer opens the PDF or copies it (owner condition B): the worker task does."""
     doc_id, b = eligible_document(w, "a", "a-admin", "orig.pdf")
     assert fingerprint(w, b.tenant_id, doc_id) == {"outcome": "continue"}
     status, _, s3_key, sha, _, _, pages = doc(w, doc_id)
-    assert (status, s3_key, pages) == ("processing", keys.original_key(doc_id), 2)
+    assert (status, s3_key, pages) == ("processing", None, None)
     assert sha == sha256_hex(b.files["orig.pdf"].body)
+    assert w.db.row("SELECT size_bytes FROM assay.documents WHERE id = %s", doc_id) == (
+        len(b.files["orig.pdf"].body),
+    )
+    assert w.storage.buckets.copies == []
     # A repeat does nothing again.
-    copies = len(w.storage.buckets.copies)
+    reads = len(w.storage.buckets.reads)
     assert fingerprint(w, b.tenant_id, doc_id) == {"outcome": "continue"}
-    assert len(w.storage.buckets.copies) == copies
+    assert len(w.storage.buckets.reads) == reads
+
+
+def test_the_step_function_never_opens_a_pdf() -> None:
+    """A Lambda has one user and its credentials in its environment. Nothing in the Lambda
+    functions' modules may import a PDF library."""
+    import ast
+    from pathlib import Path
+
+    root = Path(steps.__file__).resolve().parent
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            for name in names:
+                assert not name.startswith(("pypdfium2", "pyhanko", "pdfplumber")), path.name
+                assert not name.startswith("assay_workers.sandbox"), path.name
 
 
 def test_a_repeated_upload_is_a_duplicate_within_its_tenant_only(w: World) -> None:
@@ -614,7 +643,9 @@ def test_a_failed_original_does_not_make_a_duplicate(w: World) -> None:
     assert fingerprint(w, second.tenant_id, d2) == {"outcome": "continue"}
 
 
-def test_a_file_that_is_not_a_pdf_fails(w: World) -> None:
+def test_a_file_with_no_pdf_header_fails_without_a_parser(w: World) -> None:
+    """A comparison of the first bytes. A file that has the header but does not open, and a
+    password-protected one, are the worker task's to find (tests/unit/test_worker_step6.py)."""
     b = open_batch(w, "a", "a-admin", [("fake.pdf", b"just some text, not a PDF")])
     upload_and_scan(w, b, "fake.pdf")
     [doc_id] = close(w, b)
@@ -622,28 +653,9 @@ def test_a_file_that_is_not_a_pdf_fails(w: World) -> None:
     assert doc(w, doc_id)[:2] == ("failed", "not_a_pdf")
 
 
-def test_a_password_protected_pdf_is_held(w: World, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Owner decision 13. PDFium reports FPDF_ERR_PASSWORD for such a file."""
-    import pypdfium2
-
-    def locked(*args: Any, **kwargs: Any) -> Any:
-        raise pypdfium2.PdfiumError(
-            "Failed to load document (PDFium: Incorrect password error).",
-            err_code=steps.PDFIUM_PASSWORD_ERROR,
-        )
-
-    b = open_batch(w, "a", "a-admin", [("locked.pdf", minimal_pdf(text="locked"))])
-    upload_and_scan(w, b, "locked.pdf")
-    [doc_id] = close(w, b)
-    monkeypatch.setattr(pypdfium2, "PdfDocument", locked)
-    assert fingerprint(w, b.tenant_id, doc_id) == {"outcome": "on_hold"}
-    assert doc(w, doc_id)[:2] == ("on_hold", "pdf_encrypted")
-    assert all(c[1] != b.files["locked.pdf"].key for c in w.storage.buckets.copies)
-
-
 def test_the_steps_refuse_the_reserved_id_and_touch_nothing(w: World) -> None:
     before = w.db.row("SELECT count(*) FROM assay.document_events")
-    for step in ("fingerprint", "failed"):
+    for step in ("fingerprint", "claim", "release", "failed"):
         result = steps.handle(
             {
                 "step": step,
