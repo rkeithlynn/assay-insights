@@ -30,7 +30,7 @@ from sqlalchemy import text
 from assay_api import ingestion_read
 from assay_api.requestinfo import request_info
 from assay_api.routes.batches import StorageDep
-from assay_api.security import TenantMember
+from assay_api.security import TENANT_ADMIN, TenantMember
 from assay_api.storage import view_link
 from assay_db import batches
 from assay_db.models import DOCUMENT_STATUSES
@@ -115,7 +115,7 @@ class DocumentEventOut(BaseModel):
     status: str
     at: dt.datetime
     error_code: str | None
-    # Who opened the PDF (step `viewed` only).
+    # Who opened the PDF (step `viewed` only), for tenant admins only; null for tenant users.
     viewer: str | None
 
 
@@ -257,6 +257,8 @@ def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail
         ),
         {"id": document_id},
     ).all()
+    # Who opened a PDF is for tenant admins only (owner decision, 2026-11-24).
+    show_viewer = caller.account.role == TENANT_ADMIN
     return DocumentDetail(
         **_row(row),
         duplicate_of=row.duplicate_of,
@@ -267,7 +269,7 @@ def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail
                 status=e.status,
                 at=e.at,
                 error_code=e.error_code,
-                viewer=e.viewer if e.step == "viewed" else None,
+                viewer=e.viewer if show_viewer and e.step == "viewed" else None,
             )
             for e in events
         ],

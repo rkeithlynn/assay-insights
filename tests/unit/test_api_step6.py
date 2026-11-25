@@ -361,6 +361,10 @@ def test_the_view_link_is_recorded_short_lived_and_always_a_pdf(
     assert [e["viewer"] for e in detail["events"] if e["step"] == "viewed"] == [
         "a-user@example.test"
     ]
+    # Who opened it is for tenant admins only: a tenant user sees the event, not the viewer.
+    as_user = w.req("GET", f"/api/documents/{ready_doc['id']}", "a-user")
+    assert [e["viewer"] for e in as_user.json()["events"] if e["step"] == "viewed"] == [None]
+    assert "a-user@example.test" not in as_user.text
 
 
 def test_the_view_link_is_refused_for_anything_not_in_originals(w: World) -> None:

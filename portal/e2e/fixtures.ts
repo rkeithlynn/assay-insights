@@ -167,6 +167,8 @@ const EVENTS = [
   { step: "queued", status: "queued", at: "2026-11-24T15:02:00Z", error_code: null, viewer: null },
   { step: "start", status: "started", at: "2026-11-24T15:02:05Z", error_code: null, viewer: null },
   { step: "fingerprint", status: "continue", at: "2026-11-24T15:02:09Z", error_code: null, viewer: null },
+  // Who opened it: sent to tenant admins only. A long address, to check it wraps.
+  { step: "viewed", status: "pdf_url", at: "2026-11-24T15:10:00Z", error_code: null, viewer: "alexandra.richardson-whitfield@infinityloans.example" },
 ];
 const MASTER_ROWS = DOCUMENTS.map((d, i) => ({
   document_id: d.id,
@@ -217,6 +219,8 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
     const row = DOCUMENTS[0];
     return {
       ...row,
+      // Passed fingerprint, so the panel shows the "later steps not available yet" note.
+      status: "processing",
       duplicate_of: null,
       pdf_available: true,
       events: EVENTS,
@@ -233,7 +237,8 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
     return {
       document_id: MASTER_ROWS[0]?.document_id,
       events: [
-        ...EVENTS.map((e) => ({ step: e.step, status: e.status, at: e.at, error_code: e.error_code, error_type: null })),
+        // The master view never has `viewed` events.
+        ...EVENTS.filter((e) => e.step !== "viewed").map((e) => ({ step: e.step, status: e.status, at: e.at, error_code: e.error_code, error_type: null })),
         { step: "failed", status: "failed", at: "2026-11-24T15:03:40Z", error_code: "fingerprint_failed", error_type: "Lambda.TooManyRequestsException" },
       ],
     };

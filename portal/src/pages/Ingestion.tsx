@@ -42,6 +42,8 @@ import {
   DOCUMENT_STATUS,
   errorCodeText,
   errorText,
+  laterStepsPending,
+  resultText,
   formatBytes,
   formatDuration,
   formatShortTime,
@@ -110,21 +112,38 @@ interface StepEvent {
   error_code: string | null;
   // The master view only: a failed step's error type.
   error_type?: string | null;
+  // The tenant view, for tenant admins only (the API leaves it out for tenant users): who
+  // opened the PDF.
+  viewer?: string | null;
+}
+
+function result(e: StepEvent): string {
+  const words = resultText(e.status);
+  return e.step === "viewed" && e.viewer ? `${words} by ${e.viewer}` : words;
 }
 
 /** A document's pipeline steps. `showCodes` (master admins only) adds each error's code and
  * error type under its plain words; tenant users see the plain words alone. */
-export function Steps({ events, showCodes = false }: { events: StepEvent[]; showCodes?: boolean }) {
+export function Steps({
+  events,
+  documentStatus,
+  showCodes = false,
+}: {
+  events: StepEvent[];
+  documentStatus: string;
+  showCodes?: boolean;
+}) {
   return (
-    <Table
-      variant="embedded"
-      items={events}
-      wrapLines
-      header={<Header variant="h3">Pipeline steps</Header>}
-      empty={<Box textAlign="center">No steps yet.</Box>}
-      columnDefinitions={[
-        { id: "step", header: "Step", cell: (e) => stepText(e.step) },
-        { id: "status", header: "Result", cell: (e) => e.status.replaceAll("_", " ") },
+    <SpaceBetween size="s">
+      <Table
+        variant="embedded"
+        items={events}
+        wrapLines
+        header={<Header variant="h3">Pipeline steps</Header>}
+        empty={<Box textAlign="center">No steps yet.</Box>}
+        columnDefinitions={[
+          { id: "step", header: "Step", cell: (e) => stepText(e.step) },
+          { id: "status", header: "Result", cell: result },
         { id: "at", header: "Time", cell: (e) => <span style={ONE_LINE}>{new Date(e.at).toLocaleString()}</span> },
         {
           id: "error",
@@ -145,7 +164,15 @@ export function Steps({ events, showCodes = false }: { events: StepEvent[]; show
           },
         },
       ]}
-    />
+      />
+      {laterStepsPending(documentStatus, events) && (
+        // TODO(build step 6, second half): remove with laterStepsPending.
+        <Alert type="info">
+          This document passed the fingerprint step. The steps after it are not available yet, so it shows as
+          Processing for now.
+        </Alert>
+      )}
+    </SpaceBetween>
   );
 }
 
@@ -253,7 +280,7 @@ function DocumentPanel({ id, onDismiss }: { id: string | null; onDismiss: () => 
                 </Button>
               </Box>
             )}
-            <Steps events={detail.events} />
+            <Steps events={detail.events} documentStatus={detail.status} />
             <Table
               variant="embedded"
               items={detail.parts}

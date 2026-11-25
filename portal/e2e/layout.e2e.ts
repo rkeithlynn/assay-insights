@@ -53,7 +53,7 @@ const SCREENS: Screen[] = [
     ready: "application-package-1.pdf",
     setup: async (page) => {
       await page.getByRole("link", { name: "application-package-1.pdf" }).click();
-      await page.getByRole("dialog").getByText("Fingerprint").waitFor();
+      await page.getByRole("dialog").getByText("Fingerprint", { exact: true }).waitFor();
     },
   },
   { id: "tenant-user-home", persona: "tenant-user", path: "/", ready: "Welcome, Ada Lovelace" },

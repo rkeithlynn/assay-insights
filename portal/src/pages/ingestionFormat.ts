@@ -110,6 +110,45 @@ export function errorCodeText(code: string | null | undefined, errorType?: strin
   return [code, errorType].filter(Boolean).join(" · ");
 }
 
+/** Plain words for a pipeline step's result (`document_events.status`). */
+export const RESULT_TEXT: Record<string, string> = {
+  // Malware scan
+  clean: "Clean",
+  infected: "Malware found",
+  unsupported: "Could not be scanned",
+  mismatch: "File differs",
+  invalid: "Not valid",
+  scan_timeout: "Timed out",
+  // Queue and execution
+  queued: "Queued",
+  started: "Started",
+  // Fingerprint
+  continue: "Passed",
+  duplicate: "Duplicate",
+  on_hold: "On hold",
+  // Companion file, failure
+  quarantined: "Quarantined",
+  failed: "Failed",
+  removed: "Removed",
+  // PDF opened
+  pdf_url: "Opened",
+};
+
+export function resultText(status: string): string {
+  const known = RESULT_TEXT[status];
+  if (known) return known;
+  const words = status.replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Build step 6, first half only: no step after fingerprint exists yet, so a document that
+ * passed it stays Processing. TODO(build step 6, second half): remove this and its note.
+ */
+export function laterStepsPending(status: string, events: { step: string; status: string }[]): boolean {
+  return status === "processing" && events.some((e) => e.step === "fingerprint" && e.status === "continue");
+}
+
 /** A pipeline step's name, for the step list. */
 export const STEP_TEXT: Record<string, string> = {
   scan: "Malware scan",

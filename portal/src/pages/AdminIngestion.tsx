@@ -129,7 +129,7 @@ function StepsPanel({ row, onDismiss }: { row: IngestionRow | null; onDismiss: (
             ]}
           />
           {error && <Alert type="error">{error}</Alert>}
-          {!detail && !error ? <StatusIndicator type="loading">Loading</StatusIndicator> : <Steps events={detail?.events ?? []} showCodes />}
+          {!detail && !error ? <StatusIndicator type="loading">Loading</StatusIndicator> : <Steps events={detail?.events ?? []} documentStatus={row.status} showCodes />}
         </SpaceBetween>
       )}
     </Modal>

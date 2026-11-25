@@ -191,6 +191,11 @@ Still open:
   has no `us.` profile; a named exception to section 2), with an `ai_models` row (job
   `embed`, migration `0010`; `0009` is the master view's `error_type`) and its price left blank for the owner. Arrives with the second
   half, when the catalog changes; `seed.py` refuses a catalog with a blank price.
+- **Remove the "later steps are not available yet" note** (`laterStepsPending` in
+  `portal/src/pages/ingestionFormat.ts` and its Alert in `Steps`, both marked
+  `TODO(build step 6, second half)`) once steps 5 to 10 exist. Until then a document that
+  passed fingerprint stays Processing, and the steps panel says why. Add each new step's
+  results to `RESULT_TEXT` (plain words; the stored codes are never shown).
 - **Portal:** add every new screen to `SCREENS` in `portal/e2e/layout.e2e.ts` (and its data
   to `e2e/fixtures.ts`); use `RowActions` for any row menu. The navigation is now 218 px
   ("Ingestion history"). Run `uv run scripts/check_portal_render.py` after any visible change
@@ -1283,6 +1288,10 @@ Notes:
   tenant's document detail reads only `detail.error`. **Second half: add every new step to
   `PIPELINE_STEPS` and give it its own Pass state** (`test_infra_pipeline.py` checks every
   catch goes through one).
+- **Who opened a PDF is shown to tenant admins only** (owner, 2026-11-24): `GET
+  /documents/{id}` returns each `viewed` event's `viewer` only when the caller is a tenant
+  admin; a tenant user sees "Opened" with no name. The steps panel shows plain words for
+  every result (`RESULT_TEXT`: `continue` is "Passed", `pdf_url` is "Opened").
 - **A failed document cannot be re-run; upload the file again.** Nothing restarts a `failed`
   document (the sweeper requeues only `processing` documents with no execution), and Step
   Functions does not reuse a Standard execution's name, which is the document ID, for 90
