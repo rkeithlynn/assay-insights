@@ -774,6 +774,27 @@ def test_scan_role_trust_requires_this_account_as_source() -> None:
     assert statement["Condition"] == {"StringEquals": {"aws:SourceAccount": ACCOUNT_ID}}
 
 
+def test_only_the_api_gateway_logging_role_admits_a_call_with_no_source_account() -> None:
+    """Owner's experiment of 2026-11-25: the one role whose trust is `IfExists`."""
+    trust = json.loads(tss.api_logs_trust_policy(ACCOUNT_ID))
+    [statement] = trust["Statement"]
+    assert statement["Effect"] == "Allow"
+    assert statement["Principal"] == {"Service": "apigateway.amazonaws.com"}
+    assert statement["Action"] == "sts:AssumeRole"
+    # Another account's ID is still refused; only a call with none is admitted.
+    assert statement["Condition"] == {"StringEqualsIfExists": {"aws:SourceAccount": ACCOUNT_ID}}
+
+    [other] = json.loads(tss._service_trust("lambda.amazonaws.com", ACCOUNT_ID))["Statement"]
+    assert other["Condition"] == {"StringEquals": {"aws:SourceAccount": ACCOUNT_ID}}
+
+    source = (REPO_ROOT / "infra").rglob("*.py")
+    users = [p.name for p in source if "IfExists" in p.read_text(encoding="utf-8")]
+    assert users == ["tss.py"]
+    assert (REPO_ROOT / "infra/assay_infra/tss.py").read_text(encoding="utf-8").count(
+        "IfExists"
+    ) == 1
+
+
 def test_scan_role_reads_and_tags_tenant_buckets_only() -> None:
     policy = json.loads(
         provisioning.scan_role_policy(region=REGION, account_id=ACCOUNT_ID, name_prefix=PREFIX)

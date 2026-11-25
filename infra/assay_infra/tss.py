@@ -145,6 +145,30 @@ def _service_trust(service: str, account_id: str) -> str:
     )
 
 
+def api_logs_trust_policy(account_id: str) -> str:
+    """The trust policy of the role API Gateway writes its logs with (the account setting).
+
+    A deliberate, narrow widening (owner, 2026-11-25; an experiment, see CLAUDE.md): the
+    source account is checked only if the call carries one. With `StringEquals` the access
+    log never received an entry, and the suspicion is that the part of API Gateway that
+    writes logs sends no source account. A call that carries another account's is still
+    refused. Every other service role keeps `_service_trust`.
+    """
+    return _json(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "apigateway.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                    "Condition": {"StringEqualsIfExists": {"aws:SourceAccount": account_id}},
+                }
+            ],
+        }
+    )
+
+
 # Lambda VPC networking. These actions do not support resource scoping.
 VPC_NETWORK_INTERFACE_STATEMENT = {
     "Sid": "VpcNetworkInterfaces",
@@ -682,9 +706,7 @@ class TenantStorage(pulumi.ComponentResource):
         logs_role = aws.iam.Role(
             f"{name}-api-logs-role",
             description="API Gateway: write access logs to CloudWatch Logs (account setting)",
-            assume_role_policy=account.apply(
-                lambda acct: _service_trust("apigateway.amazonaws.com", acct)
-            ),
+            assume_role_policy=account.apply(api_logs_trust_policy),
             opts=child,
         )
         logs_attachment = aws.iam.RolePolicyAttachment(
