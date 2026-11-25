@@ -775,7 +775,7 @@ def test_scan_role_trust_requires_this_account_as_source() -> None:
 
 
 def test_only_the_api_gateway_logging_role_admits_a_call_with_no_source_account() -> None:
-    """Owner's experiment of 2026-11-25: the one role whose trust is `IfExists`."""
+    """The one role whose trust is `IfExists` (proven necessary on 2026-11-25)."""
     trust = json.loads(tss.api_logs_trust_policy(ACCOUNT_ID))
     [statement] = trust["Statement"]
     assert statement["Effect"] == "Allow"
@@ -1023,6 +1023,43 @@ def test_tenant_role_trusts_only_the_tss_and_uses_the_one_template() -> Any:
             if s["Effect"] == "Allow" and "sts:AssumeRole" in as_list(s["Action"])
         )
         assert assumers == ["t1-isolation-policy", "t1-tss-role-policy"]
+
+    return stack.ready().apply(check)
+
+
+@pulumi.runtime.test
+def test_the_access_logs_role_keeps_the_trust_that_lets_api_gateway_write() -> Any:
+    """With `StringEquals` the access log received nothing for two days (2026-11-25):
+    API Gateway sends no source account when it assumes the role to write a log entry.
+    Do not "tidy" this role back to the form every other service role has."""
+    stack = Stack("t1a")
+
+    def check(_: list[Any]) -> None:
+        role = _one("aws:iam/role:Role", "t1a-tss-api-logs-role")
+        assert json.loads(role["assumeRolePolicy"]) == {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "apigateway.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                    "Condition": {"StringEqualsIfExists": {"aws:SourceAccount": ACCOUNT_ID}},
+                }
+            ],
+        }
+        # It is the role the account setting names, and it has the managed policy alone.
+        attachment = _one(
+            "aws:iam/rolePolicyAttachment:RolePolicyAttachment", "t1a-tss-api-logs-policy"
+        )
+        assert attachment["policyArn"] == tss.API_GATEWAY_LOGS_POLICY
+        assert _one("aws:apigateway/account:Account", "t1a-tss-api-account")
+        # No other role in the stack has the wider form.
+        wider = [
+            name
+            for name, inputs in registered("aws:iam/role:Role", "t1a-")
+            if "IfExists" in inputs["assumeRolePolicy"]
+        ]
+        assert wider == ["t1a-tss-api-logs-role"]
 
     return stack.ready().apply(check)
 

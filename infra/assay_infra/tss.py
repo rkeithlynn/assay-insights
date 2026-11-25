@@ -148,11 +148,12 @@ def _service_trust(service: str, account_id: str) -> str:
 def api_logs_trust_policy(account_id: str) -> str:
     """The trust policy of the role API Gateway writes its logs with (the account setting).
 
-    A deliberate, narrow widening (owner, 2026-11-25; an experiment, see CLAUDE.md): the
-    source account is checked only if the call carries one. With `StringEquals` the access
-    log never received an entry, and the suspicion is that the part of API Gateway that
-    writes logs sends no source account. A call that carries another account's is still
-    refused. Every other service role keeps `_service_trust`.
+    A deliberate, narrow widening (owner, 2026-11-25; see CLAUDE.md): the source account
+    is checked only if the call carries one. API Gateway sends none when it assumes the
+    role to write a log entry, so with `StringEquals` the access log never received one
+    (proven: entries arrived as soon as this form was deployed). A call that carries another
+    account's is still refused. Every other service role keeps `_service_trust`. Staging
+    and Production need this form too; a test fails if it changes.
     """
     return _json(
         {

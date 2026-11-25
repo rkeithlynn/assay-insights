@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). Part 2 on hold until the TSS API's empty access log is settled (experiment approved 2026-11-25; outcome pending). See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). Part 2 not started See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -1930,8 +1930,10 @@ isolation run has not been repeated on it yet):
   concurrency to the owner, with the reasoning for the numbers. **Set neither before then**
   (owner, 2026-11-25). Staging and Production need the same request before their first
   deploy (see "Before deploying to Staging or Production").
-- **The TSS API's access log has never received an entry** (found on the way; investigated
-  read-only on 2026-11-25). **The cause is not proven and nothing has been changed.**
+- **The TSS API's access log received nothing until its role's trust policy was changed**
+  (found on the way; investigated read-only on 2026-11-25). **Cause proven the same day:
+  API Gateway sends no source account when it assumes the logging role to write a log
+  entry.** The fix is permanent; see "The experiment" and "Outcome" below.
   - It is configured as AWS documents. Stage `v1` has `accessLogSettings` (the log group
     `/aws/apigateway/assay-dev-tss`, a format with `$context.requestId`). The account's
     `cloudwatchRoleArn` is the stack's `assay-dev-tss-api-logs-role`, with
@@ -1950,7 +1952,7 @@ isolation run has not been repeated on it yet):
     `aws:SourceAccount` (`_service_trust`, used for every service role). AWS's logging page
     asks only for `apigateway.amazonaws.com` as the trusted entity. The control plane sends
     the account (its assumes passed `StringEquals`); no AWS page says whether the part that
-    writes logs does. This is the candidate cause, and only a change can prove it.
+    writes logs does. This was the candidate cause, and the change below proved it.
   - **Ruled out:** a log delivery and a log group resource policy for
     `delivery.logs.amazonaws.com`. That is how HTTP APIs log; the owner's credentials would
     have created both when the stage was set up, and CloudTrail has no `CreateLogDelivery`.
@@ -1978,7 +1980,21 @@ isolation run has not been repeated on it yet):
     - Entries arrive: the cause is proven and the change stays.
     - None arrive: put the condition back exactly as it was (`_service_trust`), say whether
       a stage redeploy could matter, and prepare the evidence for an AWS Support case.
-    - **Outcome: pending.**
+    - **Outcome: proven, and the change is permanent** (owner, 2026-11-25). Stack update 35
+      deployed commit e3ccbfd; the isolation run after it passed (71, 28, 68, 7) and
+      `check_deployment.py` showed the access log receiving (last 13:55 UTC; 24 receiving,
+      the break-glass log not proven). CloudTrail shows the difference: from 13:22 UTC API
+      Gateway assumes the role at the time of each request and creates a log stream in the
+      group (`CreateLogStream`, 13:55:24), which it never did in the two days before.
+      Nothing else changed in that deploy that touches API Gateway.
+    - **Never change this role back to `StringEquals`**, and never "tidy" it to match the
+      other service roles: the access log would go silent again, with no error anywhere.
+      Two tests hold the form: `test_the_access_logs_role_keeps_the_trust_that_lets_api_gateway_write`
+      (the role in the program, and that no other role has the wider form) and
+      `test_only_the_api_gateway_logging_role_admits_a_call_with_no_source_account`.
+    - **Staging and Production need the same form.** It is in the program
+      (`tss.api_logs_trust_policy`), so a new stack gets it; `check_deployment.py` after the
+      first deploy's checks confirms the log is receiving.
   - Until it is fixed, API Gateway's own record of a call (caller, integration status) does
     not exist, and `uv run scripts/check_deployment.py` fails on this log.
 - **`uv run scripts/check_deployment.py`** (owner's request, 2026-11-25; read-only). For
@@ -2008,7 +2024,6 @@ Still not known:
   depend on it: any failed task with no `worker`/`running` event is waited out.
 - Whether GuardDuty holds every kind of password-protected PDF at the scan. It held both
   kinds tried (40-bit and 128-bit RC4); AES-encrypted PDFs were not tried.
-- Why the TSS API's access log is empty: one candidate, not proven (above).
 
 Notes:
 
@@ -2047,4 +2062,3 @@ Notes:
   `07-password-protected-128.pdf` (128-bit RC4) is a second kind to try through the browser.
   **Tried on 2026-11-25: GuardDuty held it too** (`scan_unsupported`, "Could not be
   scanned"), as it holds 03. So no upload has yet reached the worker's own check.
-
