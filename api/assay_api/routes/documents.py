@@ -32,7 +32,7 @@ from assay_api.requestinfo import request_info
 from assay_api.routes.batches import StorageDep
 from assay_api.security import TENANT_ADMIN, TenantMember
 from assay_api.storage import view_link
-from assay_db import batches
+from assay_db import audit, batches
 from assay_db.models import DOCUMENT_STATUSES
 from assay_tss import keys
 from assay_tss.client import TssRequestError
@@ -169,6 +169,7 @@ def _row(r: Any) -> dict[str, Any]:
 )
 def list_documents(
     caller: TenantMember,
+    request: Request,
     start: Annotated[dt.datetime | None, Query(alias="from")] = None,
     end: Annotated[dt.datetime | None, Query(alias="to")] = None,
     status: Annotated[list[DocumentStatus] | None, Query()] = None,
@@ -190,6 +191,28 @@ def list_documents(
     if format == "csv":
         _, rows = ingestion_read.tenant_page(
             caller.conn, filters, sort=sort, number=1, size=ingestion_read.CSV_MAX_ROWS
+        )
+        # Every export is audited (owner decision, 2026-11-24), in the request's transaction as
+        # `app_tenant` (INSERT only), which commits before the file is sent: no file leaves
+        # without its row.
+        account = caller.account
+        target_type, target_label = ingestion_read.TENANT_EXPORT_TARGET
+        audit.write(
+            caller.conn,
+            tenant_id=account.tenant_id,
+            actor=audit.AuditActor(role=account.role, user_id=account.user_id, email=account.email),
+            category=ingestion_read.EXPORT_CATEGORY,
+            action=ingestion_read.EXPORT_ACTION,
+            target_type=target_type,
+            target_id=None,
+            target_label=target_label,
+            detail={
+                "filters": filters.as_detail(),
+                "sort": sort,
+                "rows": len(rows),
+                "limit": ingestion_read.CSV_MAX_ROWS,
+            },
+            request=request_info(request),
         )
         name = f"ingestion-{start_at:%Y%m%d}-{end_at:%Y%m%d}.csv"
         return Response(

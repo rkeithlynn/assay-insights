@@ -3,7 +3,9 @@
 Both master roles. Read in the account check's read-only `platform_reader` transaction,
 through `platform.platform_ingestion_v` and `platform.ingestion_events_v` only: no file name,
 no batch name, no uploader, no page text and no score. Same filters as the tenant view plus
-`tenant_id`; `discarded` documents are left out unless asked for.
+`tenant_id`; `discarded` documents are left out unless asked for. A CSV export writes its
+own audit row (`audit` / `exported`, target `ingestion_history_all_tenants`) with the actor,
+filters, row count, IP address and browser, as an Audit history export does.
 """
 
 from __future__ import annotations
@@ -12,14 +14,17 @@ import datetime as dt
 import uuid
 from typing import Annotated, Any, Literal, get_args
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi import status as http
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from assay_api import ingestion_read
+from assay_api.requestinfo import request_info
+from assay_api.routes.audit import Dbs
 from assay_api.routes.documents import DocumentStatus
 from assay_api.security import PlatformMember
+from assay_db import audit
 
 router = APIRouter(prefix="/admin")
 
@@ -114,6 +119,8 @@ def _row(r: Any) -> IngestionRow:
 )
 def ingestion_history(
     caller: PlatformMember,
+    dbs: Dbs,
+    request: Request,
     start: Annotated[dt.datetime | None, Query(alias="from")] = None,
     end: Annotated[dt.datetime | None, Query(alias="to")] = None,
     tenant_id: uuid.UUID | None = None,
@@ -141,6 +148,30 @@ def ingestion_history(
         _, rows = ingestion_read.master_page(
             caller.conn, filters, sort=sort, number=1, size=ingestion_read.CSV_MAX_ROWS
         )
+        # Every export is audited, as an Audit history export is: as `platform_writer`, in a
+        # transaction of its own that commits before the file is sent.
+        account = caller.account
+        target_type, target_label = ingestion_read.MASTER_EXPORT_TARGET
+        with dbs.platform_writer() as writer:
+            audit.write(
+                writer,
+                tenant_id=account.tenant_id,
+                actor=audit.AuditActor(
+                    role=account.role, user_id=account.user_id, email=account.email
+                ),
+                category=ingestion_read.EXPORT_CATEGORY,
+                action=ingestion_read.EXPORT_ACTION,
+                target_type=target_type,
+                target_id=None,
+                target_label=target_label,
+                detail={
+                    "filters": filters.as_detail(),
+                    "sort": sort,
+                    "rows": len(rows),
+                    "limit": ingestion_read.CSV_MAX_ROWS,
+                },
+                request=request_info(request),
+            )
         name = f"ingestion-all-tenants-{start_at:%Y%m%d}-{end_at:%Y%m%d}.csv"
         return Response(
             content=ingestion_read.master_csv(rows),

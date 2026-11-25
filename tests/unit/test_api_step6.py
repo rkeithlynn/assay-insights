@@ -430,6 +430,59 @@ def test_a_failed_step_shows_its_error_type_to_master_admins_only(
         assert "AccessDenied" not in response.text
 
 
+def _exports(w: World, target_type: str) -> list[tuple[Any, ...]]:
+    return w.db.rows(
+        "SELECT tenant_id, actor_email, actor_role, category, action, target_label, detail, "
+        "ip_address::text, user_agent FROM assay.audit_log "
+        "WHERE action = 'exported' AND target_type = %s ORDER BY at",
+        target_type,
+    )
+
+
+def test_every_ingestion_export_is_audited(w: World, ready_doc: dict[str, Any]) -> None:
+    """Owner decision (2026-11-24): actor, role, tenant, filters, row count, IP and browser,
+    as an Audit history export. No file name in the row."""
+    tenant = w.db.tenants["a"]
+    batch = ready_doc["batch_id"]
+    # Other tests export too: only the rows this test adds are checked.
+    tenant_before = len(_exports(w, "ingestion_history"))
+    master_before = len(_exports(w, "ingestion_history_all_tenants"))
+    response = w.req("GET", f"/api/documents?format=csv&batch_id={batch}&status=ready", "a-user")
+    assert response.status_code == 200, response.text
+    [row] = _exports(w, "ingestion_history")[tenant_before:]
+    assert row[:6] == (
+        tenant,
+        "a-user@example.test",
+        "tenant-user",
+        "audit",
+        "exported",
+        "Ingestion history CSV",
+    )
+    detail = row[6]
+    assert detail["rows"] == int(response.headers["X-Row-Count"])
+    assert detail["filters"]["batch_id"] == batch and detail["filters"]["statuses"] == ["ready"]
+    assert row[7].split("/")[0] == "198.51.100.7" and row[8] == "pytest-browser"
+    assert "History=Report" not in json.dumps(detail)
+
+    for sub in ("m-admin", "m-user"):
+        response = w.req("GET", f"/api/admin/ingestion?format=csv&tenant_id={tenant}", sub)
+        assert response.status_code == 200, response.text
+    rows = _exports(w, "ingestion_history_all_tenants")[master_before:]
+    assert [(r[2], r[5]) for r in rows] == [
+        ("master-admin", "Ingestion history CSV (all tenants)"),
+        ("master-user", "Ingestion history CSV (all tenants)"),
+    ]
+    assert all(r[0] == w.db.tenants["platform"] for r in rows)
+    assert rows[0][6]["filters"]["tenant_id"] == str(tenant)
+    assert all(r[7].split("/")[0] == "198.51.100.7" and r[8] == "pytest-browser" for r in rows)
+
+    # Reading the history as JSON writes nothing.
+    w.req("GET", "/api/documents", "a-user")
+    w.req("GET", "/api/admin/ingestion", "m-user")
+    assert len(_exports(w, "ingestion_history")) == tenant_before + 1
+    assert len(_exports(w, "ingestion_history_all_tenants")) == master_before + 2
+
+
 def test_the_master_view_filters_by_tenant(w: World, ready_doc: dict[str, Any]) -> None:
     other = w.req("GET", f"/api/admin/ingestion?tenant_id={w.db.tenants['b']}", "m-user").json()
     assert all(r["tenant_id"] == str(w.db.tenants["b"]) for r in other["documents"])

@@ -71,20 +71,25 @@ export function formatDuration(seconds: number | null | undefined): string {
 /** Plain words for the error codes a document or a pipeline step carries. */
 export const ERROR_TEXT: Record<string, string> = {
   threats_found: "Malware was found; the file is quarantined.",
-  scan_unsupported: "The malware scan could not read this file.",
-  scan_failed: "The malware scan failed.",
-  scan_access_denied: "The malware scan could not reach this file.",
-  scan_timeout: "The malware scan did not finish.",
+  // On hold: why, and what to do (owner, 2026-11-24). The malware scan reports only that it
+  // could not scan the file (UNSUPPORTED); for a PDF here that is almost always a password,
+  // but the scan does not say so, hence "most likely".
+  scan_unsupported:
+    "This PDF can't be scanned, most likely because it is password-protected. Remove the password and upload it again.",
+  scan_failed: "The malware scan failed. Upload the file again in a new batch.",
+  scan_access_denied: "The malware scan could not read the stored file. Upload it again in a new batch.",
+  scan_timeout: "The malware scan did not finish within 30 minutes. Upload the file again in a new batch.",
   size_mismatch: "The stored file's size differs from what was registered.",
   checksum_mismatch: "The stored file differs from what was registered.",
   version_missing: "The scanned version of the file was not found.",
   companion_invalid: "Its companion file is not valid.",
   companion_mismatch: "Its companion file differs from what was registered.",
   companion_infected: "Malware was found in its companion file.",
-  companion_not_scanned: "Its companion file could not be scanned.",
+  companion_not_scanned:
+    "Its companion file couldn't be scanned, so the PDF is on hold. Upload the PDF and a new companion file in a new batch.",
   companion_unmatched: "No PDF in the batch has this name.",
   not_a_pdf: "The file is not a PDF.",
-  pdf_encrypted: "The PDF is password-protected.",
+  pdf_encrypted: "This PDF is password-protected and can't be processed. Remove the password and upload it again.",
   not_uploaded: "The file was never uploaded.",
   removed: "Removed from the batch.",
   timeout: "Processing took too long.",
@@ -105,8 +110,22 @@ export function errorText(code: string | null | undefined): string {
   return code.replaceAll("_", " ");
 }
 
-/** For master admins: the code itself, and a failed step's error type (an error's name). */
+/** A file's problem on the Upload screen. A companion file that can't be scanned is not a
+ * PDF, so it gets its own words. */
+export function fileProblemText(code: string | null | undefined, kind: string): string {
+  if (kind === "companion" && code === "scan_unsupported") {
+    return "This companion file can't be scanned. Remove it from the batch and add it again.";
+  }
+  return errorText(code);
+}
+
+// Rows written before step-level codes (build step 6, 2026-11-24) carry only this one.
+const GENERIC_FAILURE = "pipeline_error";
+
+/** For master admins: always the stored code, and a failed step's error type (an error's
+ * name). A generic failure with no error type says the step was not recorded. */
 export function errorCodeText(code: string | null | undefined, errorType?: string | null): string {
+  if (code === GENERIC_FAILURE && !errorType) return `${code} · the failed step was not recorded`;
   return [code, errorType].filter(Boolean).join(" · ");
 }
 

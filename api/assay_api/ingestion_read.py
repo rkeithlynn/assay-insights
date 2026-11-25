@@ -92,6 +92,23 @@ class Filters:
     batch_id: uuid.UUID | None = None
     tenant_id: uuid.UUID | None = None  # master view only
 
+    def as_detail(self) -> dict[str, Any]:
+        """The filters, for an export's audit row: times, statuses and IDs only."""
+        return {
+            "from": self.start.isoformat(),
+            "to": self.end.isoformat(),
+            "statuses": list(self.statuses),
+            "batch_id": str(self.batch_id) if self.batch_id else None,
+            "tenant_id": str(self.tenant_id) if self.tenant_id else None,
+        }
+
+
+# An export's audit row (owner decision, 2026-11-24): the same category and action as an
+# Audit history export, told apart by `target_type`.
+EXPORT_CATEGORY, EXPORT_ACTION = "audit", "exported"
+TENANT_EXPORT_TARGET = ("ingestion_history", "Ingestion history CSV")
+MASTER_EXPORT_TARGET = ("ingestion_history_all_tenants", "Ingestion history CSV (all tenants)")
+
 
 def _where(filters: Filters, alias: str) -> tuple[str, dict[str, Any]]:
     clauses = [f"{alias}.received_at >= :start", f"{alias}.received_at < :end"]

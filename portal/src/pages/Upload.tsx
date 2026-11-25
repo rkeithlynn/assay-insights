@@ -34,7 +34,7 @@ import { RowActions } from "../components/RowActions";
 import { messageFor } from "../errors";
 import { useSession } from "../session";
 import { chunks, localProblem, putFile, runLimited, sha256Hex } from "../upload";
-import { formatBytes } from "./ingestionFormat";
+import { fileProblemText, formatBytes } from "./ingestionFormat";
 
 // While any file waits for its scan, read the batch again this often.
 const POLL_MS = 4000;
@@ -45,8 +45,9 @@ const FILE_STATUS: Record<string, { type: StatusIndicatorProps.Type; label: stri
   invalid: { type: "error", label: "Companion file not valid" },
   mismatch: { type: "error", label: "Upload did not match" },
   infected: { type: "error", label: "Malware found: quarantined" },
-  unsupported: { type: "warning", label: "Could not be scanned: held" },
-  scan_timeout: { type: "warning", label: "Scan did not finish: held" },
+  // On hold: the reason and what to do show under the label (fileProblemText).
+  unsupported: { type: "warning", label: "On hold: could not be scanned" },
+  scan_timeout: { type: "warning", label: "On hold: scan did not finish" },
   not_uploaded: { type: "error", label: "Not uploaded: remove it or add it again" },
 };
 
@@ -404,9 +405,11 @@ export function Upload() {
                       return <ProgressBar value={Math.round(mine.progress * 100)} ariaLabel={`Uploading ${f.name}`} />;
                     }
                     const status = FILE_STATUS[f.status] ?? { type: "info" as const, label: f.status };
+                    const held = f.status === "unsupported" || f.status === "scan_timeout";
                     return (
                       <SpaceBetween size="xxs">
                         <StatusIndicator type={status.type}>{status.label}</StatusIndicator>
+                        {held && f.error_code && <Box variant="small">{fileProblemText(f.error_code, f.kind)}</Box>}
                         {f.errors.length > 0 && <Box variant="small">{companionErrorText(f.errors)}</Box>}
                       </SpaceBetween>
                     );

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { errorCodeText, errorText, laterStepsPending, resultText } from "./ingestionFormat";
+import { errorCodeText, errorText, fileProblemText, laterStepsPending, resultText } from "./ingestionFormat";
 
 describe("resultText", () => {
   it("shows plain words, never the stored codes", () => {
@@ -33,8 +33,21 @@ describe("errorText", () => {
     expect(errorText("fingerprint_failed")).toBe("The fingerprint step failed.");
   });
 
+  it("says why a file is on hold and what to do", () => {
+    expect(errorText("pdf_encrypted")).toBe(
+      "This PDF is password-protected and can't be processed. Remove the password and upload it again.",
+    );
+    expect(errorText("scan_unsupported")).toMatch(/password-protected\. Remove the password and upload it again\.$/);
+    for (const code of ["scan_failed", "scan_access_denied", "scan_timeout", "companion_not_scanned"]) {
+      expect(errorText(code)).toMatch(/ in a new batch\.$/);
+    }
+    expect(fileProblemText("scan_unsupported", "companion")).toBe(
+      "This companion file can't be scanned. Remove it from the batch and add it again.",
+    );
+    expect(fileProblemText("scan_unsupported", "pdf")).toBe(errorText("scan_unsupported"));
+  });
+
   it("keeps the fixed texts and the generic failure", () => {
-    expect(errorText("pdf_encrypted")).toBe("The PDF is password-protected.");
     expect(errorText("pipeline_error")).toBe("Processing failed.");
     expect(errorText(null)).toBe("");
   });
@@ -49,5 +62,10 @@ describe("errorCodeText (master admins)", () => {
     expect(errorCodeText("fingerprint_failed", "AccessDenied")).toBe("fingerprint_failed · AccessDenied");
     expect(errorCodeText("fingerprint_failed", null)).toBe("fingerprint_failed");
     expect(errorCodeText(null, null)).toBe("");
+  });
+
+  it("always shows the generic code of an older row, and says the step was not recorded", () => {
+    expect(errorCodeText("pipeline_error", null)).toBe("pipeline_error · the failed step was not recorded");
+    expect(errorCodeText("pipeline_error", "States.Timeout")).toBe("pipeline_error · States.Timeout");
   });
 });

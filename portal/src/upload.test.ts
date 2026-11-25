@@ -135,7 +135,9 @@ describe("labels", () => {
     expect(formatDuration(42)).toBe("0:42");
     expect(formatDuration(125)).toBe("2:05");
     expect(formatDuration(3720)).toBe("1:02:00");
-    expect(errorText("pdf_encrypted")).toBe("The PDF is password-protected.");
+    expect(errorText("pdf_encrypted")).toBe(
+      "This PDF is password-protected and can't be processed. Remove the password and upload it again.",
+    );
     expect(errorText("something_new")).toBe("something new");
   });
 

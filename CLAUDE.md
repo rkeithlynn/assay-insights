@@ -1292,6 +1292,21 @@ Notes:
   /documents/{id}` returns each `viewed` event's `viewer` only when the caller is a tenant
   admin; a tenant user sees "Opened" with no name. The steps panel shows plain words for
   every result (`RESULT_TEXT`: `continue` is "Passed", `pdf_url` is "Opened").
+- **Every ingestion CSV export is audited** (owner decision, 2026-11-24), like an Audit
+  history export: category `audit`, action `exported`, target type `ingestion_history`
+  (tenant view, written as `app_tenant` in the request's transaction, which commits before
+  the file is sent) or `ingestion_history_all_tenants` (master view, as `platform_writer` in
+  a transaction of its own). Each row has the actor, role, tenant, filters, sort, row count,
+  IP address and browser, and no file name. No permission changed: `app_tenant` and
+  `platform_writer` already had INSERT on `audit_log`.
+- **On-hold wording** (owner, 2026-11-24): every on-hold code says why and what to do
+  (`ERROR_TEXT` in `portal/src/pages/ingestionFormat.ts`; the Upload screen shows it under the
+  file's status). GuardDuty reports a password-protected PDF only as `UNSUPPORTED`, with no
+  reason, so `scan_unsupported` says "most likely because it is password-protected".
+  `pdf_encrypted`, from PDFium at fingerprint, says it for certain.
+- **Master admins always see the stored code**, also on rows from before step-level codes:
+  `pipeline_error` with no error type reads "pipeline_error · the failed step was not
+  recorded".
 - **A failed document cannot be re-run; upload the file again.** Nothing restarts a `failed`
   document (the sweeper requeues only `processing` documents with no execution), and Step
   Functions does not reuse a Standard execution's name, which is the document ID, for 90

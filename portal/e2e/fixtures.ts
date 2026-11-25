@@ -139,6 +139,8 @@ const BATCH = {
       errors: [{ code: "tenant_mismatch", key: "TenantID" }],
     }),
     batchFile(6, "eicar-test.pdf", "pdf", "infected", { error_code: "threats_found" }),
+    // On hold, with its reason and what to do.
+    batchFile(7, "password-protected-statement.pdf", "pdf", "unsupported", { error_code: "scan_unsupported" }),
   ],
   problems: [
     { file_id: "00000000-0000-4000-8000-000000000503", code: "awaiting_scan" },
@@ -175,8 +177,9 @@ const MASTER_ROWS = DOCUMENTS.map((d, i) => ({
   tenant_id: TENANT_ID,
   tenant_name: i % 2 ? "Infinity Loans" : "Northwind Credit",
   batch_id: d.batch_id,
-  status: d.status,
-  error_code: d.error_code,
+  // The first row (opened in the detail check) failed before step-level codes existed.
+  status: i === 0 ? "failed" : d.status,
+  error_code: i === 0 ? "pipeline_error" : d.error_code,
   page_count: d.page_count,
   size_bytes: d.size_bytes,
   has_companion: d.has_companion,
@@ -239,7 +242,9 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
       events: [
         // The master view never has `viewed` events.
         ...EVENTS.filter((e) => e.step !== "viewed").map((e) => ({ step: e.step, status: e.status, at: e.at, error_code: e.error_code, error_type: null })),
-        { step: "failed", status: "failed", at: "2026-11-24T15:03:40Z", error_code: "fingerprint_failed", error_type: "Lambda.TooManyRequestsException" },
+        // Both kinds of failure, to check both fit: a row from before step-level codes, and one after.
+        { step: "failed", status: "failed", at: "2026-11-24T15:03:40Z", error_code: "pipeline_error", error_type: null },
+        { step: "failed", status: "failed", at: "2026-11-24T15:04:40Z", error_code: "fingerprint_failed", error_type: "Lambda.TooManyRequestsException" },
       ],
     };
   }
