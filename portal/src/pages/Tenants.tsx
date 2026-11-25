@@ -2,7 +2,9 @@
  * Tenants (master-admin; read-only for the master user. BUILD_SPEC.md sections 5 and 11).
  * Table: name, kind, status, users, documents ingested, created. Add tenant dialog; live
  * status while provisioning; Retry on failure; Suspend and Reactivate. A tenant's detail
- * lists its admins with Reset MFA (hidden for the master user). No tenant content is shown.
+ * shows its tenant ID with a copy button and lists its admins with Reset MFA (hidden for the
+ * master user). The tenant ID is also an optional column, hidden by default. No tenant
+ * content is shown.
  */
 
 import Alert from "@cloudscape-design/components/alert";
@@ -10,10 +12,12 @@ import Box from "@cloudscape-design/components/box";
 import Button from "@cloudscape-design/components/button";
 import Container from "@cloudscape-design/components/container";
 import ContentLayout from "@cloudscape-design/components/content-layout";
+import CopyToClipboard from "@cloudscape-design/components/copy-to-clipboard";
 import Form from "@cloudscape-design/components/form";
 import FormField from "@cloudscape-design/components/form-field";
 import Header from "@cloudscape-design/components/header";
 import Input from "@cloudscape-design/components/input";
+import KeyValuePairs from "@cloudscape-design/components/key-value-pairs";
 import Modal from "@cloudscape-design/components/modal";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import StatusIndicator, { type StatusIndicatorProps } from "@cloudscape-design/components/status-indicator";
@@ -25,9 +29,38 @@ import { Confirm, type ConfirmRequest } from "../components/Confirm";
 import { messageFor } from "../errors";
 import { useSession } from "../session";
 import { useLoad } from "../useLoad";
+import { type ColumnChoice, useColumnDisplay } from "./columns";
 import { ModelsPanel } from "./ModelsPanel";
 
 const POLL_MS = 5000;
+
+export const TENANT_COLUMNS: readonly ColumnChoice[] = [
+  { id: "name", label: "Name", alwaysVisible: true },
+  { id: "tenant_id", label: "Tenant ID", hiddenByDefault: true },
+  { id: "kind", label: "Kind" },
+  { id: "status", label: "Status" },
+  { id: "users", label: "Users" },
+  { id: "documents", label: "Documents ingested" },
+  { id: "created", label: "Created" },
+];
+
+/**
+ * The tenant ID with a copy button (the ID support and the scripts ask for). The button
+ * always copies the full ID; `short` shows only its first 8 characters, as the master
+ * ingestion view does, so the table still fits at 1280 px.
+ */
+export function TenantId({ id, short = false }: { id: string; short?: boolean }) {
+  return (
+    <CopyToClipboard
+      variant="inline"
+      textToCopy={id}
+      textToDisplay={<Box variant="code">{short ? id.slice(0, 8) : id}</Box>}
+      copyButtonAriaLabel="Copy tenant ID"
+      copySuccessText="Tenant ID copied"
+      copyErrorText="Tenant ID not copied"
+    />
+  );
+}
 
 const STATUS: Record<TenantOut["status"], { type: StatusIndicatorProps.Type; label: string }> = {
   provisioning: { type: "in-progress", label: "Provisioning" },
@@ -181,6 +214,10 @@ function TenantDetail({ tenant, canReset }: { tenant: TenantOut; canReset: boole
   };
 
   return (
+    <SpaceBetween size="l">
+    <Container header={<Header variant="h2">{tenant.name}</Header>}>
+      <KeyValuePairs items={[{ label: "Tenant ID", value: <TenantId id={tenant.id} /> }]} />
+    </Container>
     <Container header={<Header variant="h2">{tenant.kind === "platform" ? "Platform users" : "Admins"}</Header>}>
       <SpaceBetween size="m">
         {notice && (
@@ -220,6 +257,7 @@ function TenantDetail({ tenant, canReset }: { tenant: TenantOut; canReset: boole
       </SpaceBetween>
       <Confirm request={confirm} busy={busy} onCancel={() => setConfirm(null)} onConfirm={() => void confirm?.run()} />
     </Container>
+    </SpaceBetween>
   );
 }
 
@@ -231,8 +269,13 @@ export function Tenants() {
   const [adding, setAdding] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [busy, setBusy] = useState(false);
+  const { columnDisplay, preferences } = useColumnDisplay(
+    "assay.admin-tenants.columns",
+    TENANT_COLUMNS,
+    "Choose the columns to show.",
+  );
 
-  const fetchTenants = useCallback(async () => (await call(api.GET("/api/admin/tenants"))).tenants, [api]);
+  const fetchTenants =useCallback(async () => (await call(api.GET("/api/admin/tenants"))).tenants, [api]);
   const { data: tenants, error: loadError, reload: load } = useLoad(fetchTenants);
   const selected = tenants?.find((t) => t.id === selectedId) ?? null;
 
@@ -352,8 +395,11 @@ export function Tenants() {
               </Header>
             }
             empty={<Box textAlign="center">No tenants yet.</Box>}
+            columnDisplay={columnDisplay}
+            preferences={preferences}
             columnDefinitions={[
               { id: "name", header: "Name", cell: (t) => t.name, isRowHeader: true },
+              { id: "tenant_id", header: "Tenant ID", cell: (t) => <TenantId id={t.id} short /> },
               { id: "kind", header: "Kind", cell: (t) => (t.kind === "platform" ? "Platform" : "Business") },
               {
                 id: "status",

@@ -105,6 +105,7 @@ class FakeApi:
     def __init__(self, me_tenant: uuid.UUID = TENANT, scan: str = "invalid") -> None:
         self.me_tenant = me_tenant
         self.scan = scan
+        self.pdf_url_served = False
         self.calls: list[tuple[str, str]] = []
         self.files: list[dict[str, Any]] = []
 
@@ -170,6 +171,10 @@ class FakeApi:
             return ok({"files": files, "problems": []})
         if path == "/api/batches/b1/close":
             return ok({"detail": "batch_not_ready"}, 409)
+        if path.startswith("/api/documents/") and path.endswith("/pdf-url"):
+            if self.pdf_url_served:
+                return ok({"url": "https://bucket.example.test/view"})
+            return ok({"detail": "pdf_not_available"}, 409)
         if path.startswith("/api/documents/"):
             return ok({"status": "quarantined", "error_code": "threats_found"})
         if path == "/api/batches/b1" and method == "DELETE":
@@ -235,3 +240,13 @@ def test_the_eicar_case_reports_the_quarantine(script: ModuleType, capsys: Any) 
     assert _run(script, fake, ["yes", "no"], token, argv) == 0
     out = capsys.readouterr().out
     assert "As expected: infected, quarantined." in out and token not in out
+    assert "View link: 409 pdf_not_available" in out
+    assert ("GET", f"https://{HOST}/api/documents/d0/pdf-url") in fake.calls
+
+
+def test_the_eicar_case_fails_if_a_view_link_is_issued(script: ModuleType, capsys: Any) -> None:
+    fake = FakeApi(scan="infected")
+    fake.pdf_url_served = True
+    argv = ["eicar", "--host", HOST, "--tenant", str(TENANT)]
+    assert _run(script, fake, ["yes", "no"], _token(30), argv) == 1
+    assert "NOT as expected" in capsys.readouterr().out

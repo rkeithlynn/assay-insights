@@ -291,9 +291,10 @@ def test_the_portal_idle_timeout_is_checked() -> None:
             validate_edge(EdgeConfig(waf_rate_limit=1000, portal_idle_minutes=minutes))
 
 
-def test_the_dev_stack_sets_a_30_minute_idle_timeout() -> None:
+def test_the_dev_stack_sets_a_60_minute_idle_timeout() -> None:
+    # 60 for now (owner, 2026-11-24); the decision was 30. The portal's fallback stays 30.
     stack = (Path(__file__).resolve().parents[2] / "infra" / "Pulumi.dev.yaml").read_text()
-    assert 'assay-platform:portalIdleTimeoutMinutes: "30"' in stack
+    assert 'assay-platform:portalIdleTimeoutMinutes: "60"' in stack
 
 
 def test_portal_source_hash_ignores_build_output(tmp_path: Path) -> None:

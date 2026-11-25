@@ -71,6 +71,20 @@ const SCREENS: Screen[] = [
   { id: "tenant-user-ingestion", persona: "tenant-user", path: "/ingestion", ready: "application-package-1.pdf" },
   { id: "master-admin-tenants", persona: "master-admin", path: "/tenants", ready: "Northwind Credit" },
   {
+    // The optional Tenant ID column, turned on in Preferences as a viewer would.
+    id: "master-admin-tenants-with-id",
+    persona: "master-admin",
+    path: "/tenants",
+    ready: "Northwind Credit",
+    setup: async (page) => {
+      await page.getByRole("button", { name: "Preferences" }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByText("Tenant ID", { exact: true }).click();
+      await dialog.getByRole("button", { name: "Confirm" }).click();
+      await page.getByRole("columnheader", { name: "Tenant ID" }).waitFor();
+    },
+  },
+  {
     id: "master-admin-tenant-detail",
     persona: "master-admin",
     path: "/tenants",

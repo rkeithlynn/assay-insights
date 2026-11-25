@@ -4,8 +4,9 @@
  * The ingestion histories have ten sortable columns (BUILD_SPEC.md section 11). Beside the
  * navigation they do not all fit legibly at 1280 px, so on a window narrower than
  * `WIDE_PX` a few are hidden by default; every column stays available here and in the
- * row's panel. A viewer's choice is kept in this browser only (localStorage, a per-viewer
- * convenience); without storage the defaults apply.
+ * row's panel. The Tenants table's tenant ID column is hidden by default at any width.
+ * A viewer's choice is kept in this browser only (localStorage, a per-viewer convenience);
+ * without storage the defaults apply.
  */
 
 import CollectionPreferences, {
@@ -22,18 +23,20 @@ export interface ColumnChoice {
   alwaysVisible?: boolean;
   /** Hidden by default on a window narrower than WIDE_PX. */
   hiddenWhenNarrow?: boolean;
+  /** Hidden by default at any width (an optional column). */
+  hiddenByDefault?: boolean;
 }
 
 type Display = readonly CollectionPreferencesProps.ContentDisplayItem[];
 
 export function defaultDisplay(columns: readonly ColumnChoice[], windowWidth: number): Display {
   const narrow = windowWidth < WIDE_PX;
-  return columns.map((c) => ({ id: c.id, visible: !(narrow && c.hiddenWhenNarrow) }));
+  return columns.map((c) => ({ id: c.id, visible: !(c.hiddenByDefault || (narrow && c.hiddenWhenNarrow)) }));
 }
 
-function stored(key: string, columns: readonly ColumnChoice[]): Display | null {
+/** A saved choice, kept to the known columns; null if there is none or it is unreadable. */
+export function restoreDisplay(raw: string | null, columns: readonly ColumnChoice[]): Display | null {
   try {
-    const raw = window.localStorage.getItem(key);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return null;
@@ -42,15 +45,30 @@ function stored(key: string, columns: readonly ColumnChoice[]): Display | null {
       (item): item is CollectionPreferencesProps.ContentDisplayItem =>
         typeof item === "object" && item !== null && known.has((item as { id: unknown }).id as string),
     );
-    // A column added since the choice was saved shows by default.
+    // A column added since the choice was saved shows, unless it is optional.
     const seen = new Set(items.map((i) => i.id));
-    return [...items, ...columns.filter((c) => !seen.has(c.id)).map((c) => ({ id: c.id, visible: true }))];
+    return [
+      ...items,
+      ...columns.filter((c) => !seen.has(c.id)).map((c) => ({ id: c.id, visible: !c.hiddenByDefault })),
+    ];
   } catch {
     return null;
   }
 }
 
-export function useColumnDisplay(key: string, columns: readonly ColumnChoice[]) {
+function stored(key: string, columns: readonly ColumnChoice[]): Display | null {
+  try {
+    return restoreDisplay(window.localStorage.getItem(key), columns);
+  } catch {
+    return null;
+  }
+}
+
+export function useColumnDisplay(
+  key: string,
+  columns: readonly ColumnChoice[],
+  description = "Choose the columns to show. Every column can be sorted.",
+) {
   const [display, setDisplay] = useState<Display>(
     () => stored(key, columns) ?? defaultDisplay(columns, window.innerWidth),
   );
@@ -71,7 +89,7 @@ export function useColumnDisplay(key: string, columns: readonly ColumnChoice[]) 
       onConfirm={({ detail }) => save(detail.contentDisplay ?? display)}
       contentDisplayPreference={{
         title: "Columns",
-        description: "Choose the columns to show. Every column can be sorted.",
+        description,
         options: columns.map((c) => ({ id: c.id, label: c.label, alwaysVisible: c.alwaysVisible })),
       }}
     />

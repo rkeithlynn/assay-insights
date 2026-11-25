@@ -37,7 +37,7 @@ config:
   assay-platform:wafRateLimit: "1000"
   # The portal signs a user out after this many minutes without activity in any of its tabs,
   # with a warning 2 minutes before (both hosts; 5 to 480).
-  assay-platform:portalIdleTimeoutMinutes: "30"
+  assay-platform:portalIdleTimeoutMinutes: "60"
   # The model catalog (ai_models), loaded by scripts/seed.py as migrator through the migration
   # Lambda. Bedrock `us.` inference profiles only. Prices are US dollars per million tokens;
   # seed.py refuses to load the catalog while any price is blank.

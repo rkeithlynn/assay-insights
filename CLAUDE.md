@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half built** (2026-11-24), on `build-step-6`, not deployed. Second half not started |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. Second half not started (plan first) |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -167,6 +167,39 @@ Step 5 was completed and verified on 2026-11-24:
 - Known limits: "Known limits (owner decisions, build step 5)" below. What carries forward:
   "Carried forward to step 6" below.
 
+Step 6, first half, was verified on 2026-11-24 (evening, US Eastern; 2026-11-25 UTC):
+
+- Deployed through 99bd9d1: `pulumi up`, `uv run scripts/migrate.py` (`0008`, then `0009`),
+  `uv run scripts/update_tenants.py` (bucket CORS, inbox-only malware scanning, plans `ACTIVE`).
+  `uv run scripts/migrate.py --command verify` (read-only, after the evening's checks):
+  revision `0009`, `rls_verified: true`, `roles_verified: true`. All 19 alarms `OK`; the ingest
+  queue and both dead-letter queues empty.
+- `run_isolation.py` passed with the inbox fixture (69 of 69 in the Lambda; owner).
+- In a browser and with `scripts/ingest_check.py` (owner, Infinity Loans):
+  - A normal upload passed fingerprint after the `TaggingDirective=REPLACE` fix, with no
+    permission added.
+  - A rejected companion: the PDF flagged, all four errors listed, Close blocked, and the
+    dialog offered fix, remove or close without the companion.
+  - `06-not-a-pdf.pdf`: `failed`, "The file is not a PDF.", no alarm.
+  - `ingest_check.py bad-companion`: six errors from the server; close refused with
+    `409 batch_not_ready`.
+  - `ingest_check.py eicar` (CloudShell): batch `0c490d9d-…`, document `21b2e1ee-…`, file
+    `infected` (`threats_found`), document `quarantined`. The tenant view shows the reason and
+    no Open PDF. GuardDuty raised `Object:S3/MaliciousFile` (severity 8, "EICAR-Test-File (not
+    a virus)") a second after the upload. The finding's object hash is EICAR's SHA-256. Its
+    `VersionId` is the inbox version, so the infected version was identified without reading
+    it. Organization alerting did not email it; that is the foundation stack's, not this
+    project's.
+  - Throttle test (reserved concurrency 0 on `assay-dev-pipeline-steps`): document
+    `16998f40-…` failed. Tenants see "The fingerprint step failed."; master admins see
+    `fingerprint_failed · Lambda.TooManyRequestsException`. The throttle was removed
+    (`get-function-concurrency` empty) and `pulumi preview` showed 337 unchanged.
+- How each part of the EICAR document's handling is known (read-only, 2026-11-25 UTC; no
+  object content read), and what can't be read directly: see "Quarantine evidence" in the
+  step 6 notes.
+- Known limits carried into the second half: "Known limits (owner decisions, build step 5)"
+  and the step 6 notes. What is still open: "Carried forward to step 6", "Still open".
+
 ### Carried forward to step 6
 
 Done in the first half of step 6 (see "Step 6, first half" below): inbox keys by opaque file ID;
@@ -183,10 +216,29 @@ Still open:
   invocation logging is off before any content first goes to Bedrock or Textract (checked on
   2026-11-24 for the plan: `optOut` for every service, logging off). The first half sends no
   content to any AI service.
-- **The worker (owner decision 8, deferred):** before the second half, compare the always-on
-  worker with Step Functions starting one ECS task per document (`runTask.sync`): cost,
-  start-up delay, complexity and every permission each needs. Do not build it before the owner
-  chooses.
+- **The second-half plan must include** (owner, 2026-11-24), before anything is built:
+  - **The worker (owner decision 8, deferred):** compare the always-on worker with Step
+    Functions starting one ECS task per document (`runTask.sync`): cost, start-up delay,
+    complexity and every permission each needs. Do not build it before the owner chooses.
+  - **Reprocessing:** how a document is processed again (for extraction changes, and for a
+    `failed` document, which today can only be uploaded again; execution names are document
+    IDs and Step Functions keeps them 90 days), with attempt numbers.
+  - **Attaching or replacing a companion file after ingestion** (A4), as part of
+    reprocessing.
+  - **Quarantine notice.** When a file is quarantined, send a security notice to the
+    platform alert topic and write an audit row. The notice names the tenant, the uploading
+    user, the time, the batch and document IDs and GuardDuty's threat name. It never carries
+    the file name or any content. Word it as a security notice, not a system failure, and
+    keep it apart from the pipeline failure alarms (its own sender, subject and wording; no
+    `ERROR` line, so the `-errors` alarms stay quiet). The threat name is not in the scan
+    result event the scan Lambda receives today; the plan must say where it comes from (the
+    GuardDuty finding, for example) and what permission that needs. Also log, and keep in
+    the audit row, the quarantine key and the source version ID, so the copy can be
+    confirmed from logs (today it cannot; see "Quarantine evidence").
+  - **Cognito refresh-token rotation** on both app clients, as assessed (see "Cognito
+    refresh-token rotation" in the step 6 notes). It removes `ALLOW_REFRESH_TOKEN_AUTH` from
+    both clients (`explicit_auth_flows` in `infra/assay_infra/auth.py`). The replica client in
+    `tests/isolation/cognito_clients.py` sets `ExplicitAuthFlows` itself and must follow.
 - **Titan Text Embeddings V2 (owner decisions 1 and 2):** called by model ID in us-east-1 (it
   has no `us.` profile; a named exception to section 2), with an `ai_models` row (job
   `embed`, migration `0010`; `0009` is the master view's `error_type`) and its price left blank for the owner. Arrives with the second
@@ -1256,11 +1308,14 @@ Notes:
 - **Verified by the first browser upload** (Infinity Loans, 2026-11-24 21:32 UTC): the
   presigned PUT with the signed `x-amz-checksum-sha256` is accepted under Object Lock default
   retention, and the scan event maps to the registered upload.
-- **Not yet verified in AWS:** that the scan event's `versionId` names the version scanned
-  (AWS's example has it; it does not say so in words); that S3 cites `s3:GetObject` (or
-  `s3:GetObjectVersion`) for a session-policy refusal of an object that exists (the inbox
-  fixture checks it on the next isolation run); that a copy with `TaggingDirective`
-  `REPLACE` and no tags passes with the tenant role's permissions (next bullet).
+- **Since verified in AWS** (2026-11-24): S3 cites `s3:GetObject` and `s3:GetObjectVersion`
+  for a session-policy refusal of an object that exists (the inbox fixture, isolation run
+  69 of 69), and a copy with `TaggingDirective` `REPLACE` and no tags passes with the tenant
+  role's permissions (fingerprint, next bullet).
+- **Not verified directly:** that the scan event's `versionId` names the version scanned
+  (AWS's example has it; it does not say so in words). The scan Lambda does not log the
+  version ID. For the EICAR upload, the GuardDuty finding's `VersionId` was the inbox
+  version GuardDuty scanned, and its hash was EICAR's.
 - **Pipeline copies take no tags** (owner-approved fix, 2026-11-24). The first browser
   upload failed at fingerprint: `CopyObject` from `inbox/` to `originals/` was refused
   (`AccessDenied`, generic message) on all three attempts. GuardDuty tags every object it
@@ -1352,6 +1407,69 @@ Notes:
   default on a window narrower than 1600 px, kept in the row's panel, and every column can be
   shown (kept per browser in localStorage). Audit history's Time column drops the year when
   it is this year's, so the table still fits at 1280 px beside the wider navigation.
+- **Tenant ID in the admin portal** (owner, 2026-11-24). A tenant's detail shows its full
+  tenant ID with a copy button. The Tenants table has an optional Tenant ID column, hidden by
+  default (Preferences): it shows the first 8 characters, as the master ingestion view does,
+  and its copy button copies the full ID. The full ID plus the button made the table 175 px
+  too wide at 1280 px. Master roles already saw tenant IDs; nothing new is exposed.
+- **Deployed names are not Pulumi resource names.** Functions are `assay-dev-pipeline-scan`,
+  `-starter`, `-steps` and `-sweeper`, each logging to `/aws/lambda/<function>`. The Pulumi
+  resource is `<function>-fn`, and that name exists nowhere in AWS. The state machine is
+  `assay-dev-pipeline` (log group `/aws/vendedlogs/states/assay-dev-pipeline`). The queues
+  are `assay-dev-pipeline-ingest`, `-ingest-dlq` and `-scan-dlq`. List them with
+  `aws lambda list-functions` before writing a command (the owner caught a `-fn` name in a
+  throttle command, 2026-11-24).
+- **Which pipeline alarm fires when.** Each function has two:
+  - `<function>-errors` (`assay-dev-pipeline-<function>-errors`): any `ERROR` log line
+    (metric filter).
+  - `<function>-failed`: the `AWS/Lambda` `Errors` metric, an invocation that ran and raised.
+  - The state machine adds `assay-dev-pipeline-executionsfailed` and
+    `-executionstimedout`.
+  - **Every failed document fires `steps-errors` and `executionsfailed`**: the `failed` step
+    logs "document failed" at `ERROR`, and the execution ends in `FailedEnd`.
+  - **`steps-failed` fires only if the function itself raised.** In the first upload's
+    `CopyObject` refusal it did (16:33 Eastern, 2026-11-24). In the throttle test
+    (22:06 Eastern) it did not: with reserved concurrency 0, Lambda refuses the invoke
+    before the function runs, which counts in `Throttles`, not `Errors`. That alarm stayed
+    `OK`.
+  - A handled outcome (`not_a_pdf`, duplicate, `pdf_encrypted`) fires nothing.
+  - A quarantine fires nothing in this stack; see the second-half quarantine notice.
+- **Step failure check** (owner decision D, run 2026-11-24). On a quiet system:
+  1. Throttle the steps function:
+     `aws lambda put-function-concurrency --function-name assay-dev-pipeline-steps --reserved-concurrent-executions 0 --profile pilar-dev`
+  2. Upload a new PDF and close its batch.
+  3. Wait for the `FingerprintFailed` Pass state (about 75 seconds of Lambda retries) in
+     `aws stepfunctions get-execution-history --execution-arn arn:aws:states:us-east-1:<account>:execution:assay-dev-pipeline:<document id> --profile pilar-dev --query "events[?type=='PassStateEntered'].stateEnteredEventDetails.name" --output text`.
+  4. Remove the throttle:
+     `aws lambda delete-function-concurrency --function-name assay-dev-pipeline-steps --profile pilar-dev`.
+  5. Confirm it is gone: `aws lambda get-function-concurrency --function-name assay-dev-pipeline-steps --profile pilar-dev`
+     prints nothing.
+  - The `Failed` state's own invoke retries until the throttle is gone. So remove the throttle
+    within about 75 seconds of `FingerprintFailed`, or that invoke fails too and the document
+    stays `processing` with no `failed` event.
+- **Quarantine evidence** (EICAR document `21b2e1ee-…`, read-only, 2026-11-25 UTC):
+  - **Infected version:** the GuardDuty finding names
+    `inbox/0c490d9d-…/21b2e1ee-…`, version `02cnIxi9XNq7ognqYcV4PgFNzFGeEHFe`, with EICAR's
+    SHA-256.
+  - **Scan result:** the scan Lambda logged `scan result recorded`, `THREATS_FOUND`,
+    `infected`, `threats_found` at 02:52:21, two seconds after the finding. It logged no
+    `ERROR` line; `scan-errors` and `scan-failed` never left `OK`; the scan dead-letter
+    queue is empty.
+  - **Copy and delete marker:** `scan.quarantine` copies the scanned version to
+    `quarantine/{document id}.pdf` (`ctx.quarantine_key`) and then deletes the inbox key
+    without a version (a delete marker; the role cannot delete a version). It does both
+    before the database write that line reports, and either one failing raises. So the line
+    shows both returned success. Nothing records the object, its version or the marker
+    directly:
+    - the organization trail has no S3 data events;
+    - the tenant bucket's policy refuses the administrator even `GetBucketPolicy`;
+    - the scan Lambda does not log the key or version.
+    Only the break-glass role could list the versions, and that raises its alarm.
+  - **View link:** `pdf-url` refuses a `quarantined` document (`NOT_VIEWABLE`;
+    `pdf_not_available`, 409) before it asks for a storage context. The API log shows two
+    `GET /api/documents/21b2e1ee-…` requests and no `pdf-url` request for it, so the refusal
+    was never exercised in AWS. `ingest_check.py eicar` now asks for the link and fails
+    unless it is refused.
 - **Browser-check files:** `uv run scripts/make_test_files.py` writes synthetic ones to
   `.test-files/` (git-ignored), including `06-not-a-pdf.pdf` (plain text: `failed`,
   `not_a_pdf`). **The EICAR test file is never written to disk or kept in the repository.**
@@ -1380,8 +1498,10 @@ Notes:
   can be added under the same name), remove the PDF, or close without the companion. Each is
   an existing file removal; no route or permission was added. Attaching or replacing a
   companion after ingestion (A4) belongs to the second half's reprocessing design.
-- **Idle timeout** (owner decision, 2026-11-24): stack config `portalIdleTimeoutMinutes` (30;
-  5 to 480) reaches the portal in `config.json` as `idleTimeoutMinutes`.
+- **Idle timeout** (owner decision, 2026-11-24): stack config `portalIdleTimeoutMinutes`
+  (5 to 480) reaches the portal in `config.json` as `idleTimeoutMinutes`. The decision was 30;
+  the owner set the dev stack to **60 for now** (2026-11-24). The stack value is required; the
+  portal's fallback, used only if `config.json` lacks it, stays 30.
   - `portal/src/idle.ts` watches clicks, keys, wheel, touch and scroll in every tab. Tabs
     share their last activity on the BroadcastChannel `assay-portal-activity`, at most every
     15 seconds; pointer movement alone does not count.

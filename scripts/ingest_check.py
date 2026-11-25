@@ -18,7 +18,8 @@ Cases:
   Then it offers to discard the batch.
 - `eicar`: the EICAR anti-malware test file, assembled in memory at run time and registered as
   `eicar-test.pdf`. GuardDuty should find it, and the pipeline should quarantine it. The script
-  prints the file's and the document's status, then offers to close the batch.
+  prints the file's and the document's status, checks that the API refuses the document a
+  view link (`pdf_not_available`), then offers to close the batch.
 
 It signs in as you: paste the access token of your signed-in portal tab (a tenant admin) at
 the hidden prompt. The token is never echoed, logged, written to disk or passed on a command
@@ -319,6 +320,10 @@ def run(
     if status == 200 and isinstance(document, dict):
         print(f"Document {document_id}: {document.get('status')} ({document.get('error_code')})")
     expected = pdf["status"] == "infected" and pdf.get("error_code") == "threats_found"
+    # A quarantined document has no view link (a refusal writes nothing).
+    status, link = api.call("GET", f"/api/documents/{document_id}/pdf-url")
+    print(f"View link: {status} {detail(link)} (expected: 409 pdf_not_available)")
+    expected = expected and status == 409 and detail(link) == "pdf_not_available"
     print("As expected: infected, quarantined." if expected else "NOT as expected: see above.")
     if ask("Close the batch now? Type yes: ").strip().lower() == "yes":
         status, closed = api.call("POST", f"/api/batches/{batch_id}/close")
