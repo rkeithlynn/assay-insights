@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). Part 2 not started See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). **Part 2 built** (2026-11-25, migration `0011`), not yet deployed: see "Stage 1, part 2". Refresh-token rotation is not switched on yet: the isolation run's probe decides how See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -2062,3 +2062,174 @@ Notes:
   `07-password-protected-128.pdf` (128-bit RC4) is a second kind to try through the browser.
   **Tried on 2026-11-25: GuardDuty held it too** (`scan_unsupported`, "Could not be
   scanned"), as it holds 03. So no upload has yet reached the worker's own check.
+
+#### Stage 1, part 2: attempts and "Process again", step 9, companion replacement, the quarantine notice, "Mark as reviewed"
+
+Built on 2026-11-25 (owner's go-ahead once the access log was settled). **Not yet deployed.**
+No content goes to any AI service in this part.
+
+What it does:
+
+- **Attempts.** `documents.attempt` (part 1) is now used everywhere. Every event carries the
+  attempt it belongs to (`document_events.attempt`, stamped from the document's row when the
+  event is written). The starter names an execution after the document and its attempt
+  (`{document_id}` for attempt 1, `{document_id}-{n}` after) and puts the attempt in the
+  execution's input; every Lambda step and the worker task do nothing unless it is still the
+  document's current attempt. **A superseded attempt writes nothing** (tested for fingerprint,
+  claim, companion, failed, and a late release).
+- **"Process again"** (`POST /documents/{id}/reprocess`, tenant admins only; multi-select in
+  the tenant's ingestion history, and a button in the document's panel).
+  - Allowed for `failed`, `ready`, `needs_review`, and `processing` whose attempt has ended
+    (no live worker grant and nothing recorded for the current attempt in the last 5
+    minutes; `batches.RUNNING_GRACE`). Refused otherwise: `not_reprocessable` (quarantined,
+    on hold, duplicate, discarded, or a document whose PDF never scanned clean),
+    `attempt_running`. A suspended tenant is refused by the account check, as everywhere.
+  - Every attempt restarts at fingerprint, from the upload at the version that scanned
+    clean (inbox versions stay; known limit 10). The PDF is copied to `originals/` only by
+    the first attempt that gets there; a later one finds it and writes nothing.
+  - A `failed` document gives up its hash when it is processed again, so fingerprint
+    checks it afresh: if the same file became an original in the meantime it ends
+    `duplicate`.
+  - The portal asks before processing again, and says how many of the selected documents
+    are Ready ("runs the AI steps again, which costs money"; owner's condition).
+- **Step 9, the companion file** (`assay_workers.companion_data`): plain code, never the
+  model. The values are stored by version: `signers` (source `companion`),
+  `companion_loan_terms` and `document_labels` rows carry `attempt`, and
+  `documents.companion_attempt` points at the current version. The pointer moves in the
+  transaction that writes the rows, so readers see the previous values until then. Nothing
+  is deleted (owner decision 2). `documents.companion_file_id` is the upload the values
+  came from. The tenant's document panel shows the values (`GET /documents/{id}`,
+  `companion` and `companion_files`); **no master view shows any of them** (tested).
+- **Companion attach or replace** (`POST /documents/{id}/companion`, tenant admins only):
+  the file is registered against its document (`batch_files.purpose` =
+  `companion_replacement`), uploaded with a presigned link to the inbox under an opaque
+  file ID, and scanned like any upload. Clean and valid, it takes effect at once; invalid
+  or infected, the document is unchanged. One at a time (`companion_pending`).
+- **The quarantine notice.** A second SNS topic, "Assay Insights security notices"
+  (`alerts.SecurityNotices`), with the alarm topic's key (no new KMS key, so
+  `platform_key_arns` is unchanged). The scan function reads GuardDuty's threat name from
+  the event (`detail.scanResultDetails.threats[0].name`; kept only if it is a plain
+  printable name of at most 200 characters), writes an audit row (category `security`,
+  action `file_quarantined`) in the scan result's transaction, and publishes the notice
+  after the commit. Both name the tenant, the uploading user, the time, the batch and
+  document IDs and the threat; **never a file name or content** (tested). The quarantine
+  key and the source version ID are in the audit row and in an INFO log line, so the copy
+  can now be confirmed from logs. Nothing is logged at ERROR, so `scan-errors` stays quiet.
+  A publish that fails raises: Lambda retries the event, the retry finds the file infected
+  with `notice_sent_at` unset and sends it; after its retries the event is in the scan
+  dead-letter queue (alarm). While `securityNoticeEmail` is blank the topic has no
+  subscription.
+- **"Mark as reviewed"** (`POST /documents/{id}/reviewed`, tenant admins only):
+  `needs_review` becomes `ready`. No document can be `needs_review` before stage 3, so the
+  button cannot appear until then; the route and its tests are in place.
+- **Audit rows** (category `document`, tenant admin as the actor, IP address and browser,
+  no file name): `reprocess_requested`, `marked_reviewed`, `companion_replace_requested`
+  (the request), and `companion_replaced` or `companion_attached` (written by the pipeline
+  when the file takes effect, with the uploading user as the actor): `before` and `after`
+  name both files by ID and inbox version, and `after.stored_version_id` is the new
+  version of `originals/{document}.companion.json`.
+
+Decisions made while building. The owner confirmed 1, 2 and 3 on 2026-11-25, and decided
+that rotation (4) stays off on the real clients until they have read the probe's output:
+
+1. **Step 9 runs in the steps Lambda, after the worker task, not inside it.** Section 8
+   lists it among the worker's steps. It is plain JSON (the scan function already reads and
+   validates the same file), it needs no sandbox, and running it as a Lambda step needs no
+   new grant for `app_worker`. The worker task no longer copies the companion file; the
+   `companion` step does. Stage 4 must decide where the final status is set, since step 9
+   now follows the task.
+2. **A replacement companion takes effect in the scan function**, in the transaction that
+   records its clean result, not through a "companion-only" execution as the plan said. Same
+   outcome (no task, no AI call), with no extra queue message, execution name or sweeper
+   rule; a failure is retried with the scan event and then alarmed by its dead-letter queue.
+3. **Audit category `document`** is new (the plan named only `security`). Audit history's
+   category filter has both.
+4. **Refresh-token rotation is not switched on for the real app clients yet.** AWS's pages
+   (read 2026-11-25) say rotation "isn't compatible with" `REFRESH_TOKEN_AUTH` and that a
+   client with no explicit flows gets `ALLOW_REFRESH_TOKEN_AUTH`, `ALLOW_USER_SRP_AUTH` and
+   `ALLOW_CUSTOM_AUTH` by default; they do not say what a client with rotation on and an
+   empty flow list ends up with. Every flow other than refresh is a programmatic sign-in,
+   which the portal clients must not allow. So, as the plan said, the replica goes first:
+   `run_isolation.py` now prints a **rotation probe** (replica pool; not pass or fail):
+   for three candidate settings, what Cognito stored and how it answered each kind of
+   programmatic sign-in. The owner's decision on the real clients follows that output.
+5. **Later-stage columns are not all here.** `documents.content_attempt` exists (NULL). The
+   `attempt` column for `pages`, `document_parts`, `signature_check`, `signing_events` and
+   `extracted_fields`, and the master view's count of current parts
+   (`platform_view_owner` reading `content_attempt` and `document_parts.attempt`), arrive
+   with the stages that first write those tables.
+
+Migration `0011` (see its docstring):
+
+- `document_events.attempt`; `attempt` on `signers`, `companion_loan_terms`,
+  `document_labels`, with their unique rules now per attempt; `documents.companion_attempt`,
+  `content_attempt`, `companion_file_id`; `batch_files.purpose`, `applied_at`,
+  `notice_sent_at`, and the one-live-file-per-name index limited to batch uploads; audit
+  categories `security` and `document`; `pipeline.tenants_with_work` replaced (a document
+  is started only if its current attempt has a `start` event).
+- **Grants: two, each one integer column** (approved with the plan, decision 5):
+  `pipeline_lookup` and `app_worker` may read `document_events.attempt`. No policy, role or
+  table changes. `app_tenant` already had table-level access to every table touched.
+- A downgrade deletes nothing (`migrator` sees no rows). If replacement files or a second
+  version of a document's companion data exist, the database refuses it.
+
+New permissions (all approved with the plan, decisions 4 and 5; also in the pull request):
+
+- **`sns` interface endpoint** in the VPC, with a policy that allows one role (the scan
+  function's), one action (`sns:Publish`) and one topic.
+- **Scan function's role:** `sns:Publish` on the security-notice topic; `kms:GenerateDataKey*`
+  and `kms:Decrypt` on the alarm topic's key, only through SNS (`kms:ViaService`).
+- **The topic's policy** has no Allow: it denies `sns:Publish` to every principal but the
+  scan function's role, and any call without TLS. The role is named in a condition, so the
+  policy needs no IAM propagation wait.
+- No change to the tenant role, any bucket, key or vector bucket policy, the TSS, any
+  queue, or any other endpoint policy. No `update_tenants.py` run.
+
+Deploy order (owner): deploy when no document is in progress (an execution started before
+the deploy keeps the old definition, without the attempt). `pulumi up`; then
+`uv run scripts/migrate.py` **straight away** (until `0011` is in, every pipeline step that
+writes an event fails, so upload nothing in between); `uv run scripts/run_isolation.py ...`
+(read the rotation probe); browser checks; `uv run scripts/check_deployment.py`. If
+`securityNoticeEmail` is set, follow SNS's confirmation link within 48 hours.
+
+What the preview showed (2026-11-25): 6 to create (the `sns` endpoint, the topic, its
+policy, its email subscription, the endpoint policy, the component), 16 to update, 12 to
+replace (every image, the three task definitions and the portal build), 329 unchanged. The
+steps, starter and sweeper role policies show as updated only because their text is built
+from the topic's ARN, which is unknown until the topic exists; their content is unchanged
+(tested: only the scan function's policy has the two new statements).
+
+Not yet tested in AWS (everything in this part). In particular:
+
+- that a real scan event carries `threats[0].name` (the part 2 EICAR run in CloudShell
+  shows it: the notice and the `security` row should name "EICAR-Test-File (not a virus)");
+- the notice's delivery through the new endpoint and topic;
+- a second execution of one document (`{document_id}-2`);
+- what Cognito does with rotation on (the probe).
+
+Portal (owner, 2026-11-25, before the deploy):
+
+- **The File name column of the tenant's ingestion history** has a minimum width (200 px),
+  shows each name on one line, and cuts a long one with an ellipsis; the full name is the
+  cell's tooltip and the panel's title. With the selection checkboxes added, names had
+  wrapped into many short lines at 1280 px. The rendered check now has `checkFileNames`
+  (both tenant ingestion screens, both widths): one line, at least 180 px, the tooltip is
+  the full name, the fixtures' long name is cut and a short one is whole.
+- **To make the room, the Companion file column is hidden by default** at every width (it
+  is in the row's panel, and Preferences shows it), as Size and Duration already are on
+  narrower windows. The page's content stops at about 1280 px however wide the window is,
+  so a wide window has only about 270 px more than a 1280 px one, and it also shows Size
+  and Duration. A browser that already saved its column preferences keeps them.
+- No new screen, so `SCREENS` has no new entry; the document panel's fixture gained the
+  companion values and uploads (long values, to check they wrap).
+
+For later stages:
+
+- Add each new step to `PIPELINE_STEPS`, `progress.WORKER_STEPS` (worker steps), the
+  portal's `STEP_TEXT` and `RESULT_TEXT`, and give it a Pass state. `companion` is there.
+- A step that asks "did I already run?" must ask about its own attempt's events.
+- Derived rows carry an attempt and are read through the document's pointer; nothing is
+  deleted.
+- The worker's session policy still names the companion key for writing; the task no
+  longer writes it. Narrowing it is a change to the TSS (no tenant stack run) for a later
+  stage, or part of stage 2's worker changes.

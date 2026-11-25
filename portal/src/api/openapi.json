@@ -597,8 +597,299 @@
         "title": "CatalogModel",
         "type": "object"
       },
+      "CompanionFileOut": {
+        "description": "One companion upload of the document: the batch's, or one attached later.",
+        "properties": {
+          "applied_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied At"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/FileProblem"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "registered_at": {
+            "format": "date-time",
+            "title": "Registered At",
+            "type": "string"
+          },
+          "replacement": {
+            "title": "Replacement",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "error_code",
+          "errors",
+          "replacement",
+          "registered_at",
+          "applied_at",
+          "current"
+        ],
+        "title": "CompanionFileOut",
+        "type": "object"
+      },
+      "CompanionLabelOut": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "CompanionLabelOut",
+        "type": "object"
+      },
+      "CompanionSignerOut": {
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
+          }
+        },
+        "required": [
+          "name",
+          "email",
+          "phone",
+          "location"
+        ],
+        "title": "CompanionSignerOut",
+        "type": "object"
+      },
+      "CompanionValues": {
+        "description": "The companion file's current values (step 9). Tenant content: tenant routes only.",
+        "properties": {
+          "application_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application Ref"
+          },
+          "cosigner_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cosigner Name"
+          },
+          "labels": {
+            "items": {
+              "$ref": "#/components/schemas/CompanionLabelOut"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "loan_interest_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loan Interest Rate"
+          },
+          "loan_maturity_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loan Maturity Date"
+          },
+          "loan_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loan Number"
+          },
+          "loan_term_months": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loan Term Months"
+          },
+          "package_completed_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Package Completed On"
+          },
+          "package_created_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Package Created On"
+          },
+          "signers": {
+            "items": {
+              "$ref": "#/components/schemas/CompanionSignerOut"
+            },
+            "title": "Signers",
+            "type": "array"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "application_ref",
+          "loan_number",
+          "cosigner_name",
+          "package_created_on",
+          "package_completed_on",
+          "loan_term_months",
+          "loan_maturity_date",
+          "loan_interest_rate",
+          "signers",
+          "labels"
+        ],
+        "title": "CompanionValues",
+        "type": "object"
+      },
       "DocumentDetail": {
         "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
           "batch_id": {
             "format": "uuid",
             "title": "Batch Id",
@@ -614,6 +905,23 @@
               }
             ],
             "title": "Batch Name"
+          },
+          "companion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompanionValues"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "companion_files": {
+            "items": {
+              "$ref": "#/components/schemas/CompanionFileOut"
+            },
+            "title": "Companion Files",
+            "type": "array"
           },
           "completed_at": {
             "anyOf": [
@@ -761,8 +1069,11 @@
           "uploaded_by",
           "duplicate_of",
           "pdf_available",
+          "attempt",
           "events",
-          "parts"
+          "parts",
+          "companion",
+          "companion_files"
         ],
         "title": "DocumentDetail",
         "type": "object"
@@ -773,6 +1084,10 @@
             "format": "date-time",
             "title": "At",
             "type": "string"
+          },
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
           },
           "error_code": {
             "anyOf": [
@@ -810,7 +1125,8 @@
           "status",
           "at",
           "error_code",
-          "viewer"
+          "viewer",
+          "attempt"
         ],
         "title": "DocumentEventOut",
         "type": "object"
@@ -1630,6 +1946,25 @@
         "title": "RegisteredFiles",
         "type": "object"
       },
+      "Reprocessed": {
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "attempt"
+        ],
+        "title": "Reprocessed",
+        "type": "object"
+      },
       "SelectionIn": {
         "additionalProperties": false,
         "properties": {
@@ -2145,7 +2480,9 @@
                     "auth",
                     "user",
                     "tenant",
-                    "audit"
+                    "audit",
+                    "security",
+                    "document"
                   ],
                   "type": "string"
                 },
@@ -3547,6 +3884,61 @@
         "summary": "Get Document"
       }
     },
+    "/api/documents/{document_id}/companion": {
+      "post": {
+        "operationId": "attach_companion_api_documents__document_id__companion_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisteredFile"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Attach Companion"
+      }
+    },
     "/api/documents/{document_id}/pdf-url": {
       "get": {
         "operationId": "pdf_url_api_documents__document_id__pdf_url_get",
@@ -3590,6 +3982,89 @@
           }
         ],
         "summary": "Pdf Url"
+      }
+    },
+    "/api/documents/{document_id}/reprocess": {
+      "post": {
+        "operationId": "reprocess_api_documents__document_id__reprocess_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reprocessed"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reprocess"
+      }
+    },
+    "/api/documents/{document_id}/reviewed": {
+      "post": {
+        "operationId": "mark_reviewed_api_documents__document_id__reviewed_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mark Reviewed"
       }
     },
     "/api/me": {

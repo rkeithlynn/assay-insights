@@ -24,12 +24,18 @@ user and its credentials in its environment. Opening one is the worker task's sa
   task ever started (it writes a `worker`/`running` event when it does). A task that never
   started, for lack of Fargate capacity for example, is not the document's failure: the
   state machine waits and claims again.
+- `companion` (step 9), after the task: the companion file's values, stored by version
+  (`assay_workers.companion_data`). Plain code; no PDF is opened and no model is called.
 - `failed`: the state machine's catch. The document becomes `failed` with `{step}_failed`,
   which is all a tenant user sees. For the worker task the step is the one whose progress
   mark is still open (`assay_workers.progress`), read from the database, never from the
   error. Its `failed` event also keeps the error's name (`error_type`, checked against
   `ERROR_TYPE`) for the master view. The error's message and stack trace never reach this
   step.
+
+Every step gets the attempt its execution was started for and does nothing unless that is
+still the document's current attempt ("Process again" starts a new one): a superseded
+attempt writes nothing.
 
 The reserved isolation-test document ID is refused by all of them: no row read or written,
 no object touched.
@@ -51,7 +57,7 @@ from sqlalchemy import Connection, Engine, text
 
 from assay_db import batches, grants
 from assay_tss import keys
-from assay_workers import progress
+from assay_workers import companion_data, progress
 from assay_workers.runtime import Settings, StorageSource, tenant_tx
 
 log = logging.getLogger()
@@ -72,7 +78,9 @@ CONTINUE, DUPLICATE, ON_HOLD, FAILED, REFUSED = (
 CLAIMED, WAIT, STOPPED = "claimed", "wait", "stopped"
 # The steps a failure can name. The document's code is `{step}_failed`; anything else is
 # `pipeline_error`. `worker` is the task as a whole, when no step of it had started.
-PIPELINE_STEPS = frozenset({"fingerprint", "claim", progress.WORKER, *progress.WORKER_STEPS})
+PIPELINE_STEPS = frozenset(
+    {"fingerprint", "claim", progress.WORKER, *progress.WORKER_STEPS, companion_data.STEP}
+)
 DEFAULT_FAILURE = "pipeline_error"
 # The error's name as Step Functions gives it: an exception type, an AWS error code or a
 # `States.*` name. Kept only if it matches; never its message or stack trace.
@@ -106,12 +114,32 @@ def _ids(event: dict[str, Any]) -> tuple[uuid.UUID, uuid.UUID]:
     return tenant_id, document_id
 
 
+def _attempt(event: dict[str, Any]) -> int | None:
+    """The attempt the execution was started for. None for an execution started before
+    attempts were passed: it is taken to be the document's current one."""
+    value = event.get("attempt")
+    return None if value is None else int(value)
+
+
+def _current(conn: Connection, document_id: uuid.UUID, attempt: int | None) -> Any | None:
+    """The document's status and attempt, locked, if `attempt` is still its current one."""
+    row = conn.execute(
+        text("SELECT status, attempt FROM assay.documents WHERE id = :id FOR UPDATE"),
+        {"id": document_id},
+    ).one_or_none()
+    if row is None or (attempt is not None and row.attempt != attempt):
+        return None
+    return row
+
+
 def _done(conn: Connection, document_id: uuid.UUID) -> str | None:
-    """The outcome a previous run of fingerprint recorded, if any."""
+    """The outcome a previous run of fingerprint recorded for the current attempt, if any."""
     row = conn.execute(
         text(
-            "SELECT detail ->> 'outcome' FROM assay.document_events "
-            "WHERE document_id = :id AND step = 'fingerprint' ORDER BY at DESC LIMIT 1"
+            "SELECT e.detail ->> 'outcome' FROM assay.document_events e "
+            "JOIN assay.documents d ON d.tenant_id = e.tenant_id AND d.id = e.document_id "
+            "WHERE e.document_id = :id AND e.step = 'fingerprint' AND e.attempt = d.attempt "
+            "ORDER BY e.at DESC LIMIT 1"
         ),
         {"id": document_id},
     ).scalar_one_or_none()
@@ -144,8 +172,12 @@ def _record(
 
 def fingerprint(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
     tenant_id, document_id = _ids(event)
+    attempt = _attempt(event)
     fields = {"tenant_id": str(tenant_id), "document_id": str(document_id)}
     with tenant_tx(deps.engine, tenant_id) as conn:
+        if _current(conn, document_id, attempt) is None:
+            log.info("not the document's current attempt; nothing done", extra=fields)
+            return {"outcome": STOPPED}
         previous = _done(conn, document_id)
         if previous is not None:
             log.info("fingerprint already done", extra=fields | {"outcome": previous})
@@ -175,6 +207,9 @@ def fingerprint(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
         is_pdf = has_pdf_header(path)
 
     with tenant_tx(deps.engine, tenant_id) as conn:
+        if _current(conn, document_id, attempt) is None:
+            log.info("superseded while fingerprinting; nothing written", extra=fields)
+            return {"outcome": STOPPED}
         if digest != pdf.sha256:
             # The upload link and the scan step both checked this; a difference here means the
             # object changed under its version, which S3 does not allow. Fail loudly.
@@ -271,10 +306,7 @@ def claim(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
     tenant_id, document_id = _ids(event)
     fields = {"tenant_id": str(tenant_id), "document_id": str(document_id)}
     with tenant_tx(deps.engine, tenant_id) as conn:
-        row = conn.execute(
-            text("SELECT status, attempt FROM assay.documents WHERE id = :id FOR UPDATE"),
-            {"id": document_id},
-        ).one_or_none()
+        row = _current(conn, document_id, _attempt(event))
         if row is None or row.status != "processing":
             log.info("document is no longer processing; no worker", extra=fields)
             return {"outcome": STOPPED}
@@ -324,7 +356,7 @@ def release(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
                     },
                 ).scalar_one()
             )
-        ended = grants.end(conn, document_id=document_id)
+        ended = grants.end(conn, document_id=document_id, attempt=_attempt(event))
     if not started:
         # No capacity, an image that could not be pulled, a task that died before it bound
         # its session. The state machine tries again; this says so, loudly now and then.
@@ -355,11 +387,14 @@ def error_type(event: dict[str, Any]) -> str | None:
 
 def worker_failure(conn: Connection, document_id: uuid.UUID) -> tuple[str, str | None]:
     """Which of the worker task's steps was under way when it failed, and the exception's
-    type if the task recorded one. From the task's own progress marks in the database."""
+    type if the task recorded one. From the task's own progress marks in the database, for
+    the document's current attempt."""
     row = conn.execute(
         text(
             "SELECT e.step, e.status, e.detail ->> 'error_type' AS error_type "
-            "FROM assay.document_events e WHERE e.document_id = :id AND e.step = ANY(:steps) "
+            "FROM assay.document_events e "
+            "JOIN assay.documents d ON d.tenant_id = e.tenant_id AND d.id = e.document_id "
+            "WHERE e.document_id = :id AND e.step = ANY(:steps) AND e.attempt = d.attempt "
             "ORDER BY e.at DESC LIMIT 1"
         ),
         {"id": document_id, "steps": list(progress.WORKER_STEPS)},
@@ -376,13 +411,22 @@ def failed(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
     tenant_id, document_id = _ids(event)
     step = event.get("failed_step")
     name = error_type(event)
+    attempt = _attempt(event)
     with tenant_tx(deps.engine, tenant_id) as conn:
+        if _current(conn, document_id, attempt) is None:
+            # A newer attempt has taken over: its outcome is the document's, not this one's.
+            grants.end(conn, document_id=document_id, attempt=attempt)
+            log.warning(
+                "a superseded attempt failed; the document is not changed",
+                extra={"tenant_id": str(tenant_id), "document_id": str(document_id)},
+            )
+            return {"outcome": STOPPED}
         if step == progress.WORKER:
             step, recorded = worker_failure(conn, document_id)
             name = recorded or name
         code = failure_code(step)
         # Whatever failed, no grant outlives the attempt.
-        grants.end(conn, document_id=document_id)
+        grants.end(conn, document_id=document_id, attempt=attempt)
         changed = conn.execute(
             text(
                 "UPDATE assay.documents SET status = 'failed', error_code = :code, "
@@ -412,7 +456,41 @@ def failed(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
     return {"outcome": FAILED, "error": code}
 
 
-STEPS = {"fingerprint": fingerprint, "claim": claim, "release": release, "failed": failed}
+# --- Step 9 -----------------------------------------------------------------------------------
+
+
+def companion(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
+    """Store the companion file's values for this attempt (`companion_data.apply`)."""
+    tenant_id, document_id = _ids(event)
+    fields = {"tenant_id": str(tenant_id), "document_id": str(document_id)}
+    with tenant_tx(deps.engine, tenant_id) as conn:
+        row = _current(conn, document_id, _attempt(event))
+        if row is None or row.status != "processing":
+            # Held, failed or a duplicate at an earlier step, or superseded: nothing to store.
+            log.info("document is not processing; no companion step", extra=fields)
+            return {"outcome": STOPPED}
+        previous = conn.execute(
+            text(
+                "SELECT e.status FROM assay.document_events e WHERE e.document_id = :id "
+                "AND e.step = :step AND e.attempt = :attempt ORDER BY e.at DESC LIMIT 1"
+            ),
+            {"id": document_id, "step": companion_data.STEP, "attempt": row.attempt},
+        ).scalar_one_or_none()
+        if previous is not None:
+            log.info("companion step already done", extra=fields | {"outcome": previous})
+            return {"outcome": str(previous)}
+        storage = deps.storage.pipeline(tenant_id, SERVICE, f"companion-{document_id.hex[:12]}")
+        applied = companion_data.apply(conn, storage, tenant_id=tenant_id, document_id=document_id)
+    return {"outcome": applied.outcome}
+
+
+STEPS = {
+    "fingerprint": fingerprint,
+    "claim": claim,
+    "release": release,
+    "companion": companion,
+    "failed": failed,
+}
 
 
 def handle(event: dict[str, Any], deps: Deps) -> dict[str, Any]:

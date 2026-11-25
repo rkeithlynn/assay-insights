@@ -74,6 +74,9 @@ DOCUMENT_STATUSES = (
 )
 # An upload in a batch (build step 6): one PDF or one companion file.
 BATCH_FILE_KINDS = ("pdf", "companion")
+# `companion_replacement`: a companion file attached or replaced after ingestion (build
+# step 6, second half). It is registered against its document, not paired by name.
+BATCH_FILE_PURPOSES = ("upload", "companion_replacement")
 BATCH_FILE_STATUSES = (
     "registered",  # waiting for the upload and its scan result
     "clean",  # scanned clean; size and checksum match the registration; companion valid
@@ -89,7 +92,9 @@ PART_METHODS = ("rule", "model")
 LABEL_SOURCES = ("companion",)
 TEXT_SOURCES = ("native", "ocr")
 SIGNER_SOURCES = ("audit_trail", "companion")
-AUDIT_CATEGORIES = ("auth", "user", "tenant", "audit")
+# `security`: a file quarantined. `document`: "Process again", a companion file replaced,
+# "Mark as reviewed" (build step 6, second half).
+AUDIT_CATEGORIES = ("auth", "user", "tenant", "audit", "security", "document")
 ATTACHMENT_KINDS = (
     "paystub",
     "bank_statement",
@@ -287,6 +292,8 @@ class Document(Base):
         one_of("status", DOCUMENT_STATUSES),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256"),
         CheckConstraint("attempt >= 1", name="attempt"),
+        CheckConstraint("companion_attempt >= 1", name="companion_attempt"),
+        CheckConstraint("content_attempt >= 1", name="content_attempt"),
         UniqueConstraint("tenant_id", "id"),
         child_of("batches", "batch_id"),
         child_of("users", "uploaded_by"),
@@ -336,6 +343,15 @@ class Document(Base):
     # Which run of the pipeline is current (build step 6, second half). A worker's grant
     # names an attempt, and is good only while that attempt is the document's current one.
     attempt: Mapped[int] = mapped_column(server_default=text("1"))
+    # Old results are kept, not deleted (owner decision 2, second half): derived rows carry
+    # an attempt, and these point at the current one. Each moves in the transaction that
+    # writes the new rows, so a reader sees the previous results until then.
+    # Companion data: `signers` (source companion), `companion_loan_terms`, `document_labels`.
+    companion_attempt: Mapped[int | None]
+    # Text and extraction results. NULL until the stages that write them.
+    content_attempt: Mapped[int | None]
+    # The upload (`batch_files.id`) the current companion data came from.
+    companion_file_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class WorkerGrant(Base):
@@ -383,6 +399,7 @@ class BatchFile(Base):
     __table_args__ = (
         one_of("kind", BATCH_FILE_KINDS),
         one_of("status", BATCH_FILE_STATUSES),
+        one_of("purpose", BATCH_FILE_PURPOSES),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256"),
         CheckConstraint("size_bytes > 0", name="size_bytes"),
         UniqueConstraint("tenant_id", "id"),
@@ -391,7 +408,8 @@ class BatchFile(Base):
         child_of("documents", "document_id"),
         child_of("users", "registered_by"),
         Index("ix_batch_files_tenant_id_batch_id", "tenant_id", "batch_id"),
-        # Pairing is by base name, so a batch holds one live file per kind and base name.
+        # Pairing is by base name, so a batch holds one live upload per kind and base name.
+        # A replacement companion is registered against its document and may share a name.
         Index(
             "uq_batch_files_live_name",
             "tenant_id",
@@ -399,7 +417,7 @@ class BatchFile(Base):
             "kind",
             "base_name",
             unique=True,
-            postgresql_where=text("status <> 'removed'"),
+            postgresql_where=text("status <> 'removed' AND purpose = 'upload'"),
         ),
     )
 
@@ -426,11 +444,17 @@ class BatchFile(Base):
     document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     registered_by: Mapped[uuid_col]
     registered_at: Mapped[tstz_now]
+    purpose: Mapped[str] = mapped_column(server_default="upload")
+    # For a replacement companion: when its values became the document's current ones.
+    applied_at: Mapped[tstz | None]
+    # For an infected file: when its security notice was published.
+    notice_sent_at: Mapped[tstz | None]
 
 
 class DocumentEvent(Base):
     __tablename__ = "document_events"
     __table_args__ = (
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
         Index("ix_document_events_tenant_id_document_id", "tenant_id", "document_id"),
     )
@@ -442,6 +466,8 @@ class DocumentEvent(Base):
     status: Mapped[str]
     at: Mapped[tstz_now]
     detail: Mapped[json_doc | None]
+    # The document's attempt when the event was written (build step 6, second half).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
 
 
 class DocumentPart(Base):
@@ -471,8 +497,9 @@ class DocumentLabel(Base):
     __tablename__ = "document_labels"
     __table_args__ = (
         one_of("source", LABEL_SOURCES),
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
-        UniqueConstraint("tenant_id", "document_id", "key"),
+        UniqueConstraint("tenant_id", "document_id", "attempt", "key"),
     )
 
     id: Mapped[uuid_pk]
@@ -481,6 +508,8 @@ class DocumentLabel(Base):
     key: Mapped[str]
     value: Mapped[json_doc]
     source: Mapped[str] = mapped_column(server_default="companion")
+    # Which version of the document's companion data (documents.companion_attempt).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
 
 
 class Page(Base):
@@ -523,6 +552,7 @@ class Signer(Base):
     __tablename__ = "signers"
     __table_args__ = (
         one_of("source", SIGNER_SOURCES),
+        CheckConstraint("attempt >= 1", name="attempt"),
         UniqueConstraint("tenant_id", "id"),
         child_of("documents", "document_id"),
         Index("ix_signers_tenant_id_document_id", "tenant_id", "document_id"),
@@ -537,18 +567,22 @@ class Signer(Base):
     location: Mapped[str | None]
     signed_at: Mapped[tstz | None]
     source: Mapped[str]
+    # For source `companion`: the version of the companion data (documents.companion_attempt).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
 
 
 class CompanionLoanTerms(Base):
     __tablename__ = "companion_loan_terms"
     __table_args__ = (
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
-        UniqueConstraint("tenant_id", "document_id"),
+        UniqueConstraint("tenant_id", "document_id", "attempt"),
     )
 
     id: Mapped[uuid_pk]
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     document_id: Mapped[uuid_col]
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
     term_months: Mapped[int | None]
     maturity_date: Mapped[dt.date | None]
     # Annual percent, for example 6.125.

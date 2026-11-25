@@ -168,14 +168,16 @@ const DOCUMENTS = Array.from({ length: 10 }, (_, i) => ({
   uploaded_by: "Alexandra Richardson-Whitfield",
 }));
 const EVENTS = [
-  { step: "scan", status: "clean", at: "2026-11-24T15:01:00Z", error_code: null, viewer: null },
-  { step: "queued", status: "queued", at: "2026-11-24T15:02:00Z", error_code: null, viewer: null },
-  { step: "start", status: "started", at: "2026-11-24T15:02:05Z", error_code: null, viewer: null },
-  { step: "fingerprint", status: "continue", at: "2026-11-24T15:02:09Z", error_code: null, viewer: null },
+  { step: "scan", status: "clean", at: "2026-11-24T15:01:00Z", error_code: null, viewer: null, attempt: 1 },
+  { step: "queued", status: "queued", at: "2026-11-24T15:02:00Z", error_code: null, viewer: null, attempt: 1 },
+  { step: "start", status: "started", at: "2026-11-24T15:02:05Z", error_code: null, viewer: null, attempt: 1 },
+  { step: "fingerprint", status: "continue", at: "2026-11-24T15:02:09Z", error_code: null, viewer: null, attempt: 1 },
   // The processing task's first step (build step 6, second half): it opened the PDF.
-  { step: "inspect", status: "continue", at: "2026-11-24T15:03:20Z", error_code: null, viewer: null },
+  { step: "inspect", status: "continue", at: "2026-11-24T15:03:20Z", error_code: null, viewer: null, attempt: 1 },
+  // Step 9 (build step 6, second half): the companion file's values were stored.
+  { step: "companion", status: "stored", at: "2026-11-24T15:03:30Z", error_code: null, viewer: null, attempt: 1 },
   // Who opened it: sent to tenant admins only. A long address, to check it wraps.
-  { step: "viewed", status: "pdf_url", at: "2026-11-24T15:10:00Z", error_code: null, viewer: "alexandra.richardson-whitfield@infinityloans.example" },
+  { step: "viewed", status: "pdf_url", at: "2026-11-24T15:10:00Z", error_code: null, viewer: "alexandra.richardson-whitfield@infinityloans.example", attempt: 1 },
 ];
 const MASTER_ROWS = DOCUMENTS.map((d, i) => ({
   document_id: d.id,
@@ -231,6 +233,30 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
       status: "processing",
       duplicate_of: null,
       pdf_available: true,
+      attempt: 1,
+      // The companion file's values, with long ones to check they wrap, and its uploads.
+      companion: {
+        version: 2,
+        application_ref: "APP-2026-00123",
+        loan_number: null,
+        cosigner_name: "Bartholomew Featherstonehaugh-Montgomery",
+        package_created_on: "2026-10-28",
+        package_completed_on: "2026-11-02",
+        loan_term_months: 360,
+        loan_maturity_date: "2056-12-01",
+        loan_interest_rate: 6.125,
+        signers: [
+          { name: "Alexandra Richardson-Whitfield", email: "alexandra.richardson-whitfield@infinityloans.example", phone: "+14045550100", location: "Atlanta, GA" },
+        ],
+        labels: [
+          { key: "Branch", value: "Atlanta" },
+          { key: "UnderwritingQueueAssignmentReference", value: "a-long-value-without-any-spaces-in-it-to-check-wrapping-0123456789" },
+        ],
+      },
+      companion_files: [
+        { id: "00000000-0000-4000-8000-000000000a02", name: "smith-package-corrected.json", status: "clean", error_code: null, errors: [], replacement: true, registered_at: "2026-11-24T15:20:00Z", applied_at: "2026-11-24T15:21:00Z", current: true },
+        { id: "00000000-0000-4000-8000-000000000a01", name: "smith-package.json", status: "clean", error_code: null, errors: [], replacement: false, registered_at: "2026-11-24T15:00:00Z", applied_at: "2026-11-24T15:03:30Z", current: false },
+      ],
       events: EVENTS,
       parts: [
         { start_page: 1, end_page: 4, form_type: "LoanApplication", method: "rule", confidence: null },

@@ -222,7 +222,8 @@ def _batch_out(conn: Connection, batch_id: uuid.UUID, user_id: uuid.UUID) -> Bat
         text(
             "SELECT id, file_name, kind, base_name, size_bytes, status, error_code, "
             "error_detail, document_id, registered_at, scanned_at FROM assay.batch_files "
-            "WHERE batch_id = :id AND status <> 'removed' ORDER BY registered_at, file_name"
+            "WHERE batch_id = :id AND status <> 'removed' AND purpose = 'upload' "
+            "ORDER BY registered_at, file_name"
         ),
         {"id": batch_id},
     ).all()

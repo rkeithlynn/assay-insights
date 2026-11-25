@@ -253,11 +253,13 @@ def test_the_worker_inspects_then_copies_the_pinned_version_to_originals(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_the_companion_is_copied_beside_the_pdf_at_its_own_clean_version(
+def test_the_task_leaves_the_companion_to_the_companion_step(
     w: World,
     tmp_path: Path,
     engines: list[Any],
 ) -> None:
+    """The task opens the PDF and nothing else. The companion file is plain JSON: the
+    pipeline's `companion` step copies it beside the PDF, at its own clean version."""
     from tests.unit.step6 import minimal_pdf
 
     tenant = w.db.tenants["a"]
@@ -273,12 +275,11 @@ def test_the_companion_is_copied_beside_the_pdf_at_its_own_clean_version(
     companion_version = file_row(w, b.files["PAIR.json"].id)[2]
     job = claimed(w, tenant, doc_id)
     assert worker_run.run(job, deps_for(w, job, tenant, tmp_path, engines)) == "continue"
-    assert (
-        b.bucket,
-        b.files["PAIR.json"].key,
-        companion_version,
-        keys.companion_key(doc_id),
-    ) in w.storage.buckets.copies
+    copy = (b.bucket, b.files["PAIR.json"].key, companion_version, keys.companion_key(doc_id))
+    assert copy not in w.storage.buckets.copies
+    assert step(w, "release", tenant, doc_id) == {"worker_started": True}
+    assert step(w, "companion", tenant, doc_id) == {"outcome": "stored"}
+    assert copy in w.storage.buckets.copies
     detail = w.db.row(
         "SELECT detail FROM assay.document_events WHERE document_id = %s AND step = 'inspect' "
         "AND status = 'continue'",

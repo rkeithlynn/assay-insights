@@ -80,7 +80,9 @@ def test_the_lookup_owner_reads_only_the_columns_the_lookups_need(db: TestDb) ->
         "batch_files": {"tenant_id", "s3_key", "status", "registered_at", "document_id"},
         "batches": {"tenant_id", "status", "opened_at"},
         "documents": {"id", "tenant_id", "status", "queued_at", "attempt"},
-        "document_events": {"tenant_id", "document_id", "step"},
+        # `attempt` since migration 0011: a document counts as started only if its current
+        # attempt has a `start` event.
+        "document_events": {"tenant_id", "document_id", "step", "attempt"},
         "worker_grants": {
             "tenant_id",
             "document_id",

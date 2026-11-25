@@ -12,7 +12,7 @@ from pathlib import Path
 import pulumi
 import pulumi_aws as aws
 
-from assay_infra.alerts import Alerts
+from assay_infra.alerts import Alerts, SecurityNotices
 from assay_infra.api import ApiService, api_task_role
 from assay_infra.auth import Auth
 from assay_infra.auth_events import AuthEvents
@@ -195,6 +195,16 @@ cognito_admin_api = CognitoAdminApi(
 
 edge_logs = EdgeLogs(f"{prefix}-edge-logs", region=config.region, account_id=account_id)
 
+# Security notices (a quarantined upload), apart from the alarms: their own topic, published
+# to by the scan function only, through the VPC's SNS endpoint (build step 6, second half).
+security_notices = SecurityNotices(
+    f"{prefix}-security-notices",
+    email=config.alerts.security_notice_email,
+    key_id=alerts.key.key_id,
+    publisher_role_arn=pipeline_role.scan.arn,
+    sns_endpoint_id=network.interface_endpoints["sns"].id,
+)
+
 # The ingestion pipeline (section 8; build step 6, first half).
 pipeline = Pipeline(
     pipeline_name,
@@ -209,6 +219,8 @@ pipeline = Pipeline(
     tss_endpoint_url=storage.endpoint_url,
     api_task_role=api_role,
     alarm_topic_arn=alerts.topic.arn,
+    security_topic_arn=security_notices.topic.arn,
+    notices_key_arn=alerts.key.arn,
     worker_max_per_tenant=config.pipeline.worker_max_per_tenant,
     aws_profile=aws_profile,
 )
@@ -348,6 +360,7 @@ pulumi.export("api_target_group_arn", api.target_group.arn)
 pulumi.export("api_cluster_name", api.cluster.name)
 pulumi.export("api_service_name", api.service.name)
 pulumi.export("alarm_topic_arn", alerts.topic.arn)
+pulumi.export("security_notice_topic_arn", security_notices.topic.arn)
 pulumi.export("tss_endpoint_url", storage.endpoint_url)
 pulumi.export("tss_function_name", storage.function.name)
 pulumi.export("tenant_role_arn", storage.tenant_role.arn)

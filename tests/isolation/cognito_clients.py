@@ -15,6 +15,14 @@ reached from the VPC.
    and with their own access token tries to change `custom:tenant_id` and `email`. Both must
    be refused and leave the value unchanged. Changing `name` must succeed, so a run in which
    every call fails cannot pass. The replica is deleted afterwards.
+3. **The refresh-token rotation probe** (build step 6, second half; not pass or fail). Before
+   rotation is switched on for the real app clients, the owner needs to see what Cognito does
+   with a client that has rotation on and no refresh flow: AWS documents that rotation
+   "isn't compatible with" `REFRESH_TOKEN_AUTH`, and that a client with no explicit flows
+   gets three by default, the refresh flow and two programmatic sign-ins among them. So the
+   replica pool gets one more client per candidate setting, and the run prints what Cognito
+   stored for each and how it answers each kind of programmatic sign-in. The portal clients
+   allow none today, and must allow none afterwards.
 """
 
 from __future__ import annotations
@@ -33,6 +41,13 @@ from botocore.exceptions import ClientError
 TENANT_ATTRIBUTE = "custom:tenant_id"
 ALLOWED_WRITES = ["name"]
 REFUSED_CODES = frozenset({"NotAuthorizedException", "InvalidParameterException"})
+ROTATION = {"Feature": "ENABLED", "RetryGracePeriodSeconds": 10}
+# What the real clients could be given once the refresh flow is removed.
+ROTATION_CANDIDATES: tuple[tuple[str, list[str]], ...] = (
+    ("no explicit flows", []),
+    ("ALLOW_CUSTOM_AUTH only (no custom-auth trigger exists)", ["ALLOW_CUSTOM_AUTH"]),
+    ("the refresh flow kept", ["ALLOW_REFRESH_TOKEN_AUTH"]),
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +78,73 @@ def _attempt(call: Callable[[], object]) -> str:
     return "allowed"
 
 
+def _answer(call: Callable[[], Any]) -> str:
+    """How Cognito answered, in its own words (an error's code and message, never a token)."""
+    try:
+        response = call()
+    except ClientError as exc:
+        error = exc.response.get("Error", {})
+        return f"refused: {error.get('Code', '')}: {str(error.get('Message', ''))[:140]}"
+    if "AuthenticationResult" in response:
+        return "ALLOWED: tokens issued"
+    return f"ALLOWED: challenge {response.get('ChallengeName', 'unknown')}"
+
+
+def _sign_in(
+    client: Any, client_id: str, flow: str, parameters: dict[str, str]
+) -> Callable[[], Any]:
+    return lambda: client.initiate_auth(
+        ClientId=client_id, AuthFlow=flow, AuthParameters=parameters
+    )
+
+
+def rotation_probe(
+    session: boto3.Session,
+    cognito: Any,
+    *,
+    pool_id: str,
+    real_client: dict[str, Any],
+    email: str,
+    password: str,
+) -> list[str]:
+    """What Cognito stores and allows for each candidate client. Lines to print."""
+    as_anyone = session.client("cognito-idp", config=Config(signature_version=UNSIGNED))
+    lines: list[str] = []
+    for label, flows in ROTATION_CANDIDATES:
+        try:
+            created = cognito.create_user_pool_client(
+                UserPoolId=pool_id,
+                ClientName=f"rotation-probe-{len(lines)}",
+                GenerateSecret=False,
+                ExplicitAuthFlows=flows,
+                RefreshTokenRotation=ROTATION,
+                ReadAttributes=real_client.get("ReadAttributes", []),
+                WriteAttributes=real_client.get("WriteAttributes", []),
+            )["UserPoolClient"]
+        except ClientError as exc:
+            error = exc.response.get("Error", {})
+            lines.append(
+                f"{label}: Cognito refused the client "
+                f"({error.get('Code', '')}: {str(error.get('Message', ''))[:160]})"
+            )
+            continue
+        stored = sorted(created.get("ExplicitAuthFlows", []))
+        lines.append(
+            f"{label}: Cognito stored flows {stored}, rotation "
+            f"{created.get('RefreshTokenRotation')}"
+        )
+        attempts: tuple[tuple[str, dict[str, str]], ...] = (
+            ("USER_PASSWORD_AUTH", {"USERNAME": email, "PASSWORD": password}),
+            ("USER_SRP_AUTH", {"USERNAME": email, "SRP_A": "a" * 512}),
+            ("CUSTOM_AUTH", {"USERNAME": email}),
+            ("USER_AUTH", {"USERNAME": email}),
+        )
+        for flow, parameters in attempts:
+            answer = _answer(_sign_in(as_anyone, created["ClientId"], flow, parameters))
+            lines.append(f"    sign-in with {flow}: {answer}")
+    return lines
+
+
 def deployed_clients(cognito: Any, clients: dict[str, tuple[str, str]]) -> list[Check]:
     checks = []
     for kind, (pool_id, client_id) in sorted(clients.items()):
@@ -79,7 +161,13 @@ def deployed_clients(cognito: Any, clients: dict[str, tuple[str, str]]) -> list[
 
 
 def replica_attempt(
-    session: boto3.Session, cognito: Any, *, tenant_pool: str, tenant_client: str, name_prefix: str
+    session: boto3.Session,
+    cognito: Any,
+    *,
+    tenant_pool: str,
+    tenant_client: str,
+    name_prefix: str,
+    probe: list[str] | None = None,
 ) -> list[Check]:
     real_pool = cognito.describe_user_pool(UserPoolId=tenant_pool)["UserPool"]
     real_client = cognito.describe_user_pool_client(UserPoolId=tenant_pool, ClientId=tenant_client)[
@@ -180,6 +268,15 @@ def replica_attempt(
             Check("custom:tenant_id unchanged", tenant_id, after.get(TENANT_ATTRIBUTE, ""))
         )
         checks.append(Check("email unchanged", email, after.get("email", "")))
+        if probe is not None:
+            probe += rotation_probe(
+                session,
+                cognito,
+                pool_id=pool_id,
+                real_client=real_client,
+                email=email,
+                password=password,
+            )
     finally:
         cognito.delete_user_pool(UserPoolId=pool_id)
     return checks
@@ -191,10 +288,17 @@ def run(
     tenant: tuple[str, str],
     platform: tuple[str, str],
     name_prefix: str,
+    probe: list[str] | None = None,
 ) -> list[Check]:
+    """`probe`, if given, receives the rotation probe's lines (see the module docstring)."""
     cognito = session.client("cognito-idp")
     checks = deployed_clients(cognito, {"tenant": tenant, "platform": platform})
     checks += replica_attempt(
-        session, cognito, tenant_pool=tenant[0], tenant_client=tenant[1], name_prefix=name_prefix
+        session,
+        cognito,
+        tenant_pool=tenant[0],
+        tenant_client=tenant[1],
+        name_prefix=name_prefix,
+        probe=probe,
     )
     return checks

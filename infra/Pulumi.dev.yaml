@@ -36,7 +36,7 @@ config:
   # Security notices (a quarantined upload) are emailed here, on their own topic, apart from
   # the alarms. Blank until you set it; SNS then sends a confirmation link at `pulumi up`,
   # to follow within 48 hours. Not used before build step 6, second half, part 2.
-  assay-platform:securityNoticeEmail: ""
+  assay-platform:securityNoticeEmail: "aws@pilartech.com"
   # The most worker tasks one tenant's documents may have running at once (1 to 50). A
   # document waits for a slot; it never fails for lack of one.
   assay-platform:workerMaxPerTenant: "5"

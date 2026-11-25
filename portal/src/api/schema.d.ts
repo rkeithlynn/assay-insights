@@ -357,6 +357,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document_id}/companion": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Attach Companion */
+        post: operations["attach_companion_api_documents__document_id__companion_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document_id}/pdf-url": {
         parameters: {
             query?: never;
@@ -368,6 +385,40 @@ export interface paths {
         get: operations["pdf_url_api_documents__document_id__pdf_url_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}/reprocess": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reprocess */
+        post: operations["reprocess_api_documents__document_id__reprocess_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}/reviewed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark Reviewed */
+        post: operations["mark_reviewed_api_documents__document_id__reviewed_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -715,8 +766,86 @@ export interface components {
             /** Profile Id */
             profile_id: string;
         };
+        /**
+         * CompanionFileOut
+         * @description One companion upload of the document: the batch's, or one attached later.
+         */
+        CompanionFileOut: {
+            /** Applied At */
+            applied_at: string | null;
+            /** Current */
+            current: boolean;
+            /** Error Code */
+            error_code: string | null;
+            /** Errors */
+            errors: components["schemas"]["FileProblem"][];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Registered At
+             * Format: date-time
+             */
+            registered_at: string;
+            /** Replacement */
+            replacement: boolean;
+            /** Status */
+            status: string;
+        };
+        /** CompanionLabelOut */
+        CompanionLabelOut: {
+            /** Key */
+            key: string;
+            /** Value */
+            value: string | number | boolean;
+        };
+        /** CompanionSignerOut */
+        CompanionSignerOut: {
+            /** Email */
+            email: string | null;
+            /** Location */
+            location: string | null;
+            /** Name */
+            name: string | null;
+            /** Phone */
+            phone: string | null;
+        };
+        /**
+         * CompanionValues
+         * @description The companion file's current values (step 9). Tenant content: tenant routes only.
+         */
+        CompanionValues: {
+            /** Application Ref */
+            application_ref: string | null;
+            /** Cosigner Name */
+            cosigner_name: string | null;
+            /** Labels */
+            labels: components["schemas"]["CompanionLabelOut"][];
+            /** Loan Interest Rate */
+            loan_interest_rate: number | null;
+            /** Loan Maturity Date */
+            loan_maturity_date: string | null;
+            /** Loan Number */
+            loan_number: string | null;
+            /** Loan Term Months */
+            loan_term_months: number | null;
+            /** Package Completed On */
+            package_completed_on: string | null;
+            /** Package Created On */
+            package_created_on: string | null;
+            /** Signers */
+            signers: components["schemas"]["CompanionSignerOut"][];
+            /** Version */
+            version: number;
+        };
         /** DocumentDetail */
         DocumentDetail: {
+            /** Attempt */
+            attempt: number;
             /**
              * Batch Id
              * Format: uuid
@@ -724,6 +853,9 @@ export interface components {
             batch_id: string;
             /** Batch Name */
             batch_name: string | null;
+            companion: components["schemas"]["CompanionValues"] | null;
+            /** Companion Files */
+            companion_files: components["schemas"]["CompanionFileOut"][];
             /** Completed At */
             completed_at: string | null;
             /** Duplicate Of */
@@ -773,6 +905,8 @@ export interface components {
              * Format: date-time
              */
             at: string;
+            /** Attempt */
+            attempt: number;
             /** Error Code */
             error_code: string | null;
             /** Status */
@@ -1089,6 +1223,16 @@ export interface components {
             /** Files */
             files: components["schemas"]["RegisteredFile"][];
         };
+        /** Reprocessed */
+        Reprocessed: {
+            /** Attempt */
+            attempt: number;
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+        };
         /** SelectionIn */
         SelectionIn: {
             /**
@@ -1286,7 +1430,7 @@ export interface operations {
                 from?: string | null;
                 to?: string | null;
                 tenant_id?: string | null;
-                category?: ("auth" | "user" | "tenant" | "audit") | null;
+                category?: ("auth" | "user" | "tenant" | "audit" | "security" | "document") | null;
                 actor_email?: string | null;
                 sort?: "at" | "-at" | "tenant" | "-tenant" | "actor" | "-actor" | "action" | "-action" | "category" | "-category";
                 page?: number;
@@ -2013,6 +2157,41 @@ export interface operations {
             };
         };
     };
+    attach_companion_api_documents__document_id__companion_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegisteredFile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     pdf_url_api_documents__document_id__pdf_url_get: {
         parameters: {
             query?: never;
@@ -2032,6 +2211,66 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PdfLink"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reprocess_api_documents__document_id__reprocess_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Reprocessed"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_reviewed_api_documents__document_id__reviewed_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

@@ -14,6 +14,7 @@ from assay_api.routes import (
     audit,
     auth_events,
     batches,
+    document_actions,
     documents,
     health,
     ingestion,
@@ -73,6 +74,7 @@ def create_app(
         models.router,
         batches.router,
         documents.router,
+        document_actions.router,
         ingestion.router,
     ):
         app.include_router(router, prefix=API_PREFIX)

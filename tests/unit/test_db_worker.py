@@ -499,7 +499,15 @@ def test_app_worker_column_grants_are_exactly_these(db: TestDb) -> None:
             "size_bytes",
             "status",
         },
-        ("document_events", "SELECT"): {"tenant_id", "document_id", "step", "status", "at"},
+        # `attempt` since migration 0011: a repeated step asks about its own attempt only.
+        ("document_events", "SELECT"): {
+            "tenant_id",
+            "document_id",
+            "step",
+            "status",
+            "at",
+            "attempt",
+        },
     }
     found: dict[tuple[str, str], set[str]] = {}
     with psycopg.connect(db.url) as conn:

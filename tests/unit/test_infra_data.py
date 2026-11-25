@@ -148,6 +148,8 @@ def test_endpoint_list_matches_spec() -> None:
         "guardduty",
         # Build step 5: the API and the seed Lambda start provisioning executions.
         "states",
+        # Build step 6, second half: the scan function publishes security notices.
+        "sns",
     }
 
 

@@ -18,7 +18,7 @@ from typing import Any
 import pulumi
 import pulumi_aws as aws
 
-from assay_infra import pipeline
+from assay_infra import alerts, pipeline
 from assay_infra.api import api_task_role
 from assay_infra.auth_events import sqs_endpoint_policy
 from assay_infra.database import Database
@@ -28,6 +28,8 @@ from tests.unit.test_infra_data import DB, NET
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOPIC = f"arn:aws:sns:{REGION}:{ACCOUNT_ID}:alarms"
+NOTICES = f"arn:aws:sns:{REGION}:{ACCOUNT_ID}:security-notices"
+NOTICES_KEY = f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/notices"
 TSS = f"https://tss.execute-api.{REGION}.amazonaws.com/v1"
 ROLE = f"arn:aws:iam::{ACCOUNT_ID}:role"
 
@@ -54,6 +56,8 @@ def _stack(prefix: str) -> pipeline.Pipeline:
         tss_endpoint_url=TSS,
         api_task_role=api_task_role(f"{prefix}-api", account_id=ACCOUNT_ID, region=REGION),
         alarm_topic_arn=TOPIC,
+        security_topic_arn=NOTICES,
+        notices_key_arn=NOTICES_KEY,
     )
 
 
@@ -107,9 +111,30 @@ def test_no_function_has_any_storage_or_ai_permission_of_its_own() -> Any:
             policy = json.loads(
                 _one("aws:iam/rolePolicy:RolePolicy", f"pl1-pipeline-{function}-policy")["policy"]
             )
-            actions = _actions(policy)
+            # One exception, the scan function's only: the security-notice topic's key, and
+            # only through SNS (it encrypts the notice). Checked on its own, then set aside.
+            notice_key = [
+                s for s in policy["Statement"] if s.get("Sid") == "NoticeKeyThroughSnsOnly"
+            ]
+            assert len(notice_key) == (1 if function == "scan" else 0), function
+            for statement in notice_key:
+                assert statement == {
+                    "Sid": "NoticeKeyThroughSnsOnly",
+                    "Effect": "Allow",
+                    "Action": ["kms:GenerateDataKey*", "kms:Decrypt"],
+                    "Resource": NOTICES_KEY,
+                    "Condition": {
+                        "StringEquals": {"kms:ViaService": f"sns.{REGION}.amazonaws.com"}
+                    },
+                }
+            rest = {**policy, "Statement": [s for s in policy["Statement"] if s not in notice_key]}
+            actions = _actions(rest)
             for forbidden in FORBIDDEN_SERVICES:
                 assert not any(a.startswith(forbidden) for a in actions), (function, forbidden)
+            # Only the scan function publishes, and only to the security-notice topic.
+            publish = [s for s in policy["Statement"] if s["Action"] == "sns:Publish"]
+            assert [s["Resource"] for s in publish] == ([NOTICES] if function == "scan" else [])
+            assert not any(a.startswith("sns:") and a != "sns:Publish" for a in actions)
             assert "rds-db:connect" in actions
             db = next(s for s in policy["Statement"] if s["Action"] == "rds-db:connect")
             assert db["Resource"].endswith("/app_tenant"), function
@@ -261,12 +286,121 @@ def test_the_state_machine_never_logs_execution_data_and_only_runs_its_steps() -
                 assert states[catch["Next"]]["Type"] == "Pass", name
                 assert states[catch["Next"]]["Next"] == "Failed", name
         named = {s["Result"] for s in states.values() if s["Type"] == "Pass"}
-        assert named == {"fingerprint", "claim", "worker"}
+        assert named == {"fingerprint", "claim", "worker", "companion"}
         from assay_workers.steps import PIPELINE_STEPS
 
         assert named <= PIPELINE_STEPS
+        # Step 9 runs after the task's grant is released, and its failure names it.
+        assert states["Release"]["Next"] == "Companion"
+        assert states["Companion"]["Parameters"]["Payload"]["step"] == "companion"
+        assert states["Companion"]["Next"] == "Done"
+        assert states["Companion"]["Catch"][0]["Next"] == "CompanionFailed"
+        # Every Lambda step is told which attempt its execution was started for.
+        for name, state in states.items():
+            if state.get("Resource") == "arn:aws:states:::lambda:invoke":
+                assert state["Parameters"]["Payload"]["attempt.$"] == "$.attempt", name
 
     return _ready(p).apply(check)
+
+
+def test_only_the_scan_function_publishes_security_notices() -> None:
+    """Owner decision 4 (second half): a second topic, apart from the alarms, with its own
+    endpoint policy statement."""
+    scan_role = f"{ROLE}/assay-dev-pipeline-scan-role"
+    topic = json.loads(alerts.security_topic_policy(topic=NOTICES, publisher=scan_role))
+    only, tls = topic["Statement"]
+    assert only == {
+        "Sid": "OnlyTheScanFunctionPublishes",
+        "Effect": "Deny",
+        "Principal": "*",
+        "Action": "sns:Publish",
+        "Resource": NOTICES,
+        "Condition": {"ArnNotEquals": {"aws:PrincipalArn": scan_role}},
+    }
+    assert tls["Effect"] == "Deny" and tls["Condition"] == {
+        "Bool": {"aws:SecureTransport": "false"}
+    }
+    # No Allow at all: the scan role's own policy is what lets it publish.
+    assert all(s["Effect"] == "Deny" for s in topic["Statement"])
+
+    endpoint = json.loads(alerts.sns_endpoint_policy(topic=NOTICES, publisher=scan_role))
+    assert endpoint["Statement"] == [
+        {
+            "Sid": "ScanFunctionPublishesSecurityNotices",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "sns:Publish",
+            "Resource": NOTICES,
+            "Condition": {"ArnEquals": {"aws:PrincipalArn": scan_role}},
+        }
+    ]
+
+
+@pulumi.runtime.test
+def test_security_notices_have_their_own_topic_and_sender_and_no_address_until_one_is_set() -> Any:
+    network = Network("sn1", cfg=NET, region=REGION, account_id=ACCOUNT_ID)
+    roles = pipeline.pipeline_roles("sn1-pipeline", ACCOUNT_ID, REGION)
+
+    def build(name: str, email: str) -> alerts.SecurityNotices:
+        return alerts.SecurityNotices(
+            name,
+            email=email,
+            key_id="key-id",
+            publisher_role_arn=roles.scan.arn,
+            sns_endpoint_id=network.interface_endpoints["sns"].id,
+        )
+
+    blank = build("sn1-notices", "")
+    named = build("sn1-notices-b", "security@example.test")
+
+    def check(_: list[Any]) -> None:
+        topic = _one("aws:sns/topic:Topic", "sn1-notices-topic")
+        assert topic["displayName"] == "Assay Insights security notices"
+        assert topic["kmsMasterKeyId"] == "key-id"
+        assert _one("aws:sns/topicPolicy:TopicPolicy", "sn1-notices-topic-policy")
+        endpoint = _one(
+            "aws:ec2/vpcEndpointPolicy:VpcEndpointPolicy", "sn1-notices-sns-endpoint-policy"
+        )
+        assert endpoint["vpcEndpointId"] == "sn1-sns-id"
+        subscriptions = dict(registered("aws:sns/topicSubscription:TopicSubscription", "sn1-"))
+        assert set(subscriptions) == {"sn1-notices-b-email"}
+        assert subscriptions["sn1-notices-b-email"]["endpoint"] == "security@example.test"
+        assert blank.subscription is None and named.subscription is not None
+
+    return pulumi.Output.all(
+        blank.topic.arn, blank.policy.id, blank.endpoint_policy.id, named.topic.arn
+    ).apply(check)
+
+
+def test_the_scan_function_is_told_the_security_topic() -> None:
+    policy = json.loads(
+        pipeline.function_role_policy(
+            "scan",
+            log_group="arn:log",
+            db_user="arn:db/app_tenant",
+            ingest_queue="arn:ingest",
+            scan_dlq="arn:dlq",
+            state_machine="arn:sm",
+            security_topic=NOTICES,
+            notices_key=NOTICES_KEY,
+            region=REGION,
+        )
+    )
+    sids = [s["Sid"] for s in policy["Statement"]]
+    assert "PublishSecurityNotices" in sids and "NoticeKeyThroughSnsOnly" in sids
+    for function in ("steps", "starter", "sweeper"):
+        other = pipeline.function_role_policy(
+            function,
+            log_group="arn:log",
+            db_user="arn:db/app_tenant",
+            ingest_queue="arn:ingest",
+            scan_dlq="arn:dlq",
+            state_machine="arn:sm",
+            security_topic=NOTICES,
+            notices_key=NOTICES_KEY,
+            region=REGION,
+        )
+        assert "sns:" not in other and "kms:" not in other
 
 
 @pulumi.runtime.test

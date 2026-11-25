@@ -20,10 +20,20 @@ from `aws.guardduty` about tenant buckets. For one event:
      SHA-256 (condition a); a companion file is then read, at most 64 KB, and validated with
      plain code (condition e). Its content is never logged.
    - `THREATS_FOUND`: copied to quarantine/ at that version, and the inbox key gets a delete
-     marker. The PDF's document becomes `quarantined`.
+     marker. The PDF's document becomes `quarantined`. An audit row (category `security`,
+     `file_quarantined`) is written in the same transaction, and after the commit a
+     security notice goes to its own SNS topic (owner decision 4, second half). Both name
+     the tenant, the uploading user, the time, the batch and document IDs and GuardDuty's
+     threat name, and never the file name or any content. It is a notice, not a failure:
+     nothing here is logged at ERROR. The quarantine key and the source version are logged
+     and kept in the audit row, so the copy can be confirmed later.
    - `UNSUPPORTED`, `FAILED`, or `ACCESS_DENIED` (except `OBJECT_E_TAG_CHANGED`, which means a
      newer version will be scanned): held, `on_hold`.
 4. If the batch is already closed, any document now eligible is queued after the commit.
+5. A companion file attached or replaced after ingestion (`purpose` `companion_replacement`)
+   that scans clean and valid takes effect at once, in the same transaction
+   (`assay_workers.companion_data`). One that is invalid or infected changes nothing about
+   its document.
 
 Errors that might pass (the database, the TSS, S3) raise, so Lambda retries the event and
 then sends it to the dead-letter queue, whose depth raises an alarm.
@@ -31,19 +41,23 @@ then sends it to the dead-letter queue, whose depth raises an alarm.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Engine
+from sqlalchemy import Connection, Engine, text
 
-from assay_db import batches
+from assay_db import audit, batches
 from assay_schemas import companion
 from assay_schemas.pipeline import checksum_b64
 from assay_tss import keys, naming
+from assay_workers import companion_data
 from assay_workers.runtime import (
     IngestQueue,
+    Notices,
     Settings,
     StorageSource,
     TenantStorage,
@@ -66,6 +80,15 @@ HELD = {
     "ACCESS_DENIED": "scan_access_denied",
 }
 CLEAN, THREATS = "NO_THREATS_FOUND", "THREATS_FOUND"
+# GuardDuty's name for what it found: `detail.scanResultDetails.threats[0].name` ("contains
+# only one threat ... the first detected threat", GuardDuty user guide). It comes from the
+# event, so only a plain printable name of a sensible length is kept.
+THREAT_NAME = re.compile(r"[\x20-\x7e]{1,200}")
+UNNAMED_THREAT = "not named in the scan result"
+SECURITY_CATEGORY = "security"
+QUARANTINED = "file_quarantined"
+SYSTEM = "system"
+NOTICE_SUBJECT = "Assay Insights security notice: malware quarantined"
 
 
 @dataclass(frozen=True)
@@ -76,6 +99,7 @@ class ScanEvent:
     version_id: str | None
     result: str
     reasons: tuple[str, ...]
+    threat: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +108,8 @@ class Deps:
     storage: StorageSource
     queue: IngestQueue
     name_prefix: str
+    # The security-notice topic. None: no notice is sent (the audit row is still written).
+    notices: Notices | None = None
 
 
 def parse(event: dict[str, Any]) -> ScanEvent | None:
@@ -100,7 +126,11 @@ def parse(event: dict[str, Any]) -> ScanEvent | None:
         return None
     version = obj.get("versionId")
     reasons = result.get("statusReasons") or []
+    threats = result.get("threats") or []
+    first = threats[0] if isinstance(threats, list) and threats else None
+    name = first.get("name") if isinstance(first, dict) else None
     return ScanEvent(
+        threat=name if isinstance(name, str) and THREAT_NAME.fullmatch(name) else None,
         event_id=str(event.get("id", "")),
         bucket=bucket,
         key=key,
@@ -175,6 +205,112 @@ def quarantine(storage: TenantStorage, file: Any, event: ScanEvent) -> str:
     return target
 
 
+@dataclass(frozen=True)
+class Quarantine:
+    """What a notice says. IDs, a threat name and an email address; never a file name."""
+
+    tenant_id: uuid.UUID
+    tenant_name: str | None
+    uploader_id: uuid.UUID | None
+    uploader_email: str | None
+    batch_id: uuid.UUID
+    file_id: uuid.UUID
+    document_id: uuid.UUID | None
+    kind: str
+    threat: str
+    at: dt.datetime
+
+    def message(self) -> str:
+        lines = [
+            "A file uploaded to Assay Insights was found to contain malware and was "
+            "quarantined. It was not processed and cannot be opened in the portal.",
+            "",
+            f"Threat (GuardDuty): {self.threat}",
+            f"Time (UTC): {self.at:%Y-%m-%d %H:%M:%S}",
+            f"Tenant: {self.tenant_name or 'unknown'} ({self.tenant_id})",
+            f"Uploaded by: {self.uploader_email or 'unknown'} ({self.uploader_id})",
+            f"Batch ID: {self.batch_id}",
+            f"Document ID: {self.document_id or 'none (a companion file with no document)'}",
+            f"File: a {'PDF' if self.kind == batches.PDF else 'companion file'}, "
+            f"file ID {self.file_id}",
+            "",
+            "This is a security notice, not a system failure. The audit history has a "
+            "'security' row for it (file_quarantined).",
+        ]
+        return "\n".join(lines)
+
+
+def describe(conn: Connection, file: Any, threat: str | None) -> Quarantine:
+    """Who and what the quarantine concerns, read in the file's tenant."""
+    tenant = conn.execute(
+        text("SELECT name FROM assay.tenants WHERE id = :id"), {"id": file.tenant_id}
+    ).scalar_one_or_none()
+    user = conn.execute(
+        text("SELECT id, email FROM assay.users WHERE id = :id"), {"id": file.registered_by}
+    ).one_or_none()
+    return Quarantine(
+        tenant_id=file.tenant_id,
+        tenant_name=tenant,
+        uploader_id=user.id if user else None,
+        uploader_email=user.email if user else None,
+        batch_id=file.batch_id,
+        file_id=file.id,
+        document_id=file.id if file.kind == batches.PDF else file.document_id,
+        kind=file.kind,
+        threat=threat or UNNAMED_THREAT,
+        at=dt.datetime.now(dt.UTC),
+    )
+
+
+def audit_quarantine(
+    conn: Connection, q: Quarantine, *, quarantine_key: str, source_version: str | None
+) -> None:
+    """The `security` row, in the scan result's transaction. The upload's user is named in
+    the detail; the actor is the system, which is what moved the file."""
+    audit.write(
+        conn,
+        tenant_id=q.tenant_id,
+        actor=audit.AuditActor(role=SYSTEM),
+        category=SECURITY_CATEGORY,
+        action=QUARANTINED,
+        target_type="document" if q.document_id else "file",
+        target_id=str(q.document_id or q.file_id),
+        target_label=None,
+        detail={
+            "threat": q.threat,
+            "uploaded_by": {
+                "user_id": None if q.uploader_id is None else str(q.uploader_id),
+                "email": q.uploader_email,
+            },
+            "batch_id": str(q.batch_id),
+            "document_id": None if q.document_id is None else str(q.document_id),
+            "file_id": str(q.file_id),
+            "kind": q.kind,
+            "quarantine_key": quarantine_key,
+            "source_version_id": source_version,
+        },
+    )
+
+
+def notify(deps: Deps, q: Quarantine, fields: dict[str, Any]) -> None:
+    """Publish the notice and mark the file. A failed publish raises, so Lambda retries the
+    event (the retry finds the file infected with no notice sent, and sends it); after its
+    retries the event is in the scan dead-letter queue, whose depth raises an alarm."""
+    if deps.notices is None:
+        log.warning("no security-notice topic is configured; notice not sent", extra=fields)
+        return
+    deps.notices.publish(subject=NOTICE_SUBJECT, message=q.message())
+    with tenant_tx(deps.engine, q.tenant_id) as conn:
+        conn.execute(
+            text(
+                "UPDATE assay.batch_files SET notice_sent_at = now() "
+                "WHERE id = :id AND notice_sent_at IS NULL"
+            ),
+            {"id": q.file_id},
+        )
+    log.info("security notice sent", extra=fields)
+
+
 def handle(event: dict[str, Any], deps: Deps) -> str:
     """Returns what was done, for the log and the tests."""
     scan = parse(event)
@@ -216,6 +352,7 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
         return "superseded"
 
     storage = deps.storage.pipeline(tenant_id, SERVICE, f"scan-{file_id.hex[:16]}")
+    quarantined: Quarantine | None = None
     with tenant_tx(deps.engine, tenant_id) as conn:
         if batches.lock_batch(conn, batch_id) is None:
             log.error("scan result for a batch that does not exist", extra=fields)
@@ -232,9 +369,14 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
                 "scan result already recorded" if same else "a later version is never used",
                 extra=fields | {"file_status": file.status},
             )
-            return "already_recorded" if same else "later_version_ignored"
+            if not (same and file.status == "infected" and file.notice_sent_at is None):
+                return "already_recorded" if same else "later_version_ignored"
+            # Recorded, but its notice was never published (a failed publish): send it now.
+            quarantined = describe(conn, file, scan.threat)
 
-        if scan.result == CLEAN:
+        if quarantined is not None:
+            pass
+        elif scan.result == CLEAN:
             outcome = clean_outcome(storage, file, scan, tenant_id)
         elif scan.result == THREATS:
             target = quarantine(storage, file, scan)
@@ -245,6 +387,15 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
                 error_code="threats_found",
                 quarantine_key=target if file.kind == batches.PDF else None,
             )
+            quarantined = describe(conn, file, scan.threat)
+            audit_quarantine(
+                conn, quarantined, quarantine_key=target, source_version=scan.version_id
+            )
+            # INFO on purpose: a quarantine is a security notice, not a pipeline error.
+            log.info(
+                "file quarantined",
+                extra=fields | {"quarantine_key": target, "source_version_id": scan.version_id},
+            )
         else:
             outcome = batches.ScanOutcome(
                 status="unsupported",
@@ -252,7 +403,25 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
                 version_id=scan.version_id,
                 error_code=HELD[scan.result],
             )
-        eligible = batches.record_scan(conn, file, outcome)
+        if file.status != "registered":
+            eligible: list[uuid.UUID] = []
+        else:
+            eligible = batches.record_scan(conn, file, outcome)
+            if (
+                outcome.status == "clean"
+                and file.purpose == batches.REPLACEMENT
+                and file.document_id is not None
+            ):
+                # A companion file attached or replaced after ingestion: it takes effect
+                # here, with the result that made it usable. No task runs, no model is called.
+                companion_data.apply(
+                    conn, storage, tenant_id=tenant_id, document_id=file.document_id
+                )
+    if file.status != "registered":
+        # The result was recorded by an earlier delivery; only its notice was outstanding.
+        if quarantined is not None:
+            notify(deps, quarantined, fields)
+        return "notice_sent"
     fields |= {"file_status": outcome.status, "error": outcome.error_code}
     log.info("scan result recorded", extra=fields)
     if eligible:
@@ -263,6 +432,9 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
             # The result is recorded; retrying the event would change nothing. The sweeper
             # queues the documents again (assay_db.batches.REQUEUE_AFTER).
             log.exception("documents not queued; the sweeper will queue them again", extra=fields)
+    if quarantined is not None:
+        # Last: everything else about the result is done, whatever happens to the notice.
+        notify(deps, quarantined, fields)
     return outcome.status
 
 
@@ -272,7 +444,12 @@ _deps: Deps | None = None
 def _state() -> Deps:
     global _deps
     if _deps is None:
-        from assay_workers.runtime import SqsIngestQueue, TssStorageSource, app_tenant_engine
+        from assay_workers.runtime import (
+            SnsNotices,
+            SqsIngestQueue,
+            TssStorageSource,
+            app_tenant_engine,
+        )
 
         settings = Settings.from_env()
         _deps = Deps(
@@ -280,6 +457,11 @@ def _state() -> Deps:
             storage=TssStorageSource(settings.tss_endpoint_url, region=settings.region),
             queue=SqsIngestQueue(settings.ingest_queue_url, region=settings.region),
             name_prefix=settings.name_prefix,
+            notices=(
+                SnsNotices(settings.security_topic_arn, region=settings.region)
+                if settings.security_topic_arn
+                else None
+            ),
         )
     return _deps
 

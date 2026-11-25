@@ -62,6 +62,11 @@ class IngestJob(BaseModel):
     tenant_id: uuid.UUID
     document_id: uuid.UUID
 
-    def execution_name(self) -> str:
-        """One execution per document: a second start of the same document is a no-op."""
-        return str(self.document_id)
+
+def execution_name(document_id: uuid.UUID, attempt: int) -> str:
+    """One execution per attempt of a document: a second start of the same one is a no-op.
+
+    The first attempt keeps the document's ID as its name. Step Functions does not give a
+    Standard execution's name out again for 90 days, so "Process again" needs a new one.
+    """
+    return str(document_id) if attempt == 1 else f"{document_id}-{attempt}"

@@ -33,7 +33,7 @@ from assay_db import audit
 
 router = APIRouter(prefix="/admin")
 
-Category = Literal["auth", "user", "tenant", "audit"]
+Category = Literal["auth", "user", "tenant", "audit", "security", "document"]
 Sort = Literal[
     "at",
     "-at",

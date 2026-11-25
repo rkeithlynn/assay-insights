@@ -38,6 +38,9 @@ INTERFACE_ENDPOINT_SERVICES: tuple[str, ...] = (
     "guardduty",
     # Build step 5: the API and the seed Lambda start tenant provisioning executions.
     "states",
+    # Build step 6, second half: the scan function publishes security notices. Its policy
+    # (assay_infra.alerts.sns_endpoint_policy) allows that one role, action and topic.
+    "sns",
 )
 
 FLOW_LOG_RETENTION_DAYS = 30

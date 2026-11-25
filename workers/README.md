@@ -27,6 +27,37 @@ Rules every handler follows:
 - No Lambda opens a PDF. A Lambda has one user and its credentials in its environment, so
   the Lambda image ships no PDF library at all (`tests/unit/test_sandbox.py`).
 
+## After the worker task: the companion file (step 9)
+
+`assay_workers.companion_data.apply` stores the companion file's values, with plain code and
+no model. It runs in two places:
+
+- the state machine's `Companion` step (the steps function), after the worker task, for
+  every attempt of a document;
+- the scan function, when a companion file attached or replaced after ingestion scans clean
+  and valid. No task runs.
+
+Values are stored by version (`attempt` on `signers`, `companion_loan_terms` and
+`document_labels`), and `documents.companion_attempt` points at the current one. Nothing is
+deleted. A replacement that takes effect writes an audit row naming both files by ID and
+version, never by name.
+
+## Attempts
+
+"Process again" starts a new attempt of a document. The starter names the execution after
+the document and the attempt and passes the attempt on; every step, and the worker task,
+does nothing unless it is still the document's current attempt, and asks only about its own
+attempt's events. A superseded attempt writes nothing.
+
+## The quarantine notice
+
+When GuardDuty reports a threat, the scan function quarantines the file, writes a `security`
+audit row in the same transaction and, after the commit, publishes a notice to the
+security-notice topic (its own topic, apart from the alarms). The notice and the row name
+the tenant, the uploading user, the batch and document IDs and GuardDuty's threat name, and
+never a file name or content. Nothing is logged at ERROR. A publish that fails raises, so
+the event is retried and the notice sent then.
+
 ## The worker task
 
 `python -m assay_workers.worker`: one Fargate task per document's attempt, started by the

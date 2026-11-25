@@ -3,7 +3,8 @@ own tenant (BUILD_SPEC.md sections 10 and 11).
 
     GET /documents                  ingestion history: from, to, status, batch_id, sort, page,
                                     format=csv
-    GET /documents/{id}             detail: pipeline steps, forms found
+    GET /documents/{id}             detail: pipeline steps (each with its attempt), forms
+                                    found, the companion file's values and its uploads
     GET /documents/{id}/pdf-url     a five-minute link to the original PDF
 
 Every route runs as `app_tenant` in the token's tenant: another tenant's document, guessed
@@ -25,11 +26,11 @@ from typing import Annotated, Any, Literal, get_args
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi import status as http
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import Connection, text
 
 from assay_api import ingestion_read
 from assay_api.requestinfo import request_info
-from assay_api.routes.batches import StorageDep
+from assay_api.routes.batches import FileProblem, StorageDep
 from assay_api.security import TENANT_ADMIN, TenantMember
 from assay_api.storage import view_link
 from assay_db import audit, batches
@@ -118,6 +119,8 @@ class DocumentEventOut(BaseModel):
     error_code: str | None
     # Who opened the PDF (step `viewed` only), for tenant admins only; null for tenant users.
     viewer: str | None
+    # Which run of the pipeline the event belongs to ("Process again" starts a new one).
+    attempt: int
 
 
 class DocumentPartOut(BaseModel):
@@ -128,11 +131,57 @@ class DocumentPartOut(BaseModel):
     confidence: float | None
 
 
+class CompanionSignerOut(BaseModel):
+    name: str | None
+    email: str | None
+    phone: str | None
+    location: str | None
+
+
+class CompanionLabelOut(BaseModel):
+    key: str
+    value: str | float | bool
+
+
+class CompanionValues(BaseModel):
+    """The companion file's current values (step 9). Tenant content: tenant routes only."""
+
+    version: int
+    application_ref: str | None
+    loan_number: str | None
+    cosigner_name: str | None
+    package_created_on: dt.date | None
+    package_completed_on: dt.date | None
+    loan_term_months: int | None
+    loan_maturity_date: dt.date | None
+    loan_interest_rate: float | None
+    signers: list[CompanionSignerOut]
+    labels: list[CompanionLabelOut]
+
+
+class CompanionFileOut(BaseModel):
+    """One companion upload of the document: the batch's, or one attached later."""
+
+    id: uuid.UUID
+    name: str
+    status: str
+    error_code: str | None
+    errors: list[FileProblem]
+    replacement: bool
+    registered_at: dt.datetime
+    applied_at: dt.datetime | None
+    # The file the current values came from.
+    current: bool
+
+
 class DocumentDetail(DocumentRow):
     duplicate_of: uuid.UUID | None
     pdf_available: bool
+    attempt: int
     events: list[DocumentEventOut]
     parts: list[DocumentPartOut]
+    companion: CompanionValues | None
+    companion_files: list[CompanionFileOut]
 
 
 class PdfLink(BaseModel):
@@ -244,7 +293,9 @@ def _document(caller: Any, document_id: uuid.UUID) -> Any:
     row = caller.conn.execute(
         text(
             ingestion_read.TENANT_SELECT
-            + ", d.duplicate_of, d.s3_key "
+            + ", d.duplicate_of, d.s3_key, d.attempt, d.companion_attempt, "
+            "d.companion_file_id, d.application_ref, d.loan_number, d.cosigner_name, "
+            "d.package_created_on, d.package_completed_on "
             + ingestion_read.TENANT_FROM
             + "WHERE d.id = :id"
         ),
@@ -263,6 +314,75 @@ def _pdf_available(row: Any) -> bool:
     )
 
 
+def _companion(conn: Connection, row: Any) -> CompanionValues | None:
+    """The values of the companion data version the document points at, and no other."""
+    if row.companion_attempt is None:
+        return None
+    keys_ = {"id": row.id, "attempt": row.companion_attempt}
+    signers = conn.execute(
+        text(
+            "SELECT name, email, phone, location FROM assay.signers WHERE document_id = :id "
+            "AND source = 'companion' AND attempt = :attempt ORDER BY name NULLS LAST, email"
+        ),
+        keys_,
+    ).all()
+    terms = conn.execute(
+        text(
+            "SELECT term_months, maturity_date, rate FROM assay.companion_loan_terms "
+            "WHERE document_id = :id AND attempt = :attempt"
+        ),
+        keys_,
+    ).one_or_none()
+    labels = conn.execute(
+        text(
+            "SELECT key, value FROM assay.document_labels WHERE document_id = :id "
+            "AND attempt = :attempt ORDER BY key"
+        ),
+        keys_,
+    ).all()
+    return CompanionValues(
+        version=row.companion_attempt,
+        application_ref=row.application_ref,
+        loan_number=row.loan_number,
+        cosigner_name=row.cosigner_name,
+        package_created_on=row.package_created_on,
+        package_completed_on=row.package_completed_on,
+        loan_term_months=terms.term_months if terms else None,
+        loan_maturity_date=terms.maturity_date if terms else None,
+        loan_interest_rate=float(terms.rate) if terms and terms.rate is not None else None,
+        signers=[
+            CompanionSignerOut(name=s.name, email=s.email, phone=s.phone, location=s.location)
+            for s in signers
+        ],
+        labels=[CompanionLabelOut(key=label.key, value=label.value) for label in labels],
+    )
+
+
+def _companion_files(conn: Connection, row: Any) -> list[CompanionFileOut]:
+    files = conn.execute(
+        text(
+            "SELECT id, file_name, status, error_code, error_detail, purpose, registered_at, "
+            "applied_at FROM assay.batch_files WHERE document_id = :id AND kind = 'companion' "
+            "AND status <> 'removed' ORDER BY registered_at DESC, id"
+        ),
+        {"id": row.id},
+    ).all()
+    return [
+        CompanionFileOut(
+            id=f.id,
+            name=f.file_name,
+            status=f.status,
+            error_code=f.error_code,
+            errors=[FileProblem(**e) for e in (f.error_detail or [])],
+            replacement=f.purpose == batches.REPLACEMENT,
+            registered_at=f.registered_at,
+            applied_at=f.applied_at,
+            current=f.id == row.companion_file_id,
+        )
+        for f in files
+    ]
+
+
 @router.get("/documents/{document_id}", response_model=DocumentDetail)
 def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail:
     row = _document(caller, document_id)
@@ -270,7 +390,7 @@ def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail
     events = visible_events(
         caller.conn.execute(
             text(
-                "SELECT step, status, at, detail ->> 'error' AS error_code, "
+                "SELECT step, status, at, attempt, detail ->> 'error' AS error_code, "
                 "detail ->> 'viewer' AS viewer FROM assay.document_events "
                 "WHERE document_id = :id ORDER BY at, id"
             ),
@@ -290,6 +410,9 @@ def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail
         **_row(row),
         duplicate_of=row.duplicate_of,
         pdf_available=_pdf_available(row),
+        attempt=row.attempt,
+        companion=_companion(caller.conn, row),
+        companion_files=_companion_files(caller.conn, row),
         events=[
             DocumentEventOut(
                 step=e.step,
@@ -297,6 +420,7 @@ def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail
                 at=e.at,
                 error_code=e.error_code,
                 viewer=e.viewer if show_viewer and e.step == "viewed" else None,
+                attempt=e.attempt,
             )
             for e in events
         ],

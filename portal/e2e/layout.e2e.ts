@@ -28,6 +28,8 @@ interface Screen {
   shell?: boolean;
   /** The Audit history table: Time and Actor on one line. */
   audit?: boolean;
+  /** The tenant's ingestion history: the File name column (see `checkFileNames`). */
+  fileNames?: boolean;
 }
 
 const SCREENS: Screen[] = [
@@ -56,7 +58,8 @@ const SCREENS: Screen[] = [
       await page.getByRole("dialog").getByText("Close without the companion file").waitFor();
     },
   },
-  { id: "tenant-admin-ingestion", persona: "tenant-admin", path: "/ingestion", ready: "application-package-1.pdf" },
+  // A tenant admin's table has the selection checkboxes ("Process again"), which take width.
+  { id: "tenant-admin-ingestion", persona: "tenant-admin", path: "/ingestion", ready: "application-package-1.pdf", fileNames: true },
   {
     id: "tenant-admin-ingestion-detail",
     persona: "tenant-admin",
@@ -68,7 +71,7 @@ const SCREENS: Screen[] = [
     },
   },
   { id: "tenant-user-home", persona: "tenant-user", path: "/", ready: "Welcome, Ada Lovelace" },
-  { id: "tenant-user-ingestion", persona: "tenant-user", path: "/ingestion", ready: "application-package-1.pdf" },
+  { id: "tenant-user-ingestion", persona: "tenant-user", path: "/ingestion", ready: "application-package-1.pdf", fileNames: true },
   { id: "master-admin-tenants", persona: "master-admin", path: "/tenants", ready: "Northwind Credit" },
   {
     // The optional Tenant ID column, turned on in Preferences as a viewer would.
@@ -329,6 +332,51 @@ async function checkAuditLines(page: Page): Promise<void> {
   expect.soft(wrapped, "Time, Actor and Outcome each fit on one line").toEqual([]);
 }
 
+/**
+ * Ingestion history's File name column (owner, 2026-11-25: with the selection checkboxes
+ * the names had wrapped into many short lines at 1280 px). Every name is on one line in a
+ * column at least 180 px wide; a name too long for it is cut with an ellipsis, and its full
+ * text is the tooltip.
+ */
+const FILE_NAME_COLUMN_MIN = 180;
+async function checkFileNames(page: Page): Promise<void> {
+  const cells = await page.locator("table").filter({ visible: true }).first().evaluate((table) => {
+    const names = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+    const index = names.findIndex((n) => n.startsWith("File name"));
+    const out: { text: string; title: string | null; width: number; lines: number; cut: boolean }[] = [];
+    for (const row of table.querySelectorAll("tbody tr")) {
+      const cell = row.children[index];
+      if (!cell) continue;
+      const name = cell.querySelector("span[title]");
+      const tops = new Set<number>();
+      const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (!node.textContent?.trim()) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        for (const r of range.getClientRects()) if (r.width > 0) tops.add(Math.round(r.top));
+      }
+      out.push({
+        text: cell.textContent.trim(),
+        title: name ? name.getAttribute("title") : null,
+        width: cell.getBoundingClientRect().width,
+        lines: tops.size,
+        cut: name ? name.scrollWidth > name.clientWidth + 1 : false,
+      });
+    }
+    return out;
+  });
+  expect(cells.length, "the history has rows").toBeGreaterThan(0);
+  for (const cell of cells) {
+    expect.soft(cell.lines, `"${cell.text}" is on one line`).toBe(1);
+    expect.soft(cell.width, `the File name column is at least ${FILE_NAME_COLUMN_MIN} px wide`).toBeGreaterThanOrEqual(FILE_NAME_COLUMN_MIN);
+    expect.soft(cell.title, "the full name is the tooltip").toBe(cell.text);
+  }
+  // The fixtures' long name does not fit at either width: it must be cut, not wrapped.
+  expect.soft(cells.some((cell) => cell.cut), "a name too long for the column is cut with an ellipsis").toBe(true);
+  expect.soft(cells.some((cell) => !cell.cut), "a short name is shown whole").toBe(true);
+}
+
 for (const screen of SCREENS) {
   test(screen.id, async ({ page, context }, info) => {
     await signIn(context, screen.persona);
@@ -340,6 +388,7 @@ for (const screen of SCREENS) {
     }
     await checkTables(page);
     if (screen.audit) await checkAuditLines(page);
+    if (screen.fileNames) await checkFileNames(page);
     const opened = await checkPopups(page);
     // Outside a dialog every screen has at least the banner's user menu; a dialog may have none.
     if (!screen.setup || !(await page.getByRole("dialog").filter({ visible: true }).count())) {

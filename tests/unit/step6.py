@@ -224,11 +224,11 @@ class FakeObjects:
 
     def copy(
         self, *, source_key: str, source_version: str, target_key: str, content_type: str
-    ) -> None:
+    ) -> str | None:
         v = self._b.get(self._bucket, source_key, source_version)
         assert v is not None
         self._b.copies.append((self._bucket, source_key, source_version, target_key))
-        self._b.put(self._bucket, target_key, v.body, content_type)
+        return self._b.put(self._bucket, target_key, v.body, content_type)
 
     def delete(self, key: str) -> None:
         self._b.deletes.append((self._bucket, key))
@@ -301,6 +301,7 @@ def scan_event(
     version_id: str | None,
     result: str = "NO_THREATS_FOUND",
     reasons: Sequence[str] = (),
+    threat: str | None = None,
 ) -> dict[str, Any]:
     """A GuardDuty Malware Protection Object Scan Result event, as AWS documents it."""
     status = "COMPLETED" if result in ("NO_THREATS_FOUND", "THREATS_FOUND") else "SKIPPED"
@@ -324,7 +325,7 @@ def scan_event(
             },
             "scanResultDetails": {
                 "scanResultStatus": result,
-                "threats": None,
+                "threats": None if threat is None else [{"name": threat}],
                 "statusReasons": list(reasons) or None,
             },
         },

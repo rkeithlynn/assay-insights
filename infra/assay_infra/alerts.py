@@ -79,6 +79,114 @@ def topic_policy(*, topic: str, region: str, account_id: str) -> str:
     )
 
 
+def security_topic_policy(*, topic: str, publisher: str) -> str:
+    """Only the scan function's role publishes a security notice. TLS only.
+
+    The role is named in a condition, not as a principal: its own IAM policy is what allows
+    the publish, and this refuses everyone else, whatever their IAM policy says.
+    """
+    return _json(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "OnlyTheScanFunctionPublishes",
+                    "Effect": "Deny",
+                    "Principal": "*",
+                    "Action": "sns:Publish",
+                    "Resource": topic,
+                    "Condition": {"ArnNotEquals": {"aws:PrincipalArn": publisher}},
+                },
+                {
+                    "Sid": "DenyInsecureTransport",
+                    "Effect": "Deny",
+                    "Principal": "*",
+                    "Action": "sns:Publish",
+                    "Resource": topic,
+                    "Condition": {"Bool": {"aws:SecureTransport": "false"}},
+                },
+            ],
+        }
+    )
+
+
+def sns_endpoint_policy(*, topic: str, publisher: str) -> str:
+    """Through the VPC's SNS endpoint: one role, one action, one topic."""
+    return _json(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "ScanFunctionPublishesSecurityNotices",
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": "sns:Publish",
+                    "Resource": topic,
+                    "Condition": {"ArnEquals": {"aws:PrincipalArn": publisher}},
+                }
+            ],
+        }
+    )
+
+
+class SecurityNotices(pulumi.ComponentResource):
+    """Security notices, apart from the alarms (owner decision 4, build step 6, second half).
+
+    A second topic with its own sender name, so a quarantined upload never reads as a system
+    failure. It uses the alarm topic's key (no new key). Only the scan function's role may
+    publish, through the VPC's SNS endpoint, whose policy allows nothing else. The address
+    is stack config `securityNoticeEmail`: while it is blank there is no subscription, and
+    a notice is published to a topic nobody reads.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        email: str,
+        key_id: pulumi.Input[str],
+        publisher_role_arn: pulumi.Input[str],
+        sns_endpoint_id: pulumi.Input[str],
+        opts: pulumi.ResourceOptions | None = None,
+    ) -> None:
+        super().__init__("assay:observability:SecurityNotices", name, None, opts)
+        child = pulumi.ResourceOptions(parent=self)
+        self.topic = aws.sns.Topic(
+            f"{name}-topic",
+            name=name,
+            display_name="Assay Insights security notices",
+            kms_master_key_id=key_id,
+            opts=child,
+        )
+        self.policy = aws.sns.TopicPolicy(
+            f"{name}-topic-policy",
+            arn=self.topic.arn,
+            policy=pulumi.Output.all(topic=self.topic.arn, publisher=publisher_role_arn).apply(
+                lambda a: security_topic_policy(**a)
+            ),
+            opts=child,
+        )
+        self.endpoint_policy = aws.ec2.VpcEndpointPolicy(
+            f"{name}-sns-endpoint-policy",
+            vpc_endpoint_id=sns_endpoint_id,
+            policy=pulumi.Output.all(topic=self.topic.arn, publisher=publisher_role_arn).apply(
+                lambda a: sns_endpoint_policy(**a)
+            ),
+            opts=child,
+        )
+        # Stays "pending confirmation" until the owner follows the link SNS emails.
+        self.subscription: aws.sns.TopicSubscription | None = None
+        if email:
+            self.subscription = aws.sns.TopicSubscription(
+                f"{name}-email",
+                topic=self.topic.arn,
+                protocol="email",
+                endpoint=email,
+                opts=child,
+            )
+        self.register_outputs({"topic_arn": self.topic.arn})
+
+
 class Alerts(pulumi.ComponentResource):
     """The alarm topic. Pass `topic.arn` as an alarm's `alarm_actions`."""
 

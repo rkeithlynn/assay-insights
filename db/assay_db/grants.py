@@ -74,13 +74,15 @@ def claim(
     return token
 
 
-def end(conn: Connection, *, document_id: uuid.UUID) -> int:
-    """End every live grant for the document. Returns how many ended."""
+def end(conn: Connection, *, document_id: uuid.UUID, attempt: int | None = None) -> int:
+    """End every live grant for the document, or only those of one attempt (a step of an
+    attempt that was superseded must not end its successor's). Returns how many ended."""
     result = conn.execute(
         text(
             "UPDATE assay.worker_grants SET ended_at = now() "
-            "WHERE document_id = :document_id AND ended_at IS NULL"
+            "WHERE document_id = :document_id AND ended_at IS NULL "
+            "AND (CAST(:attempt AS integer) IS NULL OR attempt <= CAST(:attempt AS integer))"
         ),
-        {"document_id": document_id},
+        {"document_id": document_id, "attempt": attempt},
     )
     return int(result.rowcount)

@@ -88,6 +88,9 @@ class Document:
     tenant_id: uuid.UUID
     document_id: uuid.UUID
     files: tuple[Any, ...]
+    attempt: int = 1
+    # Where the document's PDF is now: its `originals/` key once an attempt has copied it.
+    s3_key: str | None = None
 
     def file(self, kind: str) -> Any | None:
         return next((f for f in self.files if f.kind == kind), None)
@@ -111,13 +114,19 @@ def _event(
 
 
 def _result(conn: Connection, doc: Document, step: str) -> str | None:
-    """The result an earlier run of this step recorded, if any (never a progress mark)."""
+    """The result an earlier run of this step recorded for this attempt, if any (never a
+    progress mark)."""
     row = conn.execute(
         text(
             "SELECT status FROM assay.document_events WHERE document_id = :id AND step = :step "
-            "AND status <> ALL(:marks) ORDER BY at DESC LIMIT 1"
+            "AND attempt = :attempt AND status <> ALL(:marks) ORDER BY at DESC LIMIT 1"
         ),
-        {"id": doc.document_id, "step": step, "marks": list(progress.MARKS)},
+        {
+            "id": doc.document_id,
+            "step": step,
+            "attempt": doc.attempt,
+            "marks": list(progress.MARKS),
+        },
     ).scalar_one_or_none()
     return None if row is None else str(row)
 
@@ -126,7 +135,7 @@ def load(conn: Connection, job: Job) -> Document | None:
     """The job's document and its clean files, or None if this attempt is not to be run."""
     tenant_id = conn.execute(text("SELECT pipeline.bound_tenant()")).scalar_one_or_none()
     row = conn.execute(
-        text("SELECT id, status, attempt FROM assay.documents WHERE id = :id"),
+        text("SELECT id, status, attempt, s3_key FROM assay.documents WHERE id = :id"),
         {"id": job.document_id},
     ).one_or_none()
     if tenant_id is None or row is None or row.status != "processing":
@@ -140,7 +149,13 @@ def load(conn: Connection, job: Job) -> Document | None:
         ),
         {"id": job.document_id},
     ).all()
-    return Document(tenant_id=tenant_id, document_id=job.document_id, files=tuple(files))
+    return Document(
+        tenant_id=tenant_id,
+        document_id=job.document_id,
+        files=tuple(files),
+        attempt=job.attempt,
+        s3_key=row.s3_key,
+    )
 
 
 def _finish(
@@ -221,20 +236,19 @@ def inspect(doc: Document, deps: Deps) -> str:
         return _finish(deps, doc, status="failed", outcome=FAILED, code=result.problem)
 
     original_key = ctx.original_key(doc.document_id)
-    objects.copy(
-        source_key=pdf.s3_key,
-        source_version=pdf.version_id,
-        target_key=original_key,
-        content_type=batches.CONTENT_TYPES[batches.PDF],
-    )
-    has_companion = companion is not None and companion.version_id is not None
-    if companion is not None and companion.version_id is not None:
+    if doc.s3_key != original_key:
+        # The first attempt to get here copies the PDF. A later attempt ("Process again")
+        # finds it there: the same bytes, checked against the same hash above, are not
+        # written to `originals/` a second time.
         objects.copy(
-            source_key=companion.s3_key,
-            source_version=companion.version_id,
-            target_key=ctx.companion_key(doc.document_id),
-            content_type=batches.CONTENT_TYPES[batches.COMPANION],
+            source_key=pdf.s3_key,
+            source_version=pdf.version_id,
+            target_key=original_key,
+            content_type=batches.CONTENT_TYPES[batches.PDF],
         )
+    # The companion file is copied and stored by the pipeline's `companion` step, after this
+    # task (assay_workers.companion_data): it is plain JSON and needs no sandbox.
+    has_companion = companion is not None and companion.version_id is not None
     with deps.engine.begin() as conn:
         _event(conn, doc, INSPECT, CONTINUE, {"pages": result.pages, "companion": has_companion})
         conn.execute(

@@ -30,6 +30,9 @@ from sqlalchemy import Connection, Row, text
 
 PDF = "pdf"
 COMPANION = "companion"
+# A batch upload, or a companion file attached or replaced after ingestion (migration 0011).
+UPLOAD = "upload"
+REPLACEMENT = "companion_replacement"
 
 # Limits (section 10, and build step 6 condition a).
 PDF_MAX_BYTES = 100 * 1024 * 1024
@@ -131,12 +134,15 @@ def document_event(
     status: str,
     detail: dict[str, Any] | None = None,
 ) -> None:
-    """One `document_events` row. `detail` holds IDs, codes and counts, never content."""
+    """One `document_events` row, stamped with the document's current attempt. `detail`
+    holds IDs, codes and counts, never content."""
     conn.execute(
         text(
-            "INSERT INTO assay.document_events (tenant_id, document_id, step, status, at, detail) "
+            "INSERT INTO assay.document_events "
+            "(tenant_id, document_id, step, status, at, detail, attempt) "
             "VALUES (:tenant_id, :document_id, :step, :status, clock_timestamp(), "
-            "CAST(:detail AS jsonb))"
+            "CAST(:detail AS jsonb), "
+            "(SELECT d.attempt FROM assay.documents d WHERE d.id = :document_id))"
         ),
         {
             "tenant_id": tenant_id,
@@ -189,7 +195,8 @@ def _live_files(conn: Connection, batch_id: uuid.UUID) -> list[Row[Any]]:
         conn.execute(
             text(
                 "SELECT id, kind, base_name, status, document_id FROM assay.batch_files "
-                "WHERE batch_id = :batch AND status <> 'removed' FOR UPDATE"
+                "WHERE batch_id = :batch AND status <> 'removed' AND purpose = 'upload' "
+                "FOR UPDATE"
             ),
             {"batch": batch_id},
         ).all()
@@ -319,6 +326,7 @@ def _pair(conn: Connection, batch_id: uuid.UUID) -> None:
         text(
             "UPDATE assay.batch_files c SET document_id = p.id FROM assay.batch_files p "
             "WHERE c.batch_id = :batch AND c.kind = 'companion' AND c.status <> 'removed' "
+            "AND c.purpose = 'upload' "
             "AND p.batch_id = :batch AND p.kind = 'pdf' AND p.status <> 'removed' "
             "AND p.base_name = c.base_name"
         ),
@@ -328,7 +336,7 @@ def _pair(conn: Connection, batch_id: uuid.UUID) -> None:
         text(
             "UPDATE assay.documents d SET has_companion = true FROM assay.batch_files c "
             "WHERE c.batch_id = :batch AND c.kind = 'companion' AND c.status <> 'removed' "
-            "AND c.document_id = d.id"
+            "AND c.purpose = 'upload' AND c.document_id = d.id"
         ),
         {"batch": batch_id},
     )
@@ -459,7 +467,8 @@ def evaluate(conn: Connection, batch_id: uuid.UUID) -> list[uuid.UUID]:
         for c in conn.execute(
             text(
                 "SELECT base_name, status FROM assay.batch_files "
-                "WHERE batch_id = :batch AND kind = 'companion' AND status <> 'removed'"
+                "WHERE batch_id = :batch AND kind = 'companion' AND status <> 'removed' "
+                "AND purpose = 'upload'"
             ),
             {"batch": batch_id},
         ).all()
@@ -543,7 +552,8 @@ def lock_file(conn: Connection, file_id: uuid.UUID) -> Row[Any] | None:
     return conn.execute(
         text(
             "SELECT id, tenant_id, batch_id, kind, size_bytes, sha256, s3_key, status, "
-            "version_id, document_id FROM assay.batch_files WHERE id = :id FOR UPDATE"
+            "version_id, document_id, purpose, registered_by, notice_sent_at "
+            "FROM assay.batch_files WHERE id = :id FOR UPDATE"
         ),
         {"id": file_id},
     ).one_or_none()
@@ -679,12 +689,189 @@ def requeue_candidates(conn: Connection, now: dt.datetime) -> list[uuid.UUID]:
             "UPDATE assay.documents d SET queued_at = now() "
             "WHERE d.status = 'processing' AND (d.queued_at IS NULL OR d.queued_at < :before) "
             "AND NOT EXISTS (SELECT 1 FROM assay.document_events e "
-            "WHERE e.tenant_id = d.tenant_id AND e.document_id = d.id AND e.step = 'start') "
+            "WHERE e.tenant_id = d.tenant_id AND e.document_id = d.id AND e.step = 'start' "
+            "AND e.attempt = d.attempt) "
             "RETURNING d.id"
         ),
         {"before": now - REQUEUE_AFTER},
     ).all()
     return [r.id for r in rows]
+
+
+# --- After ingestion: process again, mark as reviewed, replace the companion file -------
+
+# "Process again" (owner decision 3, second half). `processing` is here for a document whose
+# attempt has ended without a final status: every document until the last stage is built.
+REPROCESSABLE = ("failed", "ready", "needs_review", "processing")
+# A `processing` document is under way while it has a live worker grant, or anything
+# happened to its current attempt this recently.
+RUNNING_GRACE = dt.timedelta(minutes=5)
+# A companion file may be attached or replaced once the document has been through the
+# pipeline's checks (owner decision A4).
+COMPANION_REPLACEABLE = ("ready", "needs_review", "processing")
+
+
+def _under_way(conn: Connection, document_id: uuid.UUID, now: dt.datetime) -> bool:
+    row = conn.execute(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM assay.worker_grants g WHERE g.document_id = d.id "
+            "               AND g.ended_at IS NULL AND g.expires_at > now()) AS granted, "
+            "       (SELECT max(e.at) FROM assay.document_events e "
+            "         WHERE e.tenant_id = d.tenant_id AND e.document_id = d.id "
+            "           AND e.attempt = d.attempt AND e.step <> 'viewed') AS last_event "
+            "FROM assay.documents d WHERE d.id = :id"
+        ),
+        {"id": document_id},
+    ).one()
+    recent = row.last_event is not None and row.last_event > now - RUNNING_GRACE
+    return bool(row.granted) or recent
+
+
+def reprocess(
+    conn: Connection, *, tenant_id: uuid.UUID, document_id: uuid.UUID, now: dt.datetime
+) -> tuple[int, str]:
+    """Start a new attempt of a document. Returns (the new attempt, the status it had).
+
+    The document becomes `processing` and gets a `queued` event; the caller sends its ingest
+    job after the commit. Everything restarts at fingerprint, from the upload at the version
+    that scanned clean. A failed document gives up its hash first, so fingerprint checks it
+    again: if the same file became an original in the meantime, it ends `duplicate`.
+    Refused (BatchError): a document that never had a clean PDF, one that is quarantined, on
+    hold, a duplicate or discarded, and one whose attempt is under way.
+    """
+    row = conn.execute(
+        text(
+            "SELECT d.status, d.attempt, EXISTS (SELECT 1 FROM assay.batch_files f "
+            "WHERE f.tenant_id = d.tenant_id AND f.id = d.id AND f.status = 'clean' "
+            "AND f.version_id IS NOT NULL) AS clean "
+            "FROM assay.documents d WHERE d.id = :id FOR UPDATE OF d"
+        ),
+        {"id": document_id},
+    ).one_or_none()
+    if row is None:
+        raise BatchError("document_not_found")
+    if row.status not in REPROCESSABLE or not row.clean:
+        raise BatchError("not_reprocessable")
+    if row.status == "processing" and _under_way(conn, document_id, now):
+        raise BatchError("attempt_running")
+    attempt = int(row.attempt) + 1
+    conn.execute(
+        text(
+            "UPDATE assay.worker_grants SET ended_at = now() "
+            "WHERE document_id = :id AND ended_at IS NULL"
+        ),
+        {"id": document_id},
+    )
+    conn.execute(
+        text(
+            "UPDATE assay.documents SET attempt = :attempt, status = 'processing', "
+            "error_code = NULL, completed_at = NULL, queued_at = now(), "
+            "sha256 = CASE WHEN status = 'failed' THEN NULL ELSE sha256 END WHERE id = :id"
+        ),
+        {"id": document_id, "attempt": attempt},
+    )
+    document_event(
+        conn,
+        tenant_id=tenant_id,
+        document_id=document_id,
+        step="queued",
+        status="queued",
+        detail={"reprocess": True, "previous_status": row.status},
+    )
+    return attempt, str(row.status)
+
+
+def mark_reviewed(
+    conn: Connection, *, tenant_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUID
+) -> None:
+    """`needs_review` becomes `ready` (owner decision 7). Refused for any other status."""
+    changed = conn.execute(
+        text(
+            "UPDATE assay.documents SET status = 'ready' "
+            "WHERE id = :id AND status = 'needs_review' RETURNING id"
+        ),
+        {"id": document_id},
+    ).first()
+    if changed is None:
+        exists = conn.execute(
+            text("SELECT 1 FROM assay.documents WHERE id = :id"), {"id": document_id}
+        ).first()
+        raise BatchError("not_needs_review" if exists else "document_not_found")
+    document_event(
+        conn,
+        tenant_id=tenant_id,
+        document_id=document_id,
+        step="review",
+        status="reviewed",
+        detail={"user_id": str(user_id)},
+    )
+
+
+def replacement_target(conn: Connection, document_id: uuid.UUID) -> Row[Any]:
+    """The document a companion file is to be attached to, locked: its batch (for the inbox
+    key) and the companion file its current values came from. BatchError if it may not have
+    one now, or one is already on its way."""
+    row = conn.execute(
+        text(
+            "SELECT d.id, d.batch_id, d.status, d.companion_file_id, "
+            "(SELECT f.version_id FROM assay.batch_files f WHERE f.tenant_id = d.tenant_id "
+            "  AND f.id = d.companion_file_id) AS companion_version_id "
+            "FROM assay.documents d WHERE d.id = :id FOR UPDATE OF d"
+        ),
+        {"id": document_id},
+    ).one_or_none()
+    if row is None:
+        raise BatchError("document_not_found")
+    if row.status not in COMPANION_REPLACEABLE:
+        raise BatchError("companion_not_allowed")
+    pending = conn.execute(
+        text(
+            "SELECT 1 FROM assay.batch_files WHERE document_id = :id "
+            "AND purpose = 'companion_replacement' AND status = 'registered'"
+        ),
+        {"id": document_id},
+    ).first()
+    if pending is not None:
+        raise BatchError("companion_pending")
+    return row
+
+
+def insert_replacement(
+    conn: Connection,
+    *,
+    tenant_id: uuid.UUID,
+    batch_id: uuid.UUID,
+    document_id: uuid.UUID,
+    user_id: uuid.UUID,
+    file: NewFile,
+) -> None:
+    """Register a companion file against its document. It is uploaded to the inbox and
+    scanned like any upload; the scan step applies it if it is clean and valid."""
+    if file.kind != COMPANION:
+        raise BatchError("unsupported_file_type")
+    conn.execute(
+        text(
+            "INSERT INTO assay.batch_files (id, tenant_id, batch_id, kind, file_name, "
+            "base_name, size_bytes, sha256, s3_key, content_type, document_id, "
+            "registered_by, purpose) VALUES (:id, :tenant_id, :batch, :kind, :file_name, "
+            ":base, :size, :sha256, :key, :content_type, :document, :user, :purpose)"
+        ),
+        {
+            "id": file.id,
+            "tenant_id": tenant_id,
+            "batch": batch_id,
+            "kind": file.kind,
+            "file_name": file.file_name,
+            "base": file.base_name,
+            "size": file.size_bytes,
+            "sha256": file.sha256,
+            "key": file.s3_key,
+            "content_type": file.content_type,
+            "document": document_id,
+            "user": user_id,
+            "purpose": REPLACEMENT,
+        },
+    )
 
 
 def tenants_with_work(conn: Connection, now: dt.datetime) -> list[uuid.UUID]:

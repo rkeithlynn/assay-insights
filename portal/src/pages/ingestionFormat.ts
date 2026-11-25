@@ -155,6 +155,10 @@ export const RESULT_TEXT: Record<string, string> = {
   removed: "Removed",
   // PDF opened
   pdf_url: "Opened",
+  // The companion file's values (step 9), and a review.
+  stored: "Stored",
+  none: "No companion file",
+  reviewed: "Marked as reviewed",
 };
 
 export function resultText(status: string): string {
@@ -198,9 +202,47 @@ export const STEP_TEXT: Record<string, string> = {
   worker: "Processing task",
   inspect: "Inspection",
   companion: "Companion file",
+  review: "Review",
   failed: "Failed",
   viewed: "PDF opened",
 };
+
+/** "Process again" (tenant admins): the statuses the API accepts. A `processing` document is
+ * accepted only once its attempt has ended; the API says so if it has not. */
+export const REPROCESSABLE: readonly string[] = ["failed", "ready", "needs_review", "processing"];
+/** A companion file may be attached or replaced once the document has been processed. */
+export const COMPANION_REPLACEABLE: readonly string[] = ["ready", "needs_review", "processing"];
+
+export function canReprocess(status: string): boolean {
+  return REPROCESSABLE.includes(status);
+}
+
+/** What the confirmation says before documents are processed again. Processing a Ready
+ * document again runs the AI steps again, which costs money: the dialog says how many. */
+export function reprocessSummary(statuses: string[]): { count: number; ready: number } {
+  return { count: statuses.length, ready: statuses.filter((s) => s === "ready").length };
+}
+
+/** How a companion upload of a document stands, in plain words. */
+export function companionFileText(file: { status: string; current: boolean; replacement: boolean }): string {
+  if (file.current) return "In use";
+  switch (file.status) {
+    case "registered":
+      return "Waiting for its scan";
+    case "clean":
+      return file.replacement ? "Checked" : "Replaced";
+    case "invalid":
+      return "Rejected: not valid";
+    case "infected":
+      return "Quarantined: malware found";
+    case "mismatch":
+      return "Rejected: the file changed during upload";
+    case "not_uploaded":
+      return "Not uploaded";
+    default:
+      return "Could not be scanned";
+  }
+}
 
 export function stepText(step: string): string {
   return STEP_TEXT[step] ?? step;

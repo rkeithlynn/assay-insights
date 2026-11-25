@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canReprocess,
+  COMPANION_REPLACEABLE,
+  companionFileText,
   errorCodeText,
   errorText,
   fileProblemText,
   laterStepsPending,
+  reprocessSummary,
   resultText,
   stepText,
 } from "./ingestionFormat";
@@ -102,5 +106,39 @@ describe("errorCodeText (master admins)", () => {
   it("always shows the generic code of an older row, and says the step was not recorded", () => {
     expect(errorCodeText("pipeline_error", null)).toBe("pipeline_error · the failed step was not recorded");
     expect(errorCodeText("pipeline_error", "States.Timeout")).toBe("pipeline_error · States.Timeout");
+  });
+});
+
+describe("process again and the companion file (build step 6, second half)", () => {
+  it("offers Process again only for a document that may run again", () => {
+    expect(["failed", "ready", "needs_review", "processing"].every(canReprocess)).toBe(true);
+    expect(["quarantined", "on_hold", "duplicate", "discarded", "uploaded", "scanning"].some(canReprocess)).toBe(false);
+  });
+
+  it("counts the Ready documents, whose AI steps cost money to run again", () => {
+    expect(reprocessSummary(["ready", "failed", "ready", "processing"])).toEqual({ count: 4, ready: 2 });
+    expect(reprocessSummary(["failed"])).toEqual({ count: 1, ready: 0 });
+  });
+
+  it("allows a companion file only once the document has been processed", () => {
+    expect(COMPANION_REPLACEABLE).toEqual(["ready", "needs_review", "processing"]);
+  });
+
+  it("says how each companion upload stands, in plain words", () => {
+    const file = (status: string, current = false, replacement = true) => ({ status, current, replacement });
+    expect(companionFileText(file("clean", true))).toBe("In use");
+    expect(companionFileText(file("registered"))).toBe("Waiting for its scan");
+    expect(companionFileText(file("invalid"))).toBe("Rejected: not valid");
+    expect(companionFileText(file("infected"))).toBe("Quarantined: malware found");
+    expect(companionFileText(file("clean", false, false))).toBe("Replaced");
+  });
+
+  it("names the new steps and results in plain words", () => {
+    expect(stepText("companion")).toBe("Companion file");
+    expect(stepText("review")).toBe("Review");
+    expect(resultText("stored")).toBe("Stored");
+    expect(resultText("none")).toBe("No companion file");
+    expect(resultText("reviewed")).toBe("Marked as reviewed");
+    expect(errorText("companion_failed")).toBe("The companion file step failed.");
   });
 });

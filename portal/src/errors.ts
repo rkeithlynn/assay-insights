@@ -46,6 +46,12 @@ const MESSAGES: Record<string, string> = {
   storage_unavailable: "Storage did not respond. Try again in a minute.",
   pdf_not_available: "This document's PDF is not available to view.",
   document_not_found: "That document was not found.",
+  // Build step 6, second half: process again, mark as reviewed, the companion file.
+  not_reprocessable: "This document cannot be processed again.",
+  attempt_running: "This document is being processed now. Try again when it has finished.",
+  not_needs_review: "This document is not waiting for review. Refresh the page.",
+  companion_not_allowed: "A companion file cannot be attached to this document.",
+  companion_pending: "A companion file for this document is already on its way. Wait for it to finish.",
 };
 
 /** Codes after which the user must sign in again. */

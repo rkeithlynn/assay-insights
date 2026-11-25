@@ -52,9 +52,11 @@ const CATEGORIES: SelectProps.Option[] = [
   { value: "user", label: "User changes" },
   { value: "tenant", label: "Tenant changes" },
   { value: "audit", label: "Audit exports" },
+  { value: "security", label: "Security notices" },
+  { value: "document", label: "Document changes" },
 ];
 
-type Category = "auth" | "user" | "tenant" | "audit";
+type Category = "auth" | "user" | "tenant" | "audit" | "security" | "document";
 type Sort = "at" | "-at" | "tenant" | "-tenant" | "actor" | "-actor" | "action" | "-action" | "category" | "-category";
 
 // The table fits the screen at 1280 px and wider (rendered check: portal/e2e/layout.e2e.ts):

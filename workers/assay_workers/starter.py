@@ -8,8 +8,10 @@ Reads the ingest queue (an SQS event source, with partial batch responses). For 
 - A tenant that is not `active` (suspended) gets no new execution: the job is dropped and the
   document waits, still eligible. The sweeper queues it again once the tenant is active
   (owner decision 19, build step 6). Executions already running finish.
-- The execution is named after the document, so a job delivered twice starts it once; a
-  `start` event records it.
+- The execution is named after the document and its current attempt (the first attempt
+  keeps the bare document ID), so a job delivered twice starts it once; a `start` event
+  records it. The attempt comes from the document's row, never from the job, and goes into
+  the execution's input: every later step checks it is still the document's current one.
 
 A job that fails (the database, Step Functions) is returned as a batch item failure, retried
 by SQS and, after five receives, kept in the dead-letter queue, whose depth raises an alarm.
@@ -32,7 +34,7 @@ from pydantic import ValidationError
 from sqlalchemy import Engine, text
 
 from assay_db import batches
-from assay_schemas.pipeline import IngestJob
+from assay_schemas.pipeline import IngestJob, execution_name
 from assay_tss import keys
 from assay_workers.runtime import Settings, tenant_tx
 
@@ -44,7 +46,7 @@ log.setLevel(logging.INFO)
 
 
 class Executions(Protocol):
-    def start(self, job: IngestJob) -> str: ...
+    def start(self, job: IngestJob, attempt: int) -> str: ...
 
 
 class StepFunctionsExecutions:
@@ -52,12 +54,18 @@ class StepFunctionsExecutions:
         self._arn = state_machine_arn
         self._client = client
 
-    def start(self, job: IngestJob) -> str:
+    def start(self, job: IngestJob, attempt: int) -> str:
         try:
             started = self._client.start_execution(
                 stateMachineArn=self._arn,
-                name=job.execution_name(),
-                input=job.model_dump_json(),
+                name=execution_name(job.document_id, attempt),
+                input=json.dumps(
+                    {
+                        "tenant_id": str(job.tenant_id),
+                        "document_id": str(job.document_id),
+                        "attempt": attempt,
+                    }
+                ),
             )
             return str(started["executionArn"])
         except self._client.exceptions.ExecutionAlreadyExists:
@@ -78,9 +86,9 @@ def start_one(job: IngestJob, deps: Deps) -> str:
     with tenant_tx(deps.engine, job.tenant_id) as conn:
         row = conn.execute(
             text(
-                "SELECT d.status, EXISTS (SELECT 1 FROM assay.document_events e "
-                "WHERE e.document_id = d.id AND e.step = 'start') AS started "
-                "FROM assay.documents d WHERE d.id = :id FOR UPDATE"
+                "SELECT d.status, d.attempt, EXISTS (SELECT 1 FROM assay.document_events e "
+                "WHERE e.document_id = d.id AND e.step = 'start' AND e.attempt = d.attempt) "
+                "AS started FROM assay.documents d WHERE d.id = :id FOR UPDATE"
             ),
             {"id": job.document_id},
         ).one_or_none()
@@ -93,7 +101,7 @@ def start_one(job: IngestJob, deps: Deps) -> str:
         if not batches.tenant_is_active(conn, job.tenant_id):
             log.info("tenant not active: held until it is active again", extra=fields)
             return "held"
-        execution = deps.executions.start(job)
+        execution = deps.executions.start(job, int(row.attempt))
         batches.document_event(
             conn,
             tenant_id=job.tenant_id,
@@ -101,7 +109,7 @@ def start_one(job: IngestJob, deps: Deps) -> str:
             step="start",
             status="started",
         )
-    log.info("execution started", extra=fields | {"execution": execution})
+    log.info("execution started", extra=fields | {"execution": execution, "attempt": row.attempt})
     return "started"
 
 

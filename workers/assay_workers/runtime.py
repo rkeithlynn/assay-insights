@@ -92,7 +92,7 @@ class Objects(Protocol):
 
     def copy(
         self, *, source_key: str, source_version: str, target_key: str, content_type: str
-    ) -> None: ...
+    ) -> str | None: ...
 
     def delete(self, key: str) -> None: ...
 
@@ -155,8 +155,8 @@ class S3Objects:
 
     def copy(
         self, *, source_key: str, source_version: str, target_key: str, content_type: str
-    ) -> None:
-        """Copy one version, with no tags.
+    ) -> str | None:
+        """Copy one version, with no tags. Returns the new object's version ID.
 
         GuardDuty tags every object it scans, and a copy takes the source's tags by default
         (`TaggingDirective` COPY). Copying them needs object-tagging permissions that no
@@ -165,7 +165,7 @@ class S3Objects:
         2026-11-24). REPLACE with no tag set reads no tags and writes none. The scan
         result is kept in the database, not in a tag.
         """
-        self._s3.copy_object(
+        response = self._s3.copy_object(
             Bucket=self._bucket,
             Key=target_key,
             CopySource={"Bucket": self._bucket, "Key": source_key, "VersionId": source_version},
@@ -174,6 +174,7 @@ class S3Objects:
             TaggingDirective="REPLACE",
             ChecksumAlgorithm="SHA256",
         )
+        return response.get("VersionId")
 
     def delete(self, key: str) -> None:
         """A delete marker only: the role never deletes a version (Object Lock keeps it)."""
@@ -219,6 +220,24 @@ def jobs_for(tenant_id: uuid.UUID, document_ids: Sequence[uuid.UUID]) -> list[In
     return [IngestJob(tenant_id=tenant_id, document_id=d) for d in document_ids]
 
 
+# --- Security notices -------------------------------------------------------------------
+
+
+class Notices(Protocol):
+    """The security-notice topic (owner decision 4, second half): apart from the alarms."""
+
+    def publish(self, *, subject: str, message: str) -> None: ...
+
+
+class SnsNotices:
+    def __init__(self, topic_arn: str, *, region: str) -> None:
+        self._arn = topic_arn
+        self._client: Any = boto3.client("sns", region_name=region, config=AWS_CONFIG)
+
+    def publish(self, *, subject: str, message: str) -> None:
+        self._client.publish(TopicArn=self._arn, Subject=subject, Message=message)
+
+
 # --- Settings ---------------------------------------------------------------------------
 
 
@@ -229,6 +248,7 @@ class Settings:
     tss_endpoint_url: str
     ingest_queue_url: str
     state_machine_arn: str | None = None
+    security_topic_arn: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -239,6 +259,7 @@ class Settings:
             tss_endpoint_url=env.get("TSS_ENDPOINT_URL", ""),
             ingest_queue_url=env.get("INGEST_QUEUE_URL", ""),
             state_machine_arn=env.get("STATE_MACHINE_ARN") or None,
+            security_topic_arn=env.get("SECURITY_TOPIC_ARN") or None,
         )
 
 

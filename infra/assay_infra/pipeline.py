@@ -354,6 +354,9 @@ def function_role_policy(
     ingest_queue: str,
     scan_dlq: str,
     state_machine: str,
+    security_topic: str,
+    notices_key: str,
+    region: str,
 ) -> str:
     """Each function's own permissions. The TSS invoke grant is added by TenantStorage."""
     statements: list[dict[str, object]] = [
@@ -380,6 +383,24 @@ def function_role_policy(
                 "Resource": scan_dlq,
             }
         )
+        # The quarantine notice (owner decision 4, second half): publish to the one
+        # security-notice topic, and use its key only through SNS, which encrypts the
+        # message with it. The role cannot call KMS with this key itself.
+        statements += [
+            {
+                "Sid": "PublishSecurityNotices",
+                "Effect": "Allow",
+                "Action": "sns:Publish",
+                "Resource": security_topic,
+            },
+            {
+                "Sid": "NoticeKeyThroughSnsOnly",
+                "Effect": "Allow",
+                "Action": ["kms:GenerateDataKey*", "kms:Decrypt"],
+                "Resource": notices_key,
+                "Condition": {"StringEquals": {"kms:ViaService": f"sns.{region}.amazonaws.com"}},
+            },
+        ]
     if function == "starter":
         statements += [
             {
@@ -503,9 +524,11 @@ ECS_RETRY: dict[str, object] = {
 def state_machine_definition(
     *, steps_function: str, cluster: str, task_definition: str, subnet: str, security_group: str
 ) -> str:
-    """Input: an ingest job, `{"tenant_id", "document_id"}` (assay_schemas.pipeline.IngestJob).
+    """Input: `{"tenant_id", "document_id", "attempt"}`, from the starter. Every Lambda step
+    gets the attempt and does nothing unless it is still the document's current one.
 
-    Fingerprint (Lambda), then the worker task for everything that needs the PDF opened:
+    Fingerprint (Lambda), then the worker task for everything that needs the PDF opened, then
+    `Companion` (Lambda, step 9: the companion file's values, plain code):
 
     - `Claim` takes one of the tenant's worker slots and creates the attempt grant. With no
       slot free it answers `wait`; the execution waits and asks again.
@@ -539,6 +562,7 @@ def state_machine_definition(
             "step": step,
             "tenant_id.$": "$.tenant_id",
             "document_id.$": "$.document_id",
+            "attempt.$": "$.attempt",
             **(extra or {}),
         }
         return {
@@ -673,8 +697,13 @@ def state_machine_definition(
                     "OutputPath": "$",
                     "TimeoutSeconds": FUNCTIONS["steps"].timeout + 60,
                     "Retry": [LAMBDA_RETRY, STEP_RETRY],
-                    "Next": "Done",
+                    "Next": "Companion",
                 },
+                # Step 9. It answers `stopped` for a document the task held or failed.
+                "Companion": step(
+                    "companion", result="$.companion", failed="CompanionFailed", then="Done"
+                ),
+                "CompanionFailed": caught("companion"),
                 "ReleaseAfterFailure": step(
                     "release", result="$.claim", failed="WorkerFailed", then="WorkerStarted"
                 ),
@@ -834,6 +863,10 @@ class Pipeline(pulumi.ComponentResource):
         # sweeper (POST /batches/{id}/close).
         api_task_role: aws.iam.Role,
         alarm_topic_arn: pulumi.Input[str],
+        # Where the scan function publishes a quarantine notice, and the key that topic is
+        # encrypted with (assay_infra.alerts.SecurityNotices).
+        security_topic_arn: pulumi.Input[str],
+        notices_key_arn: pulumi.Input[str],
         # The cap on one tenant's concurrent worker tasks (stack config workerMaxPerTenant).
         worker_max_per_tenant: int = 5,
         aws_profile: str | None = None,
@@ -922,6 +955,9 @@ class Pipeline(pulumi.ComponentResource):
                     ingest_queue=self.ingest_queue.arn,
                     scan_dlq=self.scan_dlq.arn,
                     state_machine=state_machine_arn,
+                    security_topic=security_topic_arn,
+                    notices_key=notices_key_arn,
+                    region=region,
                 ).apply(functools.partial(_role_policy, function)),
                 opts=child,
             )
@@ -935,6 +971,8 @@ class Pipeline(pulumi.ComponentResource):
             }
             if function == "starter":
                 variables["STATE_MACHINE_ARN"] = state_machine_arn
+            if function == "scan":
+                variables["SECURITY_TOPIC_ARN"] = security_topic_arn
             if function == "steps":
                 # The claim step: the tenant's worker slots, and how long a grant lasts.
                 variables["WORKER_MAX_PER_TENANT"] = str(worker_max_per_tenant)

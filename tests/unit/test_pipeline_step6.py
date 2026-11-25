@@ -12,13 +12,13 @@ import json
 import logging
 import uuid
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from assay_db import batches
-from assay_schemas.pipeline import IngestJob
+from assay_schemas.pipeline import IngestJob, execution_name
 from assay_tss import keys, naming
 from assay_tss.models import StorageAccess
 from assay_workers import scan, starter, steps, sweeper
@@ -483,10 +483,12 @@ def test_discarding_keeps_documents_as_discarded(w: World) -> None:
 @dataclass
 class FakeExecutions:
     started: list[IngestJob]
+    names: list[str] = field(default_factory=list)
 
-    def start(self, job: IngestJob) -> str:
+    def start(self, job: IngestJob, attempt: int) -> str:
         self.started.append(job)
-        return f"arn:execution:{job.execution_name()}"
+        self.names.append(execution_name(job.document_id, attempt))
+        return f"arn:execution:{self.names[-1]}"
 
 
 def eligible_document(w: World, tenant: str, sub: str, name: str) -> tuple[uuid.UUID, Batch]:
@@ -504,7 +506,8 @@ def test_the_starter_starts_each_document_once(w: World) -> None:
     assert starter.start_one(job, deps) == "started"
     assert starter.start_one(job, deps) == "already_started"
     assert executions.started == [job]
-    assert job.execution_name() == str(doc_id)
+    # The first attempt's execution is named after the document alone.
+    assert executions.names == [str(doc_id)]
 
 
 def test_a_suspended_tenants_documents_are_held_not_started(w: World) -> None:
