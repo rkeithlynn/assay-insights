@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). Part 2 not started: the TSS API's empty access log is to be settled first. See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). Part 2 on hold until the TSS API's empty access log is settled (experiment approved 2026-11-25; outcome pending). See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -261,12 +261,21 @@ Still open:
   below 5.16 (releases younger than two weeks on 2026-11-24).
 - **Before production (unchanged):** VPC flow logs to the Log Archive account; an
   approval-gated break-glass role; a Cognito signing-key rotation needs a `pulumi up`.
+- **Before production (owner, 2026-11-25): the break-glass rule, log and alarm have never
+  been exercised in AWS; test once deliberately.** Nobody has assumed the role, so the
+  EventBridge rule has matched nothing, `/aws/events/assay-dev-break-glass` is empty and
+  `break-glass-assumed` has never fired. `check_deployment.py` reports the log as not proven.
 - **Before deploying to Staging or Production (owner, 2026-11-25): request the Lambda
   concurrent-executions quota increase in that account first.** A new account allows 10
   concurrent executions (Service Quotas L-B99A9384), which is too few for the pipeline: see
   "One scan result failed once" in the step 6 notes. Request 1,000, as for Development:
   `aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --profile <profile> --region us-east-1`,
   and wait until it is granted before the first `pulumi up`.
+  `uv run scripts/check_deployment.py --before-deploy --stack <stack>` reads the account's
+  limit and warns if it is below what the pipeline needs.
+- **After every deploy's checks, run `uv run scripts/check_deployment.py`** (read-only): it
+  fails if a configured log destination has received nothing, and repeats the concurrency
+  warning. See the step 6 notes.
 
 ### Reading audit_log
 
@@ -1776,7 +1785,8 @@ New grants and permissions (all approved 2026-11-24; also in the pull request):
   policy or any queue. No new KMS key. No `update_tenants.py` run.
 
 Deploy order (owner): `pulumi up`; `uv run scripts/migrate.py` straight away (the bootstrap
-creates `app_worker`, then `0010`); `uv run scripts/run_isolation.py ...`; browser checks.
+creates `app_worker`, then `0010`); `uv run scripts/run_isolation.py ...`; browser checks;
+`uv run scripts/check_deployment.py` (since 2026-11-25).
 Every image rebuilds (the lock file changed). Until `0010` is in, a document that reaches
 `claim` fails there, so upload nothing in between.
 
@@ -1846,6 +1856,8 @@ First isolation run after the deploy (owner, 2026-11-25, 11:33 UTC):
     IAM policy, and the topic's policy names only services.
   - Not shown to work: it can only be shown by a run that creates a role and such a policy
     together, and the next one that does is a new stack.
+  - It had happened once before: CloudTrail shows the same refusal of the TSS API's policy
+    at 2026-11-24 19:36:07 UTC, in the first half's deploy, when the pipeline roles were new.
 
 Settled by that run and the deploy:
 
@@ -1918,10 +1930,77 @@ isolation run has not been repeated on it yet):
   concurrency to the owner, with the reasoning for the numbers. **Set neither before then**
   (owner, 2026-11-25). Staging and Production need the same request before their first
   deploy (see "Before deploying to Staging or Production").
-- **Found on the way: the TSS API's access log has never received an entry.** The stage has
-  access logging set to `/aws/apigateway/assay-dev-tss`, and that log group has no stream
-  and 0 bytes since build step 4. So API Gateway's own record of the 500 (caller,
-  integration status) does not exist. Not yet investigated.
+- **The TSS API's access log has never received an entry** (found on the way; investigated
+  read-only on 2026-11-25). **The cause is not proven and nothing has been changed.**
+  - It is configured as AWS documents. Stage `v1` has `accessLogSettings` (the log group
+    `/aws/apigateway/assay-dev-tss`, a format with `$context.requestId`). The account's
+    `cloudwatchRoleArn` is the stack's `assay-dev-tss-api-logs-role`, with
+    `AmazonAPIGatewayPushToCloudWatchLogs`. The log group exists, with no KMS key and no
+    stream. The API counted 176 requests in three days, and one 5XX at the time of the
+    throttled call.
+  - CloudTrail: API Gateway assumed the role only when the account setting or the stage was
+    updated (2026-11-23 21:35, 11-24 19:49, 11-25 11:25 UTC), each time to call
+    `DescribeLogGroups` on the group, and once to write its own test message to
+    `/aws/apigateway/welcome`, which worked. It never assumed the role at the time of a
+    request, and no `CreateLogStream` was ever made in the group.
+  - A refused `AssumeRole` by a service does not appear in this account's trail: the two
+    `UpdateAccount` calls refused at 21:34 on 2026-11-23 left none. So a refusal at request
+    time cannot be seen from here.
+  - **The one difference from AWS's documented setup** is the role's trust policy: ours adds
+    `aws:SourceAccount` (`_service_trust`, used for every service role). AWS's logging page
+    asks only for `apigateway.amazonaws.com` as the trusted entity. The control plane sends
+    the account (its assumes passed `StringEquals`); no AWS page says whether the part that
+    writes logs does. This is the candidate cause, and only a change can prove it.
+  - **Ruled out:** a log delivery and a log group resource policy for
+    `delivery.logs.amazonaws.com`. That is how HTTP APIs log; the owner's credentials would
+    have created both when the stage was set up, and CloudTrail has no `CreateLogDelivery`.
+  - **The experiment (approved by the owner, 2026-11-25): a deliberate, narrow trust
+    widening.** On the API Gateway logging role only (`tss.api_logs_trust_policy`),
+    `StringEquals` becomes `StringEqualsIfExists` for `aws:SourceAccount`. A call from
+    `apigateway.amazonaws.com` that carries no source account is admitted; a call that
+    carries another account's is still refused. Every other service role keeps
+    `StringEquals` (`_service_trust`); `test_infra_tenancy.py` fails if `IfExists` appears
+    anywhere else in `infra/`. Why the risk is low:
+    - The role has only `AmazonAPIGatewayPushToCloudWatchLogs`: create log groups and
+      streams, write log events, and describe and read log events (`GetLogEvents`,
+      `FilterLogEvents`), all on `*` (read from IAM, 2026-11-25). So it is CloudWatch Logs
+      only, but not write-only. It reaches no bucket, key, queue, database or tenant data.
+    - To misuse it, another account would have to make this role its own API Gateway
+      logging role. Setting that needs `iam:PassRole` on the role (CloudFormation's schema
+      for `AWS::ApiGateway::Account` lists `apigateway:PATCH`, `iam:GetRole` and
+      `iam:PassRole`; `aws cloudformation describe-type`, 2026-11-25), and IAM lets a
+      principal pass only a role of its own account. The `UpdateAccount` API page does not
+      state the requirement itself.
+    - API Gateway checks the role when it is set, and that call carries the source account
+      (ours passed `StringEquals`), so another account's would still be refused.
+  - **What decides it** (owner): deploy, run the isolation suite, then
+    `uv run scripts/check_deployment.py`.
+    - Entries arrive: the cause is proven and the change stays.
+    - None arrive: put the condition back exactly as it was (`_service_trust`), say whether
+      a stage redeploy could matter, and prepare the evidence for an AWS Support case.
+    - **Outcome: pending.**
+  - Until it is fixed, API Gateway's own record of a call (caller, integration status) does
+    not exist, and `uv run scripts/check_deployment.py` fails on this log.
+- **`uv run scripts/check_deployment.py`** (owner's request, 2026-11-25; read-only). For
+  every resource with the stack's tags it reads where the logs are configured to go, from
+  the resource itself, and fails if a destination has received nothing. It also warns if the
+  account's Lambda concurrency limit is below what the pipeline needs (1,000: a full batch
+  is 200 PDFs and 200 companion files, each file's scan result runs the scan function and
+  the TSS's function together, plus 200 for everything else; **revisit
+  `CONCURRENCY_NEEDED` when the concurrency caps are decided**).
+  - First run (2026-11-25): 25 log destinations; 23 receiving; the TSS API's access log
+    `EMPTY` (fails); the break-glass log `not proven`.
+  - **The break-glass log is empty because the role has never been assumed** (the rule's
+    `MatchedEvents` is 0; CloudTrail has only the role's creation). So the rule, its log
+    and the `break-glass-assumed` alarm have never been seen to work in AWS (now on the
+    before-production list). An empty log whose source was idle is reported and fails only
+    with `--strict`; the owner keeps non-strict as the default (2026-11-25).
+  - A log whose source has no activity metric (an ECS task's, the flow log, WAF, Aurora) is
+    `EMPTY` until it has received something, so run the check after the isolation run.
+  - **A new kind of log destination in the stack needs a function in the script.** It
+    covers API Gateway access logs, Lambda, ECS, Step Functions, flow logs, WAF, Aurora's
+    exports, EventBridge rules that write to a log group, load balancer logs and CloudWatch
+    Logs deliveries (CloudFront). Not covered: API Gateway execution logs (none configured).
 
 Still not known:
 
@@ -1929,7 +2008,7 @@ Still not known:
   depend on it: any failed task with no `worker`/`running` event is waited out.
 - Whether GuardDuty holds every kind of password-protected PDF at the scan. It held both
   kinds tried (40-bit and 128-bit RC4); AES-encrypted PDFs were not tried.
-- Why the TSS API's access log is empty.
+- Why the TSS API's access log is empty: one candidate, not proven (above).
 
 Notes:
 
