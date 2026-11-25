@@ -150,7 +150,13 @@ class GoodSandbox:
         "no_new_privs": 1,
         "seccomp": 2,
     }
-    stopped = {"spin": "timeout", "memory": "out_of_memory", "flood": "too_much_output"}  # noqa: RUF012
+    # As on Fargate (2026-11-25): the kernel kills a spinning child at its CPU limit.
+    stopped = {  # noqa: RUF012
+        "spin": "signal_SIGKILL",
+        "sleep": "timeout",
+        "memory": "out_of_memory",
+        "flood": "too_much_output",
+    }
 
     def selftest(self, name: str, *, limits: Limits | None = None) -> runner.SelfTestResult:
         if name in self.stopped:
@@ -293,7 +299,10 @@ def test_every_check_passes_on_a_correct_system(world: World) -> None:
         "database: a grant that ends mid-session",
         "sandbox: the child cannot open a socket",
         "sandbox: the child cannot read the parent's memory",
-        "sandbox: a child that tries to memory is stopped",
+        "sandbox: a child that spins is stopped by the CPU limit",
+        "sandbox: a child that never finishes is stopped at the wall-clock timeout",
+        "sandbox: a child that tries to exhaust memory is stopped",
+        "sandbox: a child that floods its output is stopped",
         "inspection: opens a plain PDF and counts its pages",
         "inspection: holds a password-protected PDF (40-bit)",
         "inspection: holds a password-protected PDF (128-bit)",
@@ -424,10 +433,67 @@ def test_a_sandbox_that_is_not_confined_fails_its_check(
 
 def test_a_child_that_is_not_stopped_fails_its_check(world: World) -> None:
     class Unlimited(GoodSandbox):
-        stopped = {"spin": "timeout", "flood": "too_much_output"}  # noqa: RUF012
+        stopped = {  # noqa: RUF012
+            "spin": "signal_SIGKILL",
+            "sleep": "timeout",
+            "flood": "too_much_output",
+        }
 
     problems = failed(world.probe(world.prepare(), sandbox=Unlimited()).run())
-    assert any("tries to memory is stopped" in p for p in problems)
+    assert any("tries to exhaust memory is stopped" in p for p in problems)
+
+
+@pytest.mark.parametrize("signal", ["signal_SIGKILL", "signal_SIGXCPU"])
+def test_either_way_the_kernel_ends_a_process_at_its_cpu_limit_passes(
+    world: World, signal: str
+) -> None:
+    """The first run in AWS (2026-11-25) failed here: the check expected the wall-clock
+    timeout, and the kernel's CPU limit, which comes first, had done its job."""
+
+    class Kernel(GoodSandbox):
+        stopped = GoodSandbox.stopped | {"spin": signal}
+
+    assert failed(world.probe(world.prepare(), sandbox=Kernel()).run()) == []
+
+
+def test_each_time_limit_is_tried_where_only_it_can_stop_the_child(world: World) -> None:
+    seen: dict[str, Limits | None] = {}
+
+    class Watching(GoodSandbox):
+        def selftest(self, name: str, *, limits: Limits | None = None) -> runner.SelfTestResult:
+            seen[name] = limits
+            return super().selftest(name, limits=limits)
+
+    assert failed(world.probe(world.prepare(), sandbox=Watching()).run()) == []
+    spin, sleep = seen["spin"], seen["sleep"]
+    assert spin is not None and sleep is not None
+    # The spinning child: the CPU limit long before the wall clock.
+    assert spin.cpu_seconds * 5 <= spin.wall_seconds
+    # The waiting child: it uses no CPU time, so only the wall clock can end it.
+    assert sleep.wall_seconds * 5 <= sleep.cpu_seconds
+
+
+def test_a_cpu_limit_that_does_not_bite_fails_its_check(world: World) -> None:
+    """Without the CPU limit, a spinning child lasts until the wall clock: `timeout`, which
+    is not what this check accepts."""
+
+    class NoCpuLimit(GoodSandbox):
+        stopped = GoodSandbox.stopped | {"spin": "timeout"}
+
+    problems = failed(world.probe(world.prepare(), sandbox=NoCpuLimit()).run())
+    assert problems == [
+        "sandbox: a child that spins is stopped by the CPU limit: expected cpu_limit, was timeout"
+    ]
+
+
+def test_a_wall_clock_that_does_not_stop_a_waiting_child_fails_its_check(world: World) -> None:
+    class NoWallClock(GoodSandbox):
+        stopped = {k: v for k, v in GoodSandbox.stopped.items() if k != "sleep"}  # noqa: RUF012
+
+    problems = failed(world.probe(world.prepare(), sandbox=NoWallClock()).run())
+    assert any(
+        "stopped at the wall-clock timeout: expected timeout, was returned" in p for p in problems
+    )
 
 
 def test_the_probe_fails_when_nothing_can_be_reached(world: World) -> None:

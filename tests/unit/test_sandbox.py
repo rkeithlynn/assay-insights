@@ -307,6 +307,7 @@ CHILD_MAY_IMPORT = (
     "signal",
     "socket",
     "sys",
+    "time",
     "typing",
 )
 

@@ -18,6 +18,7 @@ import os
 import signal
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -122,8 +123,15 @@ def _report() -> dict[str, Any]:
 
 
 def _spin() -> dict[str, Any]:
+    """Uses the processor without end: only the CPU limit, or the wall clock, stops it."""
     while True:
         pass
+
+
+def _sleep() -> dict[str, Any]:
+    """Waits without end and uses no processor time: only the parent's wall clock stops it."""
+    while True:
+        time.sleep(3600)
 
 
 def _exhaust_memory() -> dict[str, Any]:
@@ -156,6 +164,7 @@ def _fork_bomb() -> dict[str, Any]:
 SELFTESTS = {
     "report": _report,
     "spin": _spin,
+    "sleep": _sleep,
     "memory": _exhaust_memory,
     "flood": _flood,
     "fork": _fork_bomb,

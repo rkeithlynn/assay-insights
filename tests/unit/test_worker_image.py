@@ -176,11 +176,15 @@ HOSTILE = """
 import json, sys
 from assay_workers.sandbox import runner
 from assay_workers.sandbox.confine import Limits
-limits = Limits(wall_seconds=4.0, cpu_seconds=3, address_space_bytes=512 * 1024**2, processes=8)
+from assay_workers.worker import probe as worker_probe
+short = Limits(wall_seconds=4.0, cpu_seconds=3, address_space_bytes=512 * 1024**2, processes=8)
+# The probe's own limits for the two time checks: only one of the two can be reached.
+limits = {"spin": worker_probe.CPU_LIMITED, "sleep": worker_probe.WALL_LIMITED}
 results = {}
 for probe in sys.argv[1:]:
     try:
-        results[probe] = {"returned": runner.selftest(probe, limits=limits).model_dump()}
+        chosen = limits.get(probe, short)
+        results[probe] = {"returned": runner.selftest(probe, limits=chosen).model_dump()}
     except runner.SandboxError as exc:
         results[probe] = {"error": type(exc).__name__, "reason": exc.reason}
 print(json.dumps(results))
@@ -190,16 +194,25 @@ print(json.dumps(results))
 @pytest.fixture(scope="module")
 def hostile(image: str) -> dict[str, Any]:
     result: dict[str, Any] = as_the_task(
-        image, HOSTILE, arguments=("spin", "memory", "flood", "fork")
+        image, HOSTILE, arguments=("spin", "sleep", "memory", "flood", "fork")
     )
     return result
 
 
-def test_a_child_that_never_finishes_is_killed_at_the_limit(hostile: dict[str, Any]) -> None:
-    # The CPU limit (SIGXCPU or SIGKILL from the kernel) or the parent's wall clock,
-    # whichever comes first: either way it is stopped and nothing it wrote is used.
-    assert hostile["spin"]["error"] in ("SandboxTimeout", "SandboxKilled")
-    assert hostile["spin"]["reason"] in ("timeout", "signal_SIGXCPU", "signal_SIGKILL")
+def test_a_child_that_spins_is_killed_by_the_kernel_at_its_cpu_limit(
+    hostile: dict[str, Any],
+) -> None:
+    """With the wall clock far off, only the CPU limit can be what stopped it: the kernel's
+    SIGKILL at the hard limit (which is also the soft one), never the parent's timeout."""
+    assert hostile["spin"]["error"] == "SandboxKilled"
+    assert hostile["spin"]["reason"] in ("signal_SIGKILL", "signal_SIGXCPU")
+
+
+def test_a_child_that_only_waits_is_killed_by_the_parent_at_the_wall_clock(
+    hostile: dict[str, Any],
+) -> None:
+    """It uses no CPU time, so only the parent's wall clock can be what stopped it."""
+    assert hostile["sleep"] == {"error": "SandboxTimeout", "reason": "timeout"}
 
 
 def test_a_child_that_tries_to_exhaust_memory_is_stopped(hostile: dict[str, Any]) -> None:

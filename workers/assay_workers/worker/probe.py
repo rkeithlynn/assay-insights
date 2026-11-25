@@ -24,9 +24,10 @@ Checked (owner conditions b and c, 2026-11-24):
   nothing from then on.
 - **Sandbox.** The child runs as the sandbox user with an empty environment and no AWS or
   database library loaded; it cannot open a socket, read the parent's environment or
-  memory, start a program or write a file; it is stopped at the timeout, the memory limit
-  and the output limit. The parent has exactly CAP_SETUID, CAP_SETGID and CAP_KILL, and a
-  read-only root filesystem.
+  memory, start a program or write a file; it is stopped at the CPU limit (a child that
+  spins), the wall-clock timeout (one that only waits), the memory limit and the output
+  limit, each tried where only that limit can be what stops it. The parent has exactly
+  CAP_SETUID, CAP_SETGID and CAP_KILL, and a read-only root filesystem.
 - **Inspection.** The real `inspect` job, in that sandbox, on four synthetic files
   (`probe_files`): a plain PDF opens with its three pages; each of two password-protected
   PDFs (40-bit and 128-bit) is reported `pdf_encrypted`, which is what puts a document on
@@ -79,6 +80,14 @@ DEFAULT_WORK_DIR = "/work"
 NOT_A_PDF = b"%PDF-1.7 " + bytes(range(256)) * 8
 END_WAIT_SECONDS = 240
 SHORT = Limits(wall_seconds=5.0, cpu_seconds=4, address_space_bytes=512 * 1024**2)
+# Each of the two time limits is tried where only it can be the one that stops the child:
+# a child that spins, with the wall clock far off, and one that waits, using no CPU time.
+CPU_LIMITED = Limits(wall_seconds=30.0, cpu_seconds=2, address_space_bytes=512 * 1024**2)
+WALL_LIMITED = Limits(wall_seconds=3.0, cpu_seconds=30, address_space_bytes=512 * 1024**2)
+# How the kernel ends a process at its CPU limit: SIGKILL at the hard limit, which is also
+# the soft one here (SIGXCPU, had the soft limit been lower).
+CPU_LIMIT_SIGNALS = frozenset({"signal_SIGKILL", "signal_SIGXCPU"})
+CPU_LIMIT = "cpu_limit"
 
 
 @dataclass(frozen=True)
@@ -408,17 +417,26 @@ class Probe:
                 DENIED,
                 DENIED if value not in (None, "allowed") else str(value),
             )
-        for probe, expected in (
-            ("spin", "timeout"),
-            ("memory", "out_of_memory"),
-            ("flood", "too_much_output"),
+        for name, probe, limits, expected in (
+            ("that spins is stopped by the CPU limit", "spin", CPU_LIMITED, CPU_LIMIT),
+            (
+                "that never finishes is stopped at the wall-clock timeout",
+                "sleep",
+                WALL_LIMITED,
+                "timeout",
+            ),
+            ("that tries to exhaust memory is stopped", "memory", SHORT, "out_of_memory"),
+            ("that floods its output is stopped", "flood", SHORT, "too_much_output"),
         ):
             try:
-                self.sandbox.selftest(probe, limits=SHORT)
+                self.sandbox.selftest(probe, limits=limits)
                 outcome = "returned"
             except runner.SandboxError as exc:
                 outcome = exc.reason
-            self.check(f"sandbox: a child that tries to {probe} is stopped", expected, outcome)
+            if expected == CPU_LIMIT and outcome in CPU_LIMIT_SIGNALS:
+                # Killed by the kernel before the parent's wall clock: the CPU limit.
+                outcome = CPU_LIMIT
+            self.check(f"sandbox: a child {name}", expected, outcome)
 
     def inspect_checks(self) -> None:
         """The inspection job itself, in the sandbox, on files whose answers are known."""

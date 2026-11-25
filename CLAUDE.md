@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) built, not deployed. See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run passed but for one check that was itself wrong (fixed; redeploy and re-run pending); browser checks pending. See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -1607,8 +1607,16 @@ Owner decisions (2026-11-24):
 
 #### Stage 1, part 1: the worker task, the attempt grant, the sandbox, `app_worker`
 
-Built on `build-step-6`; **not deployed**. `pulumi preview` (2026-11-25): 18 to create, 15 to
-update, 11 to replace, 311 unchanged.
+Deployed on 2026-11-25 from commit 4518d32 (owner). Stack update 31 failed after creating 15
+resources (its error was not kept; the history holds none); update 32 made the rest. A
+preview straight after showed 355 unchanged. `uv run scripts/migrate.py` moved Aurora to
+revision `0010`; `--command verify` (read-only, 2026-11-25) reported `0010`,
+`rls_verified: true`, `roles_verified: true`. All 20 alarms `OK` (the new one is
+`assay-dev-pipeline-worker-errors`).
+
+Deployed names: cluster `assay-dev-pipeline-worker`, task definition family
+`assay-dev-pipeline-worker`, log group `/aws/ecs/assay-dev-pipeline-worker` (streams
+`worker/worker/<task id>`).
 
 How it works:
 
@@ -1737,27 +1745,57 @@ Tests:
 - `tests/unit/test_worker_probe.py`: the isolation probe passes every check on a correct
   system and fails the right one when what it guards is broken. That includes its four
   `inspection:` checks (see "A password-protected upload may never reach the worker").
-- **Not yet run in AWS** (condition b): `scripts/run_isolation.py` now also runs the worker
-  task with `WORKER_COMMAND=probe`. The isolation Lambda prepares three fixture documents
-  with fixed IDs in the two test tenants (`tests/isolation/worker_fixture.py`), each with a
-  small object at its `originals/` key (written once, kept by Object Lock), and ends one
-  grant while the probe watches. The fixture documents are `discarded` between runs and have
-  a `start` event, so the pipeline never queues them. They do have `documents` rows, unlike
-  the reserved ID.
+- **In AWS** (condition b): `scripts/run_isolation.py` also runs the worker task with
+  `WORKER_COMMAND=probe`. The isolation Lambda prepares three fixture documents with fixed
+  IDs in the two test tenants (`tests/isolation/worker_fixture.py`), each with a small
+  object at its `originals/` key (written once, kept by Object Lock), and ends one grant
+  while the probe watches. The fixture documents are `discarded` between runs and have a
+  `start` event, so the pipeline never queues them. They do have `documents` rows, unlike
+  the reserved ID. In Isolation Test A they are `955f3e3d-f39a-5962-bc37-4b37ae1a44c6` (the
+  probe's own) and its sibling.
 
-Not verified until deployed:
+First isolation run after the deploy (owner, 2026-11-25, 11:33 UTC):
 
-- That the seccomp filter and the switch of user work on Fargate as they do under Docker
-  (the probe checks both).
-- That a Fargate task's effective capabilities are exactly the three (the probe reads
-  `CapEff`, `CapPrm` and `CapBnd`).
+- 71 of 71 in the isolation Lambda (the two new ones: `/resolve-worker` refuses the runner;
+  worker access cannot be asked for by name), 28 of 28 in the provisioning role's probe, 7
+  of 7 Cognito client checks.
+- **Worker probe: 64 of 65.** Every TSS, storage, database, confinement, inspection and
+  capability check held. The one failure was the check, not the sandbox: "a child that
+  tries to spin is stopped" expected the parent's wall-clock `timeout` and got
+  `signal_SIGKILL`. Its limits were 5 seconds of wall clock and 4 of CPU, so the kernel's CPU
+  limit ended the spinning child first, as it should (with the soft and hard limits equal,
+  the kernel sends SIGKILL, not SIGXCPU). The image test had accepted either ending, and
+  the unit test's stand-in answered `timeout`, so neither caught the wrong expectation. It
+  also meant the wall-clock timeout itself was never shown on Fargate.
+- **Fix (same day):** two checks, each with limits only one of which can be reached: a
+  child that spins, with the wall clock far off, must be ended by the kernel (`cpu_limit`);
+  a child that only waits (`sleep`, no CPU time) must be ended by the parent
+  (`timeout`). The image test now requires exactly those. **Lesson: a check that accepts
+  several endings hides which mechanism worked; give each mechanism a case only it can
+  end.** Needs a `pulumi up` (new worker image) and a second isolation run.
+
+Settled by that run and the deploy:
+
+- The switch of user and the seccomp filter work on Fargate as under Docker: the child ran
+  as uid 10002 with no groups, an empty environment and `Seccomp: 2`, and was refused a
+  socket, the parent's environment and memory, `exec` and every write.
+- The task's main process has exactly CAP_KILL, CAP_SETGID and CAP_SETUID: `CapEff`,
+  `CapPrm` and `CapBnd` all `00000000000000e0`, on a read-only root filesystem.
+- The task definition's container definition round-trips: 34 names in `drop`, and the
+  preview after the deploy showed no difference.
+- The real inspection job, on Fargate: the plain PDF opened with 3 pages; the 40-bit and
+  128-bit protected PDFs were both `pdf_encrypted`; the broken file was `not_a_pdf`.
+- A session whose grant ended while it was connected saw its document, then nothing.
+- **A worker task starts in about 18 seconds** (the probe task: created 11:33:03, image
+  pulled in 6 seconds, started 11:33:21 UTC), not the 30 to 90 estimated.
+
+Still not known:
+
 - How a RunTask refused for the vCPU quota reaches Step Functions. The design does not
   depend on it: any failed task with no `worker`/`running` event is waited out.
-- A worker task's start-up time (estimated 30 to 90 seconds).
-- That the task definition's container definition round-trips with no preview difference
-  (34 capability names in `drop`; ECS may store them in another order). The names are the
-  ones the ECS API reference lists (KernelCapabilities, read 2026-11-25), which states no
-  Fargate limit on `drop`.
+- Whether GuardDuty holds every kind of password-protected PDF at the scan (see the note
+  below; `07-password-protected-128.pdf` is the one to try).
+- The browser checks: a fresh upload reaching Inspection: Passed.
 
 Notes:
 
