@@ -1353,11 +1353,56 @@ Notes:
   shown (kept per browser in localStorage). Audit history's Time column drops the year when
   it is this year's, so the table still fits at 1280 px beside the wider navigation.
 - **Browser-check files:** `uv run scripts/make_test_files.py` writes synthetic ones to
-  `.test-files/` (git-ignored). **The EICAR test file is never written by a script or kept in
-  the repository**: Windows Defender removes it on save, and a copy in the tree would flag
-  the repository. For the quarantine check the owner makes it by hand in one folder excluded
-  from Defender for the length of the check, then deletes the folder and removes the
-  exclusion (commands in the build step 6 hand-over). Never exclude a broader path.
+  `.test-files/` (git-ignored), including `06-not-a-pdf.pdf` (plain text: `failed`,
+  `not_a_pdf`). **The EICAR test file is never written to disk or kept in the repository.**
+  The owner's machine runs SentinelOne (Defender is off), which removes it on write, and the
+  owner adds no exclusions. `scripts/ingest_check.py eicar` assembles it in memory from a
+  masked form (each byte plus one, as hex) and uploads it through the normal API and
+  presigned link. `test_ingest_check.py` checks the masked form hashes to EICAR's published
+  SHA-256 one byte at a time, and that no tracked or untracked file holds the string. Run the
+  `eicar` case in AWS CloudShell, where SentinelOne is not involved. A quarantine raises
+  GuardDuty's own `Object:S3/MaliciousFile` finding (organization GuardDuty and Security
+  Hub); the pipeline raises no alarm for it.
+- **`scripts/ingest_check.py`** (owner decisions A3 and F, 2026-11-24) signs in with the
+  access token of the owner's portal tab, pasted at a hidden prompt (never echoed, logged,
+  stored or on a command line), refuses any tenant but `--tenant`, prints the tenant's name
+  and asks before creating anything. It calls only the portal's routes, through CloudFront,
+  so production code has no special case for it. Standard library only and Python 3.9+, so
+  it runs in CloudShell as well.
+- **Companion files are never left out for their content** (owner decisions A1 and A2,
+  2026-11-24). The portal uploads every companion of the right size and name. What it can see
+  is shown at once, and the scan Lambda's full list replaces that after the scan.
+  `companion.validate` checks every key and reports every problem (`CompanionError.errors`,
+  at most 50). A problem with the file as a whole still stops the check: too large, not
+  UTF-8, nested, not JSON, not one object, or a key twice. The PDF shows "Companion
+  rejected". The API still refuses to close while a companion is invalid. The portal's Close
+  asks, for each such PDF: fix the companion (the rejected one is removed and a corrected one
+  can be added under the same name), remove the PDF, or close without the companion. Each is
+  an existing file removal; no route or permission was added. Attaching or replacing a
+  companion after ingestion (A4) belongs to the second half's reprocessing design.
+- **Idle timeout** (owner decision, 2026-11-24): stack config `portalIdleTimeoutMinutes` (30;
+  5 to 480) reaches the portal in `config.json` as `idleTimeoutMinutes`.
+  - `portal/src/idle.ts` watches clicks, keys, wheel, touch and scroll in every tab. Tabs
+    share their last activity on the BroadcastChannel `assay-portal-activity`, at most every
+    15 seconds; pointer movement alone does not count.
+  - A warning shows 2 minutes before. Then exactly one tab, the first to take the Web Lock
+    `assay-portal-idle-sign-out`, signs out as the Sign out button does, other tabs included.
+    It records `sign_out` with `detail.reason: "idle_timeout"` and `idle_minutes`; a manual
+    sign-out records `reason: "user"`. The other tabs show why.
+  - A tab that timed out but did not get the lock waits 10 seconds for the other tab's
+    message, then ends its own session (with no second audit row).
+  - Hidden tabs have slowed timers, so they can sign out up to about a minute late.
+  - Refresh tokens still last 8 hours.
+- **Cognito refresh-token rotation (assessed, not built, 2026-11-24).** It is available on
+  the Essentials plan these pools use. With it on, every refresh returns a new refresh token
+  and invalidates the old one (a grace period of 0 to 60 seconds for retries). The new token
+  is valid only for the remainder of the original's lifetime, so sessions still end 8 hours
+  after the sign-in. It works through the `/oauth2/token` endpoint the portal uses, and
+  oidc-client-ts keeps the new token. It requires removing `ALLOW_REFRESH_TOKEN_AUTH` from the
+  clients' explicit auth flows ("You can't authenticate with REFRESH_TOKEN_AUTH in app clients
+  with refresh token rotation enabled"). It adds `jti` and `origin_jti` claims to access and ID
+  tokens. A stolen refresh token stops working once the portal has refreshed, or the portal's
+  own refresh fails if the thief refreshed first.
 - **`update_tenants.py` is guarded** (owner's request, 2026-11-24): each tenant is previewed
   first and updated only if every planned change is in `update.ALLOWED_CHANGES` (build step
   6: create `bucket-cors`; update `malware-protection`'s `protectedResource`), then with

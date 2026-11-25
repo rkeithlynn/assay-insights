@@ -16,7 +16,8 @@
  * A tab that is closed or offline when the message is sent never hears it, and keeps its
  * refresh token until it expires or an admin action (disable, MFA reset) revokes it.
  *
- * The message carries no data. Each tab keeps one channel, which it both sends and listens
+ * The message carries only the reason (`user` or `idle_timeout`), so the other tabs' sign-in
+ * screens can say why. Each tab keeps one channel, which it both sends and listens
  * on: a channel does not deliver its own messages to itself, so the tab that signs out never
  * reacts to its own announcement.
  */
@@ -24,25 +25,28 @@
 export const SIGN_OUT_CHANNEL = "assay-portal-sign-out";
 const SIGNED_OUT = "signed-out";
 
+/** Why a tab signed out: the Sign out button, or the idle timeout (idle.ts). */
+export type SignOutReason = "user" | "idle_timeout";
+
 export interface SignOutChannel {
-  /** Tell the other tabs that this one signed out. */
-  announce(): void;
+  /** Tell the other tabs that this one signed out, and why. */
+  announce(reason?: SignOutReason): void;
   close(): void;
 }
 
-export function signOutChannel(onSignedOutElsewhere: () => void): SignOutChannel {
+export function signOutChannel(onSignedOutElsewhere: (reason: SignOutReason) => void): SignOutChannel {
   if (typeof BroadcastChannel === "undefined") {
     return { announce: () => undefined, close: () => undefined };
   }
   const channel = new BroadcastChannel(SIGN_OUT_CHANNEL);
   channel.onmessage = (event: MessageEvent<unknown>) => {
-    const data = event.data as { type?: unknown } | null;
-    if (data?.type === SIGNED_OUT) onSignedOutElsewhere();
+    const data = event.data as { type?: unknown; reason?: unknown } | null;
+    if (data?.type === SIGNED_OUT) onSignedOutElsewhere(data.reason === "idle_timeout" ? "idle_timeout" : "user");
   };
   return {
-    announce: () => {
+    announce: (reason: SignOutReason = "user") => {
       try {
-        channel.postMessage({ type: SIGNED_OUT });
+        channel.postMessage({ type: SIGNED_OUT, reason });
       } catch {
         // A closed channel: nothing to tell.
       }

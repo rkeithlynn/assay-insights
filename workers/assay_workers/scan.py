@@ -150,7 +150,8 @@ def clean_outcome(
                 scan_result=event.result,
                 version_id=version,
                 error_code="companion_invalid",
-                error_detail=[exc.as_detail()],
+                # Every problem found (at most companion.MAX_ERRORS), codes and keys only.
+                error_detail=exc.details(),
             )
     return batches.ScanOutcome(status="clean", scan_result=event.result, version_id=version)
 

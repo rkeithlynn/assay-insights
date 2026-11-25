@@ -8,6 +8,7 @@ from typing import Any
 
 import pulumi
 import pulumi_aws as aws
+import pytest
 
 from assay_infra.auth import Auth
 from assay_infra.edge import (
@@ -270,13 +271,29 @@ def test_portal_config_lists_both_pools() -> None:
             platform_pool="p2",
             platform_client="c2",
             platform_domain="d2",
+            idle_timeout_minutes=30,
         )
     )
+    assert config["idleTimeoutMinutes"] == 30
     assert config["pools"]["platform"] == {
         "userPoolId": "p2",
         "clientId": "c2",
         "loginUrl": "https://d2.auth.us-east-1.amazoncognito.com",
     }
+
+
+def test_the_portal_idle_timeout_is_checked() -> None:
+    from assay_infra.config import EdgeConfig, validate_edge
+
+    assert validate_edge(EdgeConfig(waf_rate_limit=1000, portal_idle_minutes=30))
+    for minutes in (4, 481):
+        with pytest.raises(ValueError, match="portalIdleTimeoutMinutes"):
+            validate_edge(EdgeConfig(waf_rate_limit=1000, portal_idle_minutes=minutes))
+
+
+def test_the_dev_stack_sets_a_30_minute_idle_timeout() -> None:
+    stack = (Path(__file__).resolve().parents[2] / "infra" / "Pulumi.dev.yaml").read_text()
+    assert 'assay-platform:portalIdleTimeoutMinutes: "30"' in stack
 
 
 def test_portal_source_hash_ignores_build_output(tmp_path: Path) -> None:

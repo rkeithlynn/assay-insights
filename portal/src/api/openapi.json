@@ -1687,6 +1687,36 @@
         "title": "SettingsModels",
         "type": "object"
       },
+      "SignedOut": {
+        "additionalProperties": false,
+        "description": "Why the portal signed the user out: the Sign out button (`user`), or no activity in\nany of its tabs for the portal's idle timeout (`idle_timeout`, owner decision 2026-11-24).\nThe reason is the portal's report, like the rest of this row.",
+        "properties": {
+          "idle_minutes": {
+            "anyOf": [
+              {
+                "maximum": 1440.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Minutes"
+          },
+          "reason": {
+            "default": "user",
+            "enum": [
+              "user",
+              "idle_timeout"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "SignedOut",
+        "type": "object"
+      },
       "TenantChange": {
         "additionalProperties": false,
         "properties": {
@@ -2891,9 +2921,36 @@
     "/api/auth/signed-out": {
       "post": {
         "operationId": "signed_out_api_auth_signed_out_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SignedOut"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [

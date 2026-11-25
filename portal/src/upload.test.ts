@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { companionErrorText, matchText } from "./pages/Upload";
+import { companionErrorLines, companionErrorText, matchText, pdfFor, rejectedCompanions } from "./pages/Upload";
 import { anyInProgress, errorText, formatBytes, formatDuration } from "./pages/ingestionFormat";
-import { chunks, classify, COMPANION_MAX_BYTES, localProblem, putFile, runLimited, sha256Hex } from "./upload";
+import {
+  chunks,
+  classify,
+  COMPANION_MAX_BYTES,
+  companionWarnings,
+  localProblem,
+  putFile,
+  runLimited,
+  sha256Hex,
+} from "./upload";
 
 const TENANT = "7f3a91c2-0000-4000-8000-000000000001";
 
@@ -23,20 +32,37 @@ describe("classify", () => {
 });
 
 describe("localProblem", () => {
-  it("accepts a PDF and a companion file with this tenant's ID", async () => {
-    expect(await localProblem(file("a.pdf", "%PDF-1.7"), TENANT)).toBeNull();
-    expect(await localProblem(file("a.json", JSON.stringify({ TenantID: TENANT })), TENANT)).toBeNull();
-    expect(await localProblem(file("a.json", JSON.stringify({ tenantid: TENANT.toUpperCase() })), TENANT)).toBeNull();
+  it("accepts a PDF and any companion file of the right size", () => {
+    expect(localProblem(file("a.pdf", "%PDF-1.7"))).toBeNull();
+    expect(localProblem(file("a.json", JSON.stringify({ TenantID: TENANT })))).toBeNull();
+    // A companion file is never left out for its content (owner decision A1).
+    expect(localProblem(file("a.json", "{not json"))).toBeNull();
+    expect(localProblem(file("a.json", JSON.stringify({ TenantID: "other" })))).toBeNull();
   });
 
-  it("explains what is wrong", async () => {
-    expect(await localProblem(file("a.docx", "x"), TENANT)).toMatch(/Only PDF/);
-    expect(await localProblem(file("a.pdf", ""), TENANT)).toMatch(/empty/);
-    expect(await localProblem(file("a.pdf", "x", 100 * 1024 * 1024 + 1), TENANT)).toMatch(/100 MB/);
-    expect(await localProblem(file("a.json", "{}", COMPANION_MAX_BYTES + 1), TENANT)).toMatch(/64 KB/);
-    expect(await localProblem(file("a.json", "{not json"), TENANT)).toMatch(/not valid JSON/);
-    expect(await localProblem(file("a.json", "[1]"), TENANT)).toMatch(/one JSON object/);
-    expect(await localProblem(file("a.json", JSON.stringify({ TenantID: "other" })), TENANT)).toMatch(/TenantID/);
+  it("explains what keeps a file out", () => {
+    expect(localProblem(file("a.docx", "x"))).toMatch(/Only PDF/);
+    expect(localProblem(file("a.pdf", ""))).toMatch(/empty/);
+    expect(localProblem(file("a.pdf", "x", 100 * 1024 * 1024 + 1))).toMatch(/100 MB/);
+    expect(localProblem(file("a.json", "{}", COMPANION_MAX_BYTES + 1))).toMatch(/64 KB/);
+  });
+});
+
+describe("companionWarnings", () => {
+  it("is empty for a file with this tenant's ID", async () => {
+    expect(await companionWarnings(file("a.json", JSON.stringify({ TenantID: TENANT })), TENANT)).toEqual([]);
+    expect(await companionWarnings(file("a.json", JSON.stringify({ tenantid: TENANT.toUpperCase() })), TENANT)).toEqual([]);
+  });
+
+  it("lists every problem it can see at once", async () => {
+    const body = JSON.stringify({ TenantID: "other", Note: { a: 1 }, List: [1] });
+    expect(await companionWarnings(file("a.json", body), TENANT)).toEqual([
+      "TenantID is not this organization's ID",
+      "Note must be text, a number or true/false",
+      "List must be text, a number or true/false",
+    ]);
+    expect(await companionWarnings(file("a.json", "{not json"), TENANT)).toEqual(["The file is not valid JSON"]);
+    expect(await companionWarnings(file("a.json", "[1]"), TENANT)).toEqual(["The file must be one JSON object"]);
   });
 });
 
@@ -125,6 +151,28 @@ describe("labels", () => {
     expect(matchText({ ...base, kind: "pdf", matched: true })).toBe("Companion file matched");
     expect(matchText({ ...base, kind: "pdf", matched: false })).toBe("No companion file");
     expect(matchText({ ...base, kind: "companion", matched: false })).toBe("No PDF with this name");
+  });
+
+  it("flags a PDF whose companion file was rejected (owner decision A1)", () => {
+    const base = { size_bytes: 1, error_code: null, errors: [], document_id: null, registered_at: "", scanned_at: null, matched: true };
+    const pdf = { ...base, id: "1", name: "Smith.pdf", kind: "pdf" as const, status: "clean" };
+    const bad = { ...base, id: "2", name: "smith.json", kind: "companion" as const, status: "invalid" };
+    const other = { ...base, id: "3", name: "jones.pdf", kind: "pdf" as const, status: "clean" };
+    const files = [pdf, bad, other];
+    expect(matchText(pdf, files)).toBe("Companion rejected");
+    expect(matchText(bad, files)).toBe("Rejected");
+    expect(matchText(other, files)).toBe("Companion file matched");
+    expect(rejectedCompanions(files)).toEqual([bad]);
+    expect(pdfFor(bad, files)).toBe(pdf);
+  });
+
+  it("lists every companion problem on its own line (owner decision A2)", () => {
+    expect(
+      companionErrorLines([
+        { code: "tenant_mismatch", key: "TenantID" },
+        { code: "must_be_a_date", key: "CreateDate" },
+      ]),
+    ).toEqual(["TenantID is not this organization's ID", "CreateDate must be a date (YYYY-MM-DD)"]);
   });
 
   it("formats sizes, durations and error codes", () => {

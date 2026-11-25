@@ -11,6 +11,7 @@ const POOL: ActivePool = {
   userPoolId: "us-east-1_T",
   clientId: "tenant-client",
   loginUrl: "https://login.example.test",
+  idleTimeoutMinutes: 30,
 };
 
 afterEach(() => {

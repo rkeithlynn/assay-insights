@@ -76,6 +76,9 @@ class TenancyConfig:
 class EdgeConfig:
     # AWS WAF rate-based rule: requests per IP address in any 5-minute window.
     waf_rate_limit: int
+    # The portal signs a user out after this many minutes without activity in any of its
+    # tabs (owner decision, 2026-11-24). Both hosts; written to config.json.
+    portal_idle_minutes: int = 30
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,8 @@ def validate_alerts(cfg: AlertsConfig) -> AlertsConfig:
 
 # AWS WAF's lowest rate limit is 10; anything under 100 would lock out a normal user.
 WAF_RATE_LIMIT_RANGE = (100, 20_000_000)
+# Longer than the 2-minute warning; shorter than the 8-hour refresh token.
+PORTAL_IDLE_MINUTES_RANGE = (5, 480)
 _PROFILE_ID = re.compile(r"^us\.[a-z0-9][a-z0-9.:-]{2,200}$")
 
 
@@ -179,6 +184,9 @@ def validate_edge(cfg: EdgeConfig) -> EdgeConfig:
     low, high = WAF_RATE_LIMIT_RANGE
     if not low <= cfg.waf_rate_limit <= high:
         raise ValueError(f"wafRateLimit must be between {low} and {high}")
+    low, high = PORTAL_IDLE_MINUTES_RANGE
+    if not low <= cfg.portal_idle_minutes <= high:
+        raise ValueError(f"portalIdleTimeoutMinutes must be between {low} and {high}")
     return cfg
 
 
@@ -261,7 +269,12 @@ def load_config() -> PlatformConfig:
             )
         ),
         alerts=validate_alerts(AlertsConfig(email=conf.require("alarmEmail"))),
-        edge=validate_edge(EdgeConfig(waf_rate_limit=conf.require_int("wafRateLimit"))),
+        edge=validate_edge(
+            EdgeConfig(
+                waf_rate_limit=conf.require_int("wafRateLimit"),
+                portal_idle_minutes=conf.require_int("portalIdleTimeoutMinutes"),
+            )
+        ),
         models=build_models(
             conf.require_object("aiModels"),
             conf.require("defaultIngestModel"),

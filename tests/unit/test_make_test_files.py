@@ -75,8 +75,21 @@ def test_the_protected_pdf_needs_its_password(
 def test_the_valid_companion_is_valid_and_the_invalid_one_is_not(made: dict[str, bytes]) -> None:
     valid = companion.validate(made["04-with-companion.json"], tenant_id=TENANT)
     assert valid.tenant_id == TENANT and valid.loan_term_months == 360
-    with pytest.raises(companion.CompanionError):
+    with pytest.raises(companion.CompanionError) as raised:
         companion.validate(made["05-invalid-companion.json"], tenant_id=TENANT)
+    # Every problem at once (owner decision A2).
+    assert [d["code"] for d in raised.value.details()] == [
+        "tenant_mismatch",
+        "must_be_a_date",
+        "must_be_a_whole_number",
+        "out_of_range",
+    ]
+
+
+def test_the_not_a_pdf_file_fails_fingerprint(made: dict[str, bytes], tmp_path: Path) -> None:
+    path = tmp_path / "not.pdf"
+    path.write_bytes(made["06-not-a-pdf.pdf"])
+    assert inspect_pdf(path) == ("not_a_pdf", None)
 
 
 def test_without_a_tenant_id_the_valid_companion_has_none(script: ModuleType) -> None:

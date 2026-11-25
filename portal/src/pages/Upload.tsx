@@ -8,6 +8,13 @@
  * matches a PDF, and it holds a PDF (the API decides; this screen shows why not). It closes
  * by itself after 24 hours. While files wait for their malware scan, the batch is read again
  * every few seconds.
+ *
+ * A companion file is never left out for its content (owner decision A1, 2026-11-24): it is
+ * uploaded, what this page can see is shown at once, and the pipeline's full list of problems
+ * replaces it after the scan. Its PDF shows "Companion rejected". Close then asks, for each
+ * such PDF: fix the companion file (it is removed so a corrected one can be added), remove
+ * the PDF, or close without the companion. Each choice is a file removal the API already
+ * offers; the API still refuses to close while an invalid companion file is in the batch.
  */
 
 import Alert from "@cloudscape-design/components/alert";
@@ -21,7 +28,9 @@ import Form from "@cloudscape-design/components/form";
 import FormField from "@cloudscape-design/components/form-field";
 import Header from "@cloudscape-design/components/header";
 import Input from "@cloudscape-design/components/input";
+import Modal from "@cloudscape-design/components/modal";
 import ProgressBar from "@cloudscape-design/components/progress-bar";
+import RadioGroup from "@cloudscape-design/components/radio-group";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import StatusIndicator, { type StatusIndicatorProps } from "@cloudscape-design/components/status-indicator";
 import Table from "@cloudscape-design/components/table";
@@ -33,7 +42,7 @@ import { Confirm, type ConfirmRequest } from "../components/Confirm";
 import { RowActions } from "../components/RowActions";
 import { messageFor } from "../errors";
 import { useSession } from "../session";
-import { chunks, localProblem, putFile, runLimited, sha256Hex } from "../upload";
+import { chunks, classify, companionWarnings, localProblem, putFile, runLimited, sha256Hex } from "../upload";
 import { fileProblemText, formatBytes } from "./ingestionFormat";
 
 // While any file waits for its scan, read the batch again this often.
@@ -81,18 +90,54 @@ const PROBLEM_TEXT: Record<string, string> = {
   companion_unmatched: "has no PDF with the same name",
 };
 
-export function companionErrorText(errors: FileOut["errors"]): string {
-  return errors
-    .map((e) => {
-      const text = COMPANION_ERRORS[e.code] ?? e.code.replaceAll("_", " ");
-      return e.key ? `${e.key} ${text}` : text;
-    })
-    .join("; ");
+/** Every problem with a companion file, one line each (owner decision A2, 2026-11-24). */
+export function companionErrorLines(errors: FileOut["errors"]): string[] {
+  return errors.map((e) => {
+    const text = COMPANION_ERRORS[e.code] ?? e.code.replaceAll("_", " ");
+    return e.key ? `${e.key} ${text}` : text;
+  });
 }
 
-export function matchText(file: FileOut): string {
-  if (file.kind === "pdf") return file.matched ? "Companion file matched" : "No companion file";
+export function companionErrorText(errors: FileOut["errors"]): string {
+  return companionErrorLines(errors).join("; ");
+}
+
+function baseName(file: FileOut): string {
+  return classify(file.name)?.base ?? file.name.toLowerCase();
+}
+
+/** The PDF a companion file belongs to (same name), if it is in the batch. */
+export function pdfFor(companion: FileOut, files: FileOut[]): FileOut | undefined {
+  return files.find((f) => f.kind === "pdf" && baseName(f) === baseName(companion));
+}
+
+/** The companion files the pipeline found invalid. Each keeps the batch from closing. */
+export function rejectedCompanions(files: FileOut[]): FileOut[] {
+  return files.filter((f) => f.kind === "companion" && f.status === "invalid");
+}
+
+export function matchText(file: FileOut, files: FileOut[] = []): string {
+  if (file.kind === "pdf") {
+    if (rejectedCompanions(files).some((c) => baseName(c) === baseName(file))) return "Companion rejected";
+    return file.matched ? "Companion file matched" : "No companion file";
+  }
+  if (file.status === "invalid") return "Rejected";
   return file.matched ? "Matches its PDF" : "No PDF with this name";
+}
+
+/** What to do with each PDF whose companion file was rejected (owner decision A1). */
+export type RejectedChoice = "fix" | "remove_pdf" | "without";
+
+const BULLETS = { margin: 0, paddingLeft: "1.2em" } as const;
+
+function Lines({ lines }: { lines: string[] }) {
+  return (
+    <ul style={BULLETS}>
+      {lines.map((line, i) => (
+        <li key={i}>{line}</li>
+      ))}
+    </ul>
+  );
 }
 
 interface Local {
@@ -112,6 +157,11 @@ export function Upload() {
   const [rejected, setRejected] = useState<{ name: string; problem: string }[]>([]);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [selected, setSelected] = useState<File[]>([]);
+  // What this page saw wrong with a companion file before its scan, by file ID.
+  const [early, setEarly] = useState<Record<string, string[]>>({});
+  // The Close dialog: a choice for each PDF whose companion file was rejected.
+  const [choosing, setChoosing] = useState<Record<string, RejectedChoice> | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // The caller's open batch (or the one given), with its files; null when there is none.
   const fetchBatch = useCallback(
@@ -180,10 +230,18 @@ export function Upload() {
     setSelected([]);
     const problems: { name: string; problem: string }[] = [];
     const good: File[] = [];
+    const warnings = new Map<File, string[]>();
     for (const file of files) {
-      const problem = await localProblem(file, me.tenant.id);
-      if (problem) problems.push({ name: file.name, problem });
-      else good.push(file);
+      const problem = localProblem(file);
+      if (problem) {
+        problems.push({ name: file.name, problem });
+        continue;
+      }
+      good.push(file);
+      if (classify(file.name)?.kind === "companion") {
+        const found = await companionWarnings(file, me.tenant.id);
+        if (found.length > 0) warnings.set(file, found);
+      }
     }
     setRejected(problems);
     if (good.length === 0) return;
@@ -197,6 +255,13 @@ export function Upload() {
             body: { files: hashed.map(({ file, sha256 }) => ({ name: file.name, size_bytes: file.size, sha256 })) },
           }),
         );
+        const seen: Record<string, string[]> = {};
+        registered.files.forEach((entry, index) => {
+          const file = hashed[index]?.file;
+          const found = file ? warnings.get(file) : undefined;
+          if (found) seen[entry.id] = found;
+        });
+        setEarly((prev) => ({ ...prev, ...seen }));
         await load(batch.id);
         const tasks = registered.files.map((entry, index) => async () => {
           const file = hashed[index]?.file;
@@ -232,6 +297,54 @@ export function Upload() {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Close: with a rejected companion file in the batch, ask what to do with each first.
+  const startClose = () => {
+    const rejectedFiles = rejectedCompanions(batch?.files ?? []);
+    if (rejectedFiles.length === 0) {
+      void closeBatch();
+      return;
+    }
+    setNotice(null);
+    const fixAll: Record<string, RejectedChoice> = Object.fromEntries(rejectedFiles.map((c) => [c.id, "fix"]));
+    setChoosing(fixAll);
+  };
+
+  const removeQuietly = async (file: FileOut) => {
+    if (!batch) return;
+    await call(
+      api.DELETE("/api/batches/{batch_id}/files/{file_id}", { params: { path: { batch_id: batch.id, file_id: file.id } } }),
+    );
+  };
+
+  const applyChoices = async () => {
+    if (!batch || !choosing) return;
+    setBusy(true);
+    try {
+      for (const companion of rejectedCompanions(batch.files)) {
+        const choice = choosing[companion.id] ?? "fix";
+        // Every choice removes the rejected companion file; "remove_pdf" removes its PDF too.
+        await removeQuietly(companion);
+        const pdf = pdfFor(companion, batch.files);
+        if (choice === "remove_pdf" && pdf) await removeQuietly(pdf);
+      }
+      setChoosing(null);
+      if (Object.values(choosing).includes("fix")) {
+        await load(batch.id);
+        setNotice("Add the corrected companion files, with the same names as their PDFs, then close the batch.");
+        setBusy(false);
+        return;
+      }
+    } catch (caught) {
+      setChoosing(null);
+      setError(messageFor(caught));
+      await load(batch.id);
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    await closeBatch();
   };
 
   const removeFile = (file: FileOut) =>
@@ -278,6 +391,8 @@ export function Upload() {
   };
 
   const fileNames = new Map((batch?.files ?? []).map((f) => [f.id, f.name]));
+  // A rejected companion file does not disable Close: Close asks what to do with it.
+  const blocking = (batch?.problems ?? []).filter((p) => p.code !== "companion_invalid");
   const problems = (batch?.problems ?? []).map((p) =>
     p.file_id
       ? `${fileNames.get(p.file_id) ?? "A file"} ${PROBLEM_TEXT[p.code] ?? p.code.replaceAll("_", " ")}.`
@@ -333,7 +448,7 @@ export function Upload() {
                       <Button onClick={discard} disabled={busy}>
                         Discard batch
                       </Button>
-                      <Button variant="primary" onClick={() => void closeBatch()} loading={busy} disabled={problems.length > 0}>
+                      <Button variant="primary" onClick={startClose} loading={busy} disabled={blocking.length > 0}>
                         Close batch
                       </Button>
                     </SpaceBetween>
@@ -372,6 +487,11 @@ export function Upload() {
                     </ul>
                   </Alert>
                 )}
+                {notice && (
+                  <Alert type="info" dismissible onDismiss={() => setNotice(null)}>
+                    {notice}
+                  </Alert>
+                )}
                 {problems.length > 0 && batch.files.length > 0 && (
                   <Alert type="info" header="Before the batch can close">
                     <ul>
@@ -394,7 +514,20 @@ export function Upload() {
                 { id: "name", header: "Name", cell: (f) => <span style={{ overflowWrap: "anywhere" }}>{f.name}</span>, isRowHeader: true },
                 { id: "size", header: "Size", cell: (f) => <span style={{ whiteSpace: "nowrap" }}>{formatBytes(f.size_bytes)}</span> },
                 { id: "kind", header: "Type", cell: (f) => (f.kind === "pdf" ? "PDF" : "Companion file") },
-                { id: "match", header: "Companion", cell: (f) => matchText(f) },
+                {
+                  id: "match",
+                  header: "Companion",
+                  cell: (f) => {
+                    const text = matchText(f, batch.files);
+                    return text === "Companion rejected" || text === "Rejected" ? (
+                      <StatusIndicator type="warning" wrapText={false}>
+                        {text}
+                      </StatusIndicator>
+                    ) : (
+                      text
+                    );
+                  },
+                },
                 {
                   id: "status",
                   header: "Status",
@@ -406,11 +539,23 @@ export function Upload() {
                     }
                     const status = FILE_STATUS[f.status] ?? { type: "info" as const, label: f.status };
                     const held = f.status === "unsupported" || f.status === "scan_timeout";
+                    // Before the scan, what this page saw; after it, the pipeline's full list.
+                    const seenHere = f.status === "registered" ? (early[f.id] ?? []) : [];
                     return (
                       <SpaceBetween size="xxs">
                         <StatusIndicator type={status.type}>{status.label}</StatusIndicator>
                         {held && f.error_code && <Box variant="small">{fileProblemText(f.error_code, f.kind)}</Box>}
-                        {f.errors.length > 0 && <Box variant="small">{companionErrorText(f.errors)}</Box>}
+                        {f.errors.length > 0 && (
+                          <Box variant="small">
+                            <Lines lines={companionErrorLines(f.errors)} />
+                          </Box>
+                        )}
+                        {seenHere.length > 0 && (
+                          <Box variant="small">
+                            Problems found here; the full check follows the scan:
+                            <Lines lines={seenHere} />
+                          </Box>
+                        )}
                       </SpaceBetween>
                     );
                   },
@@ -433,6 +578,59 @@ export function Upload() {
         )}
       </SpaceBetween>
       <Confirm request={confirm} busy={busy} onCancel={() => setConfirm(null)} onConfirm={() => void runConfirm()} />
+      <Modal
+        visible={choosing !== null}
+        onDismiss={() => setChoosing(null)}
+        header="Rejected companion files"
+        size="medium"
+        footer={
+          <Box float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button variant="link" onClick={() => setChoosing(null)} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant="primary" onClick={() => void applyChoices()} loading={busy}>
+                Continue
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        <SpaceBetween size="l">
+          <Box>The batch cannot close while a companion file is rejected. Choose what to do with each PDF.</Box>
+          {rejectedCompanions(batch?.files ?? []).map((companion) => {
+            const pdf = pdfFor(companion, batch?.files ?? []);
+            return (
+              <FormField
+                key={companion.id}
+                label={<span style={{ overflowWrap: "anywhere" }}>{pdf?.name ?? companion.name}</span>}
+                description={
+                  <>
+                    {companion.name} was rejected:
+                    <Lines lines={companionErrorLines(companion.errors)} />
+                  </>
+                }
+              >
+                <RadioGroup
+                  value={choosing?.[companion.id] ?? "fix"}
+                  onChange={({ detail }) =>
+                    setChoosing((prev) => (prev ? { ...prev, [companion.id]: detail.value as RejectedChoice } : prev))
+                  }
+                  items={[
+                    {
+                      value: "fix",
+                      label: "Fix the companion file",
+                      description: "The rejected file is removed and the batch stays open, so you can add a corrected one.",
+                    },
+                    { value: "remove_pdf", label: "Remove the PDF", description: "The PDF and its companion file are not processed." },
+                    { value: "without", label: "Close without the companion file", description: "The PDF is processed without one." },
+                  ]}
+                />
+              </FormField>
+            );
+          })}
+        </SpaceBetween>
+      </Modal>
     </ContentLayout>
   );
 }

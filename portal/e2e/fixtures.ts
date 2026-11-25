@@ -131,21 +131,24 @@ const BATCH = {
   files: [
     batchFile(1, "smith-package-final-signed-2026-10-28.pdf", "pdf", "clean", { matched: true }),
     batchFile(2, "smith-package-final-signed-2026-10-28.json", "companion", "clean", { matched: true }),
-    batchFile(3, "jones-application.pdf", "pdf", "registered"),
+    batchFile(3, "jones-application.pdf", "pdf", "clean"),
     batchFile(4, "garcia-package.pdf", "pdf", "clean", { matched: true }),
+    // Every problem at once (owner decision A2).
     batchFile(5, "garcia-package.json", "companion", "invalid", {
       matched: true,
       error_code: "companion_invalid",
-      errors: [{ code: "tenant_mismatch", key: "TenantID" }],
+      errors: [
+        { code: "tenant_mismatch", key: "TenantID" },
+        { code: "must_be_a_date", key: "CreateDate" },
+        { code: "must_be_a_whole_number", key: "LoanTerm" },
+      ],
     }),
     batchFile(6, "eicar-test.pdf", "pdf", "infected", { error_code: "threats_found" }),
     // On hold, with its reason and what to do.
     batchFile(7, "password-protected-statement.pdf", "pdf", "unsupported", { error_code: "scan_unsupported" }),
   ],
-  problems: [
-    { file_id: "00000000-0000-4000-8000-000000000503", code: "awaiting_scan" },
-    { file_id: "00000000-0000-4000-8000-000000000505", code: "companion_invalid" },
-  ],
+  // Only the rejected companion file stands in the way, so Close opens its dialog.
+  problems: [{ file_id: "00000000-0000-4000-8000-000000000505", code: "companion_invalid" }],
 };
 const DOC_STATUSES = ["ready", "processing", "duplicate", "quarantined", "on_hold", "failed", "needs_review", "scanning"];
 const DOCUMENTS = Array.from({ length: 10 }, (_, i) => ({

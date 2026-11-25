@@ -297,6 +297,7 @@ edge = Edge(
     load_balancer_security_group=api.alb_security_group,
     logs=edge_logs,
     waf_rate_limit=config.edge.waf_rate_limit,
+    portal_idle_minutes=config.edge.portal_idle_minutes,
     aws_profile=aws_profile,
 )
 

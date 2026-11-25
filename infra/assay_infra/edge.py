@@ -106,6 +106,7 @@ def portal_config(
     platform_pool: str,
     platform_client: str,
     platform_domain: str,
+    idle_timeout_minutes: int,
 ) -> str:
     """The portal's runtime configuration. The host it is served on picks the pool."""
 
@@ -120,6 +121,7 @@ def portal_config(
         {
             "region": region,
             "hosts": {"tenant": tenant_host, "admin": admin_host},
+            "idleTimeoutMinutes": idle_timeout_minutes,
             "pools": {
                 "tenant": pool(tenant_pool, tenant_client, tenant_domain),
                 "platform": pool(platform_pool, platform_client, platform_domain),
@@ -346,6 +348,7 @@ class Edge(pulumi.ComponentResource):
         load_balancer_security_group: aws.ec2.SecurityGroup,
         logs: EdgeLogs,
         waf_rate_limit: int,
+        portal_idle_minutes: int = 30,
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -671,7 +674,11 @@ class Edge(pulumi.ComponentResource):
                 platform_domain=auth.platform.domain.domain,
             ).apply(
                 lambda a: portal_config(
-                    region=region, tenant_host=dns.tenant_host, admin_host=dns.admin_host, **a
+                    region=region,
+                    tenant_host=dns.tenant_host,
+                    admin_host=dns.admin_host,
+                    idle_timeout_minutes=portal_idle_minutes,
+                    **a,
                 )
             ),
             content_type="application/json",

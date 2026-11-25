@@ -1116,6 +1116,22 @@ export interface components {
                 [key: string]: string | null;
             };
         };
+        /**
+         * SignedOut
+         * @description Why the portal signed the user out: the Sign out button (`user`), or no activity in
+         *     any of its tabs for the portal's idle timeout (`idle_timeout`, owner decision 2026-11-24).
+         *     The reason is the portal's report, like the rest of this row.
+         */
+        SignedOut: {
+            /** Idle Minutes */
+            idle_minutes?: number | null;
+            /**
+             * Reason
+             * @default user
+             * @enum {string}
+             */
+            reason: "user" | "idle_timeout";
+        };
         /** TenantChange */
         TenantChange: {
             /**
@@ -1681,7 +1697,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["SignedOut"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             204: {
@@ -1689,6 +1709,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

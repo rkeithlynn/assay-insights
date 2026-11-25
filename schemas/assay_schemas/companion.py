@@ -14,6 +14,11 @@ again, then:
 `CompanionError.key` names the key at fault and `code` says what is wrong. Neither ever holds
 a value from the file, so an error can be stored and shown without repeating content. Never
 log a companion file's content.
+
+Every key is checked, and every key's problem is reported at once (`CompanionError.errors`,
+at most `MAX_ERRORS`; owner decision, 2026-11-24). A problem with the file as a whole (too
+large, not UTF-8, nested, not JSON, not one object, a key twice) stops the check at once,
+because nothing more can be read safely.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ import json
 import math
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +38,8 @@ MAX_TEXT = 500
 MAX_SIGNERS = 3
 # A flat object: the object itself is the only container.
 MAX_DEPTH = 1
+# The most key errors reported for one file.
+MAX_ERRORS = 50
 
 CUSTOM_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -58,15 +65,30 @@ LabelValue = str | int | float | bool
 
 
 class CompanionError(Exception):
-    """The file is invalid. `key` is the key at fault (None for the whole file)."""
+    """The file is invalid. `key` is the key at fault (None for the whole file).
 
-    def __init__(self, code: str, key: str | None = None) -> None:
+    `errors` holds every problem found, this one first; `code` and `key` are the first's.
+    """
+
+    def __init__(
+        self, code: str, key: str | None = None, *, errors: Sequence[CompanionError] = ()
+    ) -> None:
         super().__init__(code if key is None else f"{code}: {key}")
         self.code = code
         self.key = key
+        self.errors: tuple[CompanionError, ...] = tuple(errors) or (self,)
 
     def as_detail(self) -> dict[str, str | None]:
         return {"code": self.code, "key": self.key}
+
+    def details(self) -> list[dict[str, str | None]]:
+        """Every problem, for `batch_files.error_detail`: codes and keys, never values."""
+        return [error.as_detail() for error in self.errors]
+
+    @classmethod
+    def of(cls, errors: Sequence[CompanionError]) -> CompanionError:
+        first = errors[0]
+        return cls(first.code, first.key, errors=errors)
 
 
 @dataclass(frozen=True)
@@ -188,45 +210,20 @@ def validate(raw: bytes, *, tenant_id: uuid.UUID) -> Companion:
     values: dict[str, Any] = {}
     signers: dict[int, dict[str, str | None]] = {}
     labels: dict[str, LabelValue] = {}
+    errors: list[CompanionError] = []
 
     for key, value in document.items():
-        folded = key.lower()
-        if folded == TENANT_ID:
-            try:
-                claimed = uuid.UUID(value) if isinstance(value, str) else None
-            except ValueError:
-                claimed = None
-            if claimed is None:
-                raise CompanionError("must_be_a_uuid", key)
-            if claimed != tenant_id:
-                raise CompanionError("tenant_mismatch", key)
-            values["tenant_id"] = claimed
-        elif folded in TEXT_KEYS:
-            values[TEXT_KEYS[folded]] = _text(key, value)
-        elif folded in DATE_KEYS:
-            values[DATE_KEYS[folded]] = _date(key, value)
-        elif folded == LOAN_TERM:
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise CompanionError("must_be_a_whole_number", key)
-            if not 1 <= value <= 1200:
-                raise CompanionError("out_of_range", key)
-            values["loan_term_months"] = value
-        elif folded == LOAN_RATE:
-            if not _number(value) or not math.isfinite(value):
-                raise CompanionError("must_be_a_number", key)
-            if not 0 <= value <= 100:
-                raise CompanionError("out_of_range", key)
-            values["loan_interest_rate"] = float(value)
-        elif (match := _SIGNER_KEY.match(folded)) is not None:
-            number = int(match.group(1))
-            if number > MAX_SIGNERS:
-                raise CompanionError("unknown_signer", key)
-            signers.setdefault(number, {})[match.group(2)] = _text(key, value)
-        else:
-            labels[key] = _label(key, value)
+        try:
+            _check(key, value, tenant_id, values, signers, labels)
+        except CompanionError as exc:
+            errors.append(exc)
+            if len(errors) >= MAX_ERRORS:
+                break
 
-    if len(labels) > MAX_CUSTOM_KEYS:
-        raise CompanionError("too_many_custom_keys")
+    if len(labels) > MAX_CUSTOM_KEYS and len(errors) < MAX_ERRORS:
+        errors.append(CompanionError("too_many_custom_keys"))
+    if errors:
+        raise CompanionError.of(errors)
     return Companion(
         **values,
         signers=tuple(
@@ -236,6 +233,51 @@ def validate(raw: bytes, *, tenant_id: uuid.UUID) -> Companion:
         ),
         labels=labels,
     )
+
+
+def _check(
+    key: str,
+    value: Any,
+    tenant_id: uuid.UUID,
+    values: dict[str, Any],
+    signers: dict[int, dict[str, str | None]],
+    labels: dict[str, LabelValue],
+) -> None:
+    """One key: store its value, or raise CompanionError for that key."""
+    folded = key.lower()
+    if folded == TENANT_ID:
+        try:
+            claimed = uuid.UUID(value) if isinstance(value, str) else None
+        except ValueError:
+            claimed = None
+        if claimed is None:
+            raise CompanionError("must_be_a_uuid", key)
+        if claimed != tenant_id:
+            raise CompanionError("tenant_mismatch", key)
+        values["tenant_id"] = claimed
+    elif folded in TEXT_KEYS:
+        values[TEXT_KEYS[folded]] = _text(key, value)
+    elif folded in DATE_KEYS:
+        values[DATE_KEYS[folded]] = _date(key, value)
+    elif folded == LOAN_TERM:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise CompanionError("must_be_a_whole_number", key)
+        if not 1 <= value <= 1200:
+            raise CompanionError("out_of_range", key)
+        values["loan_term_months"] = value
+    elif folded == LOAN_RATE:
+        if not _number(value) or not math.isfinite(value):
+            raise CompanionError("must_be_a_number", key)
+        if not 0 <= value <= 100:
+            raise CompanionError("out_of_range", key)
+        values["loan_interest_rate"] = float(value)
+    elif (match := _SIGNER_KEY.match(folded)) is not None:
+        number = int(match.group(1))
+        if number > MAX_SIGNERS:
+            raise CompanionError("unknown_signer", key)
+        signers.setdefault(number, {})[match.group(2)] = _text(key, value)
+    else:
+        labels[key] = _label(key, value)
 
 
 def _label(key: str, value: Any) -> LabelValue:

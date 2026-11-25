@@ -1,10 +1,10 @@
 /**
  * Uploading files into a batch (BUILD_SPEC.md sections 8 and 10, build step 6).
  *
- * 1. Each file is checked here first, so most mistakes show at once: its type (PDF, or a JSON
- *    companion file), its size, and for a companion file that it is a JSON object whose
- *    `TenantID`, if any, is this organization's. The API checks again, and the pipeline
- *    validates every companion file properly once it is scanned.
+ * 1. Each file is checked here first: its type (PDF, or a JSON companion file), name and size
+ *    (a file that fails is not added). A companion file's content is only looked at, never a
+ *    reason to leave it out: it is uploaded, the pipeline validates it fully once it is
+ *    scanned, and an invalid one is shown as rejected until it is dealt with.
  * 2. Its SHA-256 is computed in the browser and registered with its name and size. The
  *    upload link the API returns is signed for exactly that size, type and hash, so S3
  *    accepts only this file's content under it.
@@ -37,8 +37,12 @@ export function classify(name: string): Classified | null {
   return kind && base ? { kind, base } : null;
 }
 
-/** Why this file cannot be added, in plain words, or null. */
-export async function localProblem(file: File, tenantId: string): Promise<string | null> {
+/**
+ * Why this file cannot be added at all, in plain words, or null: its type, name or size, which
+ * the API refuses at registration too. A companion file's content is not checked here; see
+ * `companionWarnings`.
+ */
+export function localProblem(file: File): string | null {
   const classified = classify(file.name);
   if (!classified) return "Only PDF files and their JSON companion files can be uploaded.";
   // Slashes, backslashes and control characters (U+0000 to U+001F, U+007F).
@@ -50,21 +54,35 @@ export async function localProblem(file: File, tenantId: string): Promise<string
   if (classified.kind === "pdf") {
     return file.size > PDF_MAX_BYTES ? "A PDF may be at most 100 MB." : null;
   }
-  if (file.size > COMPANION_MAX_BYTES) return "A companion file may be at most 64 KB.";
+  return file.size > COMPANION_MAX_BYTES ? "A companion file may be at most 64 KB." : null;
+}
+
+/**
+ * What this page can already see is wrong with a companion file's content, every problem at
+ * once (owner decision A1/A2, 2026-11-24). The file is still added: it is uploaded and the
+ * pipeline checks it fully after its scan, and that complete list replaces these. An invalid
+ * companion file keeps the batch from closing until it is fixed, removed, or its PDF goes on
+ * without it.
+ */
+export async function companionWarnings(file: File, tenantId: string): Promise<string[]> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await file.text());
   } catch {
-    return "The companion file is not valid JSON.";
+    return ["The file is not valid JSON"];
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return "The companion file must be one JSON object.";
+    return ["The file must be one JSON object"];
   }
-  const entry = Object.entries(parsed).find(([key]) => key.toLowerCase() === "tenantid");
-  if (entry && String(entry[1]).toLowerCase() !== tenantId.toLowerCase()) {
-    return "The companion file's TenantID is not this organization's ID.";
+  const warnings: string[] = [];
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key.toLowerCase() === "tenantid" && String(value).toLowerCase() !== tenantId.toLowerCase()) {
+      warnings.push(`${key} is not this organization's ID`);
+    } else if (value !== null && typeof value === "object") {
+      warnings.push(`${key} must be text, a number or true/false`);
+    }
   }
-  return null;
+  return warnings;
 }
 
 export async function sha256Hex(file: Blob): Promise<string> {

@@ -191,10 +191,13 @@ def files(tenant_id: uuid.UUID | None) -> dict[str, bytes]:
         "Branch": "Atlanta",
     }
     invalid_companion = {
-        # Another tenant's ID, a text loan term and a nested value: three reasons to refuse.
+        # Four key errors, all reported at once (owner decision A2): another tenant's ID, a
+        # date in the wrong form, a text loan term and a rate out of range. (A nested value
+        # would stop the check at that one problem, so there is none.)
         "TenantID": str(uuid.UUID("00000000-0000-4000-8000-00000000dead")),
+        "CreateDate": "28/10/2026",
         "LoanTerm": "thirty years",
-        "Notes": {"nested": True},
+        "LoanInterestRate": 101,
     }
     return {
         "01-normal.pdf": normal,
@@ -210,6 +213,8 @@ def files(tenant_id: uuid.UUID | None) -> dict[str, bytes]:
             package("Package 005", "Lee Testperson", "TEST-005"), seed="invalid"
         ),
         "05-invalid-companion.json": json.dumps(invalid_companion, indent=2).encode(),
+        # Plain text named .pdf: scans clean, then fails at fingerprint (`not_a_pdf`).
+        "06-not-a-pdf.pdf": b"This is plain text named .pdf, for the not_a_pdf browser check.\n",
     }
 
 

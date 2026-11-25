@@ -45,6 +45,17 @@ const SCREENS: Screen[] = [
   },
   { id: "tenant-admin-settings", persona: "tenant-admin", path: "/settings", ready: "Claude Sonnet" },
   { id: "tenant-admin-upload", persona: "tenant-admin", path: "/upload", ready: "garcia-package.json" },
+  {
+    // Close with a rejected companion file asks what to do with its PDF (owner decision A1).
+    id: "tenant-admin-upload-rejected-companion",
+    persona: "tenant-admin",
+    path: "/upload",
+    ready: "garcia-package.json",
+    setup: async (page) => {
+      await page.getByRole("button", { name: "Close batch" }).click();
+      await page.getByRole("dialog").getByText("Close without the companion file").waitFor();
+    },
+  },
   { id: "tenant-admin-ingestion", persona: "tenant-admin", path: "/ingestion", ready: "application-package-1.pdf" },
   {
     id: "tenant-admin-ingestion-detail",

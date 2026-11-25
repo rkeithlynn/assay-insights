@@ -29,7 +29,7 @@ vi.mock("./auth", async (actual) => ({
 vi.mock("./config", async (actual) => ({
   ...(await actual<typeof import("./config")>()),
   loadConfig: () => Promise.resolve({}),
-  poolFor: () => ({ kind: "tenant", region: "us-east-1", host: "portal.example.test" }),
+  poolFor: () => ({ kind: "tenant", region: "us-east-1", host: "portal.example.test", idleTimeoutMinutes: 30 }),
 }));
 vi.mock("./App", async () => {
   const { useSession } = await import("./session");
@@ -46,7 +46,7 @@ vi.mock("./App", async () => {
   };
 });
 
-import { Root, SIGNED_OUT_ELSEWHERE } from "./Root";
+import { IDLE_NOTE_KEY, Root, SIGNED_OUT_ELSEWHERE, signedOutIdle } from "./Root";
 import { SIGN_OUT_CHANNEL } from "./signout";
 
 const ME = {
@@ -128,7 +128,7 @@ describe("sign-out across tabs", () => {
     render(<Root />);
     await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
     await vi.waitFor(() => expect(redirectTo).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(heardByOtherTab).toEqual([{ type: "signed-out" }]));
+    await vi.waitFor(() => expect(heardByOtherTab).toEqual([{ type: "signed-out", reason: "user" }]));
     // This tab: one sign-out row, its own refresh token revoked once, then Cognito's logout.
     expect(posts("/api/auth/signed-out")).toHaveLength(1);
     expect(manager.revokeTokens).toHaveBeenCalledExactlyOnceWith(["refresh_token"]);
@@ -160,6 +160,14 @@ describe("sign-out across tabs", () => {
     expect(manager.removeUser).toHaveBeenCalledOnce();
   });
 
+  it("says why when another tab signed out for inactivity", async () => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    otherTab.postMessage({ type: "signed-out", reason: "idle_timeout" });
+    expect(await screen.findByText(signedOutIdle(30))).toBeInTheDocument();
+    expect(posts("/api/auth/signed-out")).toHaveLength(0);
+  });
+
   it.each([{ type: "something-else" }, "signed-out", null, 42])("ignores any other message (%j)", async (data) => {
     render(<Root />);
     expect(await screen.findByText("signed in")).toBeInTheDocument();
@@ -168,5 +176,49 @@ describe("sign-out across tabs", () => {
     expect(screen.getByText("signed in")).toBeInTheDocument();
     expect(manager.revokeTokens).not.toHaveBeenCalled();
     expect(manager.removeUser).not.toHaveBeenCalled();
+  });
+});
+
+describe("idle timeout", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    window.sessionStorage.clear();
+  });
+
+  it("warns 2 minutes before, then signs out as the button does, recorded as idle", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(28 * 60_000);
+    expect(await screen.findByText("Are you still there?")).toBeInTheDocument();
+    expect(posts("/api/auth/signed-out")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    await vi.waitFor(() => expect(redirectTo).toHaveBeenCalledOnce());
+    expect(posts("/api/auth/signed-out")).toEqual([
+      ["/api/auth/signed-out", { body: { reason: "idle_timeout", idle_minutes: 30 } }],
+    ]);
+    await vi.waitFor(() => expect(heardByOtherTab).toEqual([{ type: "signed-out", reason: "idle_timeout" }]));
+    expect(manager.revokeTokens).toHaveBeenCalledExactlyOnceWith(["refresh_token"]);
+    // The sign-in screen this tab comes back to will say why.
+    expect(window.sessionStorage.getItem(IDLE_NOTE_KEY)).toBe("30");
+  });
+
+  it("Stay signed in counts as activity", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(29 * 60_000);
+    await userEvent.click(await screen.findByRole("button", { name: "Stay signed in" }));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(posts("/api/auth/signed-out")).toHaveLength(0);
+    expect(redirectTo).not.toHaveBeenCalled();
+  });
+
+  it("shows the reason on the sign-in screen after an idle sign-out", async () => {
+    window.sessionStorage.setItem(IDLE_NOTE_KEY, "30");
+    manager.getUser.mockResolvedValue(null);
+    render(<Root />);
+    expect(await screen.findByText(signedOutIdle(30))).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(IDLE_NOTE_KEY)).toBeNull();
   });
 });

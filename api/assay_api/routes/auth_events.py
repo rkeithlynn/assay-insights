@@ -2,6 +2,8 @@
 session start and MFA enrolment.
 
 - `POST /auth/signed-out`: the portal calls it before it sends the user to Cognito's logout.
+  Its body says why (`detail.reason`): `user` (the Sign out button; also an empty body) or
+  `idle_timeout` (the portal's idle timeout, with `idle_minutes`).
 - `POST /auth/password-changed`: the portal changes the password with Cognito itself
   (`ChangePassword`, with the user's access token), so the password never reaches this API,
   and then calls this route to record it. A user who calls Cognito directly, outside the
@@ -32,9 +34,10 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection
 
 from assay_api.database import Databases
@@ -101,9 +104,27 @@ def session_start_id(user_id: uuid.UUID, auth_time: int) -> uuid.UUID:
     return uuid.uuid5(SESSION_START_NAMESPACE, f"session_started:{user_id}:{auth_time}")
 
 
+class SignedOut(BaseModel):
+    """Why the portal signed the user out: the Sign out button (`user`), or no activity in
+    any of its tabs for the portal's idle timeout (`idle_timeout`, owner decision 2026-11-24).
+    The reason is the portal's report, like the rest of this row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Literal["user", "idle_timeout"] = "user"
+    # The idle timeout in force, in minutes (idle_timeout only).
+    idle_minutes: int | None = Field(default=None, ge=1, le=1440)
+
+
 @router.post("/signed-out", status_code=status.HTTP_204_NO_CONTENT)
-def signed_out(caller: AnySignedIn, dbs: Dbs, request: Request) -> Response:
-    return _record(caller, dbs, request, "sign_out")
+def signed_out(
+    caller: AnySignedIn, dbs: Dbs, request: Request, body: SignedOut | None = None
+) -> Response:
+    report = body or SignedOut()
+    detail: dict[str, Any] = {"reason": report.reason, "reported_by": "portal"}
+    if report.reason == "idle_timeout" and report.idle_minutes is not None:
+        detail["idle_minutes"] = report.idle_minutes
+    return _record(caller, dbs, request, "sign_out", detail=detail)
 
 
 @router.post("/password-changed", status_code=status.HTTP_204_NO_CONTENT)

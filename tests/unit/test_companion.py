@@ -154,3 +154,45 @@ def test_an_error_never_carries_a_value_from_the_file() -> None:
             validate(raw(data), tenant_id=TENANT)
         assert secret not in str(raised.value)
         assert secret not in json.dumps(raised.value.as_detail())
+        assert secret not in json.dumps(raised.value.details())
+
+
+def test_every_keys_problem_is_reported_at_once() -> None:
+    """Owner decision (2026-11-24): all errors in the file, in its order, not just the first."""
+    data = {
+        "TenantID": str(uuid.uuid4()),
+        "CreateDate": "24/11/2026",
+        "LoanTerm": "sixty",
+        "Branch": "Atlanta",  # valid: not reported
+        "9lives": "x",
+        "Signer4Name": "x",
+    }
+    with pytest.raises(CompanionError) as raised:
+        validate(raw(data), tenant_id=TENANT)
+    assert raised.value.details() == [
+        {"code": "tenant_mismatch", "key": "TenantID"},
+        {"code": "must_be_a_date", "key": "CreateDate"},
+        {"code": "must_be_a_whole_number", "key": "LoanTerm"},
+        {"code": "invalid_key", "key": "9lives"},
+        {"code": "unknown_signer", "key": "Signer4Name"},
+    ]
+    # The first is still the error's own code and key.
+    assert (raised.value.code, raised.value.key) == ("tenant_mismatch", "TenantID")
+
+
+def test_at_most_fifty_errors_and_the_key_count_is_one_of_them() -> None:
+    with pytest.raises(CompanionError) as raised:
+        validate(raw({f"{i}bad": "x" for i in range(80)}), tenant_id=TENANT)
+    assert len(raised.value.details()) == companion.MAX_ERRORS
+    with pytest.raises(CompanionError) as raised:
+        validate(raw({"9x": "x", **{f"K{i}": i for i in range(51)}}), tenant_id=TENANT)
+    assert raised.value.details() == [
+        {"code": "invalid_key", "key": "9x"},
+        {"code": "too_many_custom_keys", "key": None},
+    ]
+
+
+def test_a_file_level_problem_stops_the_check() -> None:
+    with pytest.raises(CompanionError) as raised:
+        validate(b'{"LoanTerm": "x", "Note": {"a": 1}}', tenant_id=TENANT)
+    assert raised.value.details() == [{"code": "nested_value", "key": None}]
