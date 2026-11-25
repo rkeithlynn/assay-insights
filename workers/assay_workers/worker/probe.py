@@ -25,8 +25,10 @@ Checked (owner conditions b and c, 2026-11-24):
 - **Sandbox.** The child runs as the sandbox user with an empty environment and no AWS or
   database library loaded; it cannot open a socket, read the parent's environment or
   memory, start a program or write a file; it is stopped at the CPU limit (a child that
-  spins), the wall-clock timeout (one that only waits), the memory limit and the output
-  limit, each tried where only that limit can be what stops it. The parent has exactly
+  spins, and one that ignores the kernel's warning), the wall-clock timeout (one that only
+  waits), the memory limit and the output limit, each tried where only that limit can be
+  what stops it, and each reported by its own name; a child that crashes is reported as an
+  unexpected signal, never as a limit. The parent has exactly
   CAP_SETUID, CAP_SETGID and CAP_KILL, and a read-only root filesystem.
 - **Inspection.** The real `inspect` job, in that sandbox, on four synthetic files
   (`probe_files`): a plain PDF opens with its three pages; each of two password-protected
@@ -84,10 +86,6 @@ SHORT = Limits(wall_seconds=5.0, cpu_seconds=4, address_space_bytes=512 * 1024**
 # a child that spins, with the wall clock far off, and one that waits, using no CPU time.
 CPU_LIMITED = Limits(wall_seconds=30.0, cpu_seconds=2, address_space_bytes=512 * 1024**2)
 WALL_LIMITED = Limits(wall_seconds=3.0, cpu_seconds=30, address_space_bytes=512 * 1024**2)
-# How the kernel ends a process at its CPU limit: SIGKILL at the hard limit, which is also
-# the soft one here (SIGXCPU, had the soft limit been lower).
-CPU_LIMIT_SIGNALS = frozenset({"signal_SIGKILL", "signal_SIGXCPU"})
-CPU_LIMIT = "cpu_limit"
 
 
 @dataclass(frozen=True)
@@ -417,25 +415,53 @@ class Probe:
                 DENIED,
                 DENIED if value not in (None, "allowed") else str(value),
             )
+        # Each ending is reported by its own name: a limit is `limit:<which>`, and a child
+        # that died some other way is `unexpected:<how>`, never the name of a limit.
         for name, probe, limits, expected in (
-            ("that spins is stopped by the CPU limit", "spin", CPU_LIMITED, CPU_LIMIT),
+            (
+                "that spins is stopped by the CPU limit",
+                "spin",
+                CPU_LIMITED,
+                f"limit:{runner.CPU_LIMIT}",
+            ),
+            (
+                "that ignores the CPU warning is still stopped by the CPU limit",
+                "stubborn",
+                CPU_LIMITED,
+                f"limit:{runner.CPU_LIMIT}",
+            ),
             (
                 "that never finishes is stopped at the wall-clock timeout",
                 "sleep",
                 WALL_LIMITED,
-                "timeout",
+                f"limit:{runner.WALL_CLOCK_TIMEOUT}",
             ),
-            ("that tries to exhaust memory is stopped", "memory", SHORT, "out_of_memory"),
-            ("that floods its output is stopped", "flood", SHORT, "too_much_output"),
+            (
+                "that tries to exhaust memory is stopped",
+                "memory",
+                SHORT,
+                f"limit:{runner.MEMORY_LIMIT}",
+            ),
+            (
+                "that floods its output is stopped",
+                "flood",
+                SHORT,
+                f"limit:{runner.OUTPUT_LIMIT}",
+            ),
+            (
+                "that crashes is reported as an unexpected signal, not a limit",
+                "crash",
+                SHORT,
+                "unexpected:signal_SIGABRT",
+            ),
         ):
             try:
                 self.sandbox.selftest(probe, limits=limits)
                 outcome = "returned"
+            except runner.SandboxLimit as exc:
+                outcome = f"limit:{exc.reason}"
             except runner.SandboxError as exc:
-                outcome = exc.reason
-            if expected == CPU_LIMIT and outcome in CPU_LIMIT_SIGNALS:
-                # Killed by the kernel before the parent's wall clock: the CPU limit.
-                outcome = CPU_LIMIT
+                outcome = f"unexpected:{exc.reason}"
             self.check(f"sandbox: a child {name}", expected, outcome)
 
     def inspect_checks(self) -> None:

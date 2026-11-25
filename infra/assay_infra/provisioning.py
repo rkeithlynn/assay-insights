@@ -35,6 +35,7 @@ from assay_infra.auth import Auth
 from assay_infra.database import Database, db_user_arn
 from assay_infra.images import WORKSPACE_MANIFESTS, ContainerImage
 from assay_infra.network import Network
+from assay_infra.propagation import iam_propagation
 from assay_infra.tss import TenantStorage, _service_trust
 from assay_tss import policies
 from assay_tss.naming import tenant_pattern
@@ -855,6 +856,14 @@ class Provisioning(pulumi.ComponentResource):
         )
 
         # --- Tenant stack state -------------------------------------------------------------
+        # The state key's policy names the provisioning role, created just above, as a
+        # principal: it waits until IAM has had time to make the role known.
+        self.iam_ready = iam_propagation(
+            f"{name}-iam-propagation",
+            roles=[self.task_role.arn],
+            repo_root=repo_root,
+            opts=child,
+        )
         self.state_key = aws.kms.Key(
             f"{name}-state-key",
             description=f"{name}: tenant stack state and secrets",
@@ -864,7 +873,7 @@ class Provisioning(pulumi.ComponentResource):
             policy=pulumi.Output.all(account=account, role=self.task_role.arn).apply(
                 lambda a: state_key_policy(account_id=a["account"], provisioning_role=a["role"])
             ),
-            opts=protected,
+            opts=pulumi.ResourceOptions(parent=self, protect=True, depends_on=[self.iam_ready]),
         )
         aws.kms.Alias(
             f"{name}-state-key-alias",

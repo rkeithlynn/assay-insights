@@ -179,7 +179,11 @@ from assay_workers.sandbox.confine import Limits
 from assay_workers.worker import probe as worker_probe
 short = Limits(wall_seconds=4.0, cpu_seconds=3, address_space_bytes=512 * 1024**2, processes=8)
 # The probe's own limits for the two time checks: only one of the two can be reached.
-limits = {"spin": worker_probe.CPU_LIMITED, "sleep": worker_probe.WALL_LIMITED}
+limits = {
+    "spin": worker_probe.CPU_LIMITED,
+    "stubborn": worker_probe.CPU_LIMITED,
+    "sleep": worker_probe.WALL_LIMITED,
+}
 results = {}
 for probe in sys.argv[1:]:
     try:
@@ -194,33 +198,46 @@ print(json.dumps(results))
 @pytest.fixture(scope="module")
 def hostile(image: str) -> dict[str, Any]:
     result: dict[str, Any] = as_the_task(
-        image, HOSTILE, arguments=("spin", "sleep", "memory", "flood", "fork")
+        image, HOSTILE, arguments=("spin", "stubborn", "sleep", "crash", "memory", "flood", "fork")
     )
     return result
 
 
-def test_a_child_that_spins_is_killed_by_the_kernel_at_its_cpu_limit(
+def test_a_child_that_spins_is_stopped_by_the_cpu_limit_and_named_so(
     hostile: dict[str, Any],
 ) -> None:
     """With the wall clock far off, only the CPU limit can be what stopped it: the kernel's
-    SIGKILL at the hard limit (which is also the soft one), never the parent's timeout."""
-    assert hostile["spin"]["error"] == "SandboxKilled"
-    assert hostile["spin"]["reason"] in ("signal_SIGKILL", "signal_SIGXCPU")
+    SIGXCPU at the soft limit. The parent reports the limit by name, not the signal."""
+    assert hostile["spin"] == {"error": "SandboxLimit", "reason": "cpu_limit"}
 
 
-def test_a_child_that_only_waits_is_killed_by_the_parent_at_the_wall_clock(
+def test_a_child_that_ignores_the_cpu_warning_is_still_stopped_and_named_so(
+    hostile: dict[str, Any],
+) -> None:
+    """It ignores SIGXCPU, so the kernel kills it at the hard limit a second later. That is
+    a SIGKILL like any other; the CPU time it had used tells the parent which."""
+    assert hostile["stubborn"] == {"error": "SandboxLimit", "reason": "cpu_limit"}
+
+
+def test_a_child_that_only_waits_is_stopped_at_the_wall_clock_and_named_so(
     hostile: dict[str, Any],
 ) -> None:
     """It uses no CPU time, so only the parent's wall clock can be what stopped it."""
-    assert hostile["sleep"] == {"error": "SandboxTimeout", "reason": "timeout"}
+    assert hostile["sleep"] == {"error": "SandboxLimit", "reason": "wall_clock_timeout"}
+
+
+def test_a_child_that_crashes_is_an_unexpected_signal_never_a_limit(
+    hostile: dict[str, Any],
+) -> None:
+    assert hostile["crash"] == {"error": "SandboxKilled", "reason": "signal_SIGABRT"}
 
 
 def test_a_child_that_tries_to_exhaust_memory_is_stopped(hostile: dict[str, Any]) -> None:
-    assert hostile["memory"] == {"error": "SandboxFailed", "reason": "out_of_memory"}
+    assert hostile["memory"] == {"error": "SandboxLimit", "reason": "memory_limit"}
 
 
 def test_a_child_that_floods_its_output_is_stopped(hostile: dict[str, Any]) -> None:
-    assert hostile["flood"] == {"error": "SandboxBadOutput", "reason": "too_much_output"}
+    assert hostile["flood"] == {"error": "SandboxLimit", "reason": "output_limit"}
 
 
 def test_a_child_cannot_fill_the_task_with_processes(hostile: dict[str, Any]) -> None:
@@ -230,7 +247,7 @@ def test_a_child_cannot_fill_the_task_with_processes(hostile: dict[str, Any]) ->
     if "returned" in result:
         assert result["returned"]["children"] < 8
     else:
-        assert result["error"] in ("SandboxTimeout", "SandboxKilled")
+        assert result["error"] in ("SandboxLimit", "SandboxKilled")
 
 
 INSPECT = """
@@ -295,7 +312,7 @@ def test_the_child_opens_real_pdfs_and_survives_malformed_ones(image: str) -> No
         # the parent goes on to use, unless PDFium truly recovered a document from it.
         assert (
             outcome.get("problem") == "not_a_pdf"
-            or outcome.get("error") in ("SandboxKilled", "SandboxTimeout", "SandboxFailed")
+            or outcome.get("error") in ("SandboxKilled", "SandboxLimit", "SandboxFailed")
             or (outcome.get("problem") is None and isinstance(outcome.get("pages"), int))
         ), (name, outcome)
     assert results["garbage"].get("problem") == "not_a_pdf" or "error" in results["garbage"]

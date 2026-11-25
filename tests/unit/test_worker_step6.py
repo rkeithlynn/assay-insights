@@ -22,7 +22,8 @@ from assay_tss import keys
 from assay_tss.models import StorageAccess
 from assay_workers import progress, steps
 from assay_workers.sandbox import jobs
-from assay_workers.sandbox.runner import InspectResult, SandboxKilled, SandboxTimeout
+from assay_workers.sandbox import runner as sandbox_runner
+from assay_workers.sandbox.runner import InspectResult
 from assay_workers.worker import db as worker_db
 from assay_workers.worker import run as worker_run
 from assay_workers.worker.__main__ import job_from_env
@@ -331,27 +332,115 @@ def test_the_real_inspect_job_holds_a_password_protected_pdf(
     assert doc(w, doc_id)[:3] == ("on_hold", "pdf_encrypted", None)
 
 
-@pytest.mark.parametrize("error", [SandboxTimeout(), SandboxKilled(11)])
-def test_a_child_that_is_stopped_fails_the_document_and_is_logged_at_error(
+LIMIT_MESSAGE = "the PDF check was stopped at a sandbox limit"
+UNEXPECTED_MESSAGE = "the PDF check ended unexpectedly"
+
+
+@pytest.mark.parametrize(
+    ("error", "ending", "message", "at_a_limit"),
+    [
+        (sandbox_runner.SandboxLimit("cpu_limit"), "cpu_limit", LIMIT_MESSAGE, True),
+        (
+            sandbox_runner.SandboxLimit("wall_clock_timeout"),
+            "wall_clock_timeout",
+            LIMIT_MESSAGE,
+            True,
+        ),
+        (sandbox_runner.SandboxLimit("memory_limit"), "memory_limit", LIMIT_MESSAGE, True),
+        (sandbox_runner.SandboxKilled(11), "signal_SIGSEGV", UNEXPECTED_MESSAGE, False),
+        (sandbox_runner.SandboxKilled(9), "signal_SIGKILL", UNEXPECTED_MESSAGE, False),
+        (sandbox_runner.SandboxBadOutput(), "bad_output", UNEXPECTED_MESSAGE, False),
+    ],
+)
+def test_each_ending_is_named_in_the_log_and_in_the_event_for_master_admins(
     w: World,
     tmp_path: Path,
     engines: list[Any],
     caplog: pytest.LogCaptureFixture,
     error: Exception,
+    ending: str,
+    message: str,
+    at_a_limit: bool,
 ) -> None:
+    """The tenant's code is the same for all of them (`pdf_unreadable`). How the child ended
+    is in the log line and in the event's `error_type`, which only master admins are shown;
+    a limit and an unexpected ending have different messages."""
+
     def stopped(_path: Path) -> InspectResult:
         raise error
 
-    doc_id, b = fingerprinted(w, "a", "a-admin", f"stopped-{type(error).__name__}.pdf")
+    doc_id, b = fingerprinted(w, "a", "a-admin", f"stopped-{ending}.pdf")
     job = claimed(w, b.tenant_id, doc_id)
     caplog.set_level(logging.INFO)
     deps = deps_for(w, job, b.tenant_id, tmp_path, engines, inspect=stopped)
     assert worker_run.run(job, deps) == "failed"
+
+    # The document and the tenant: one code, whatever the ending.
     assert doc(w, doc_id)[:3] == ("failed", "pdf_unreadable", None)
-    record = next(r for r in caplog.records if r.getMessage() == "the PDF could not be opened")
-    assert record.levelname == "ERROR"
-    assert record.reason in ("timeout", "signal_SIGSEGV")  # type: ignore[attr-defined]
     assert w.storage.buckets.copies == []
+    detail = w.db.row(
+        "SELECT detail FROM assay.document_events WHERE document_id = %s AND step = 'inspect' "
+        "AND status = 'failed'",
+        doc_id,
+    )
+    assert detail == ({"error": "pdf_unreadable", "error_type": f"sandbox.{ending}"},)
+
+    # Master admins: the stored code and the ending, through the view they read.
+    with w.db.platform_reader.begin() as conn:
+        shown = conn.exec_driver_sql(
+            "SELECT error_code, error_type FROM platform.ingestion_events_v "
+            "WHERE document_id = %(id)s AND step = 'inspect' AND status = 'failed'",
+            {"id": doc_id},
+        ).all()
+    assert [tuple(row) for row in shown] == [("pdf_unreadable", f"sandbox.{ending}")]
+
+    # The log: an ERROR line (the worker's alarm), with the ending and which kind it was.
+    records = [r for r in caplog.records if r.getMessage() in (LIMIT_MESSAGE, UNEXPECTED_MESSAGE)]
+    assert [r.getMessage() for r in records] == [message]
+    record = records[0]
+    assert record.levelname == "ERROR"
+    assert record.ending == ending  # type: ignore[attr-defined]
+    assert record.sandbox_limit is at_a_limit  # type: ignore[attr-defined]
+
+
+def test_a_child_that_could_not_be_started_is_the_tasks_failure_not_the_documents(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """The task could not switch to the sandbox user: nothing was opened, so the file is not
+    blamed. The step fails, and the state machine's failure handler names it."""
+
+    def not_started(_path: Path) -> InspectResult:
+        raise sandbox_runner.SandboxNotStarted
+
+    doc_id, b = fingerprinted(w, "a", "a-admin", "not-started.pdf")
+    job = claimed(w, b.tenant_id, doc_id)
+    deps = deps_for(w, job, b.tenant_id, tmp_path, engines, inspect=not_started)
+    with pytest.raises(sandbox_runner.SandboxNotStarted):
+        worker_run.run(job, deps)
+    assert doc(w, doc_id)[:2] == ("processing", None)
+    assert events(w, doc_id)[-1] == ("inspect", "error")
+    result = step(
+        w, "failed", b.tenant_id, doc_id, failed_step="worker", error_type="States.TaskFailed"
+    )
+    assert result == {"outcome": "failed", "error": "inspect_failed"}
+    detail = w.db.row(
+        "SELECT detail FROM assay.document_events WHERE document_id = %s AND step = 'failed'",
+        doc_id,
+    )
+    assert detail == ({"error": "inspect_failed", "error_type": "SandboxNotStarted"},)
+
+
+def test_an_ending_never_reaches_a_tenant_user(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """The tenant's document detail reads `detail.error` only (assay_api.routes.documents)."""
+    import inspect as python_inspect
+
+    from assay_api.routes import documents
+
+    source = python_inspect.getsource(documents)
+    assert "detail ->> 'error' AS error_code" in source
+    assert "error_type" not in source
 
 
 def test_a_repeat_of_the_task_does_nothing_again(

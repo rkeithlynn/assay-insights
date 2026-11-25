@@ -20,6 +20,21 @@ numbers, booleans and codes from fixed sets: no free text, and so no path or key
 could be led to use. Any other ending is a `SandboxError` with a short reason and nothing
 from the child in it.
 
+Each ending has its own name (`ending`), so the logs and the document's event say which it
+was, and a limit doing its job never reads the same as a child that died some other way:
+
+- `SandboxLimit`: stopped at one of the sandbox's own limits. `cpu_limit` (the kernel, at
+  the CPU limit), `wall_clock_timeout` (the parent, at the wall clock), `memory_limit` (the
+  child reported that the address-space limit stopped it), `output_limit` (more output than
+  the parent accepts), `file_size_limit` (it tried to write a file).
+- `SandboxKilled`: ended by a signal that is none of those: `signal_SIGSEGV`,
+  `signal_SIGABRT`, `signal_SIGKILL` and so on. A crash in the parser, or a kill from
+  outside the sandbox (the task running out of memory, for one). A native library that
+  cannot get memory usually aborts, so the address-space limit can also end this way.
+- `SandboxFailed` (`exit_<status>`), `SandboxBadOutput` (`bad_output`): it ended by itself,
+  without a valid result.
+- `SandboxNotStarted`: it never ran. That is the task's fault, not the file's.
+
 Starting the child needs the parent to be root with CAP_SETUID and CAP_SETGID (to switch
 user) and CAP_KILL (to stop it). If the switch is refused, the job does not run at all.
 """
@@ -147,25 +162,44 @@ class SandboxError(Exception):
         self.reason = reason
 
 
-class SandboxTimeout(SandboxError):
-    def __init__(self) -> None:
-        super().__init__("timeout")
+CPU_LIMIT = "cpu_limit"
+WALL_CLOCK_TIMEOUT = "wall_clock_timeout"
+MEMORY_LIMIT = "memory_limit"
+OUTPUT_LIMIT = "output_limit"
+FILE_SIZE_LIMIT = "file_size_limit"
+LIMITS = frozenset({CPU_LIMIT, WALL_CLOCK_TIMEOUT, MEMORY_LIMIT, OUTPUT_LIMIT, FILE_SIZE_LIMIT})
+BAD_OUTPUT = "bad_output"
+
+
+class SandboxLimit(SandboxError):
+    """Stopped at one of the sandbox's own limits, which is the limit doing its job."""
+
+    def __init__(self, limit: str) -> None:
+        if limit not in LIMITS:
+            raise ValueError("not a sandbox limit")
+        super().__init__(limit)
 
 
 class SandboxKilled(SandboxError):
-    """Ended by a signal: a crash in the parser, or a limit (SIGXCPU, SIGXFSZ, SIGKILL)."""
+    """Ended by a signal that is not one of the sandbox's limits: a crash in the parser, or
+    a kill from outside the sandbox. Never the name of a limit."""
 
     def __init__(self, signal_number: int) -> None:
         super().__init__(f"signal_{LINUX_SIGNALS.get(signal_number, signal_number)}")
 
 
 class SandboxFailed(SandboxError):
+    """It exited by itself with a failure status, and no result."""
+
     def __init__(self, returncode: int) -> None:
-        super().__init__("out_of_memory" if returncode == EXIT_MEMORY else f"exit_{returncode}")
+        super().__init__(f"exit_{returncode}")
 
 
 class SandboxBadOutput(SandboxError):
-    pass
+    """It exited well, but what it printed is not a valid result."""
+
+    def __init__(self) -> None:
+        super().__init__(BAD_OUTPUT)
 
 
 class SandboxNotStarted(SandboxError):
@@ -184,6 +218,8 @@ class Completed:
     stdout: bytes
     timed_out: bool = False
     overflow: bool = False
+    # Processor time the child (and anything it started and waited for) used, in seconds.
+    cpu_seconds: float = 0.0
 
 
 Spawn = Callable[[Sequence[str], Limits], Completed]
@@ -193,6 +229,16 @@ def child_command(job: str, source: Path) -> list[str]:
     """Isolated mode: no environment variables, no user site directory, no script directory
     on the path. `-B`: no bytecode is written."""
     return [sys.executable, "-I", "-B", "-m", CHILD_MODULE, job, str(source)]
+
+
+def _children_cpu_seconds() -> float:
+    """Processor time used so far by this process's finished children."""
+    if sys.platform != "linux":
+        raise OSError("the sandbox runs on Linux only")
+    import resource
+
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
 
 
 def _kill(process: subprocess.Popen[bytes]) -> None:
@@ -205,6 +251,7 @@ def _kill(process: subprocess.Popen[bytes]) -> None:
 def spawn(argv: Sequence[str], limits: Limits) -> Completed:
     """Run the child confined, and collect at most MAX_OUTPUT_BYTES of its output. Linux."""
     try:
+        cpu_before = _children_cpu_seconds()
         process = subprocess.Popen(  # noqa: S603  # nosec B603  (a fixed command)
             list(argv),
             stdin=subprocess.DEVNULL,
@@ -261,36 +308,68 @@ def spawn(argv: Sequence[str], limits: Limits) -> Completed:
         process.stdout.close()
         process.stderr.close()
     return Completed(
-        returncode=returncode, stdout=bytes(output), timed_out=timed_out, overflow=overflow
+        returncode=returncode,
+        stdout=bytes(output),
+        timed_out=timed_out,
+        overflow=overflow,
+        # One child at a time, so the difference is this child's.
+        cpu_seconds=_children_cpu_seconds() - cpu_before,
     )
 
 
 # --- Running a job ---------------------------------------------------------------------------
 
 
+SIGKILL, SIGXCPU, SIGXFSZ = 9, 24, 25
+
+
+def ending(done: Completed, limits: Limits) -> SandboxError | None:
+    """How a child that did not end well ended, by name. None if it exited with status 0.
+
+    The parent's own two stops come first: it knows it made them. Then the kernel's:
+    SIGXCPU is the CPU limit and SIGXFSZ the file-size limit, by definition. A SIGKILL is
+    the CPU limit only if the child had used its CPU time (it ignored SIGXCPU and reached
+    the hard limit); any other SIGKILL came from somewhere else and is reported as that.
+    """
+    if done.timed_out:
+        return SandboxLimit(WALL_CLOCK_TIMEOUT)
+    if done.overflow or len(done.stdout) > MAX_OUTPUT_BYTES:
+        return SandboxLimit(OUTPUT_LIMIT)
+    if done.returncode < 0:
+        number = -done.returncode
+        if number == SIGXCPU:
+            return SandboxLimit(CPU_LIMIT)
+        if number == SIGXFSZ:
+            return SandboxLimit(FILE_SIZE_LIMIT)
+        if number == SIGKILL and done.cpu_seconds >= limits.cpu_seconds:
+            return SandboxLimit(CPU_LIMIT)
+        return SandboxKilled(number)
+    if done.returncode == EXIT_MEMORY:
+        return SandboxLimit(MEMORY_LIMIT)
+    if done.returncode != 0:
+        return SandboxFailed(done.returncode)
+    return None
+
+
 def run(job: str, source: Path, *, limits: Limits | None = None, spawn: Spawn = spawn) -> _Result:
     """One job on one file, in a confined child. Returns the validated result or raises
     `SandboxError`."""
     model = RESULTS[job]
-    done = spawn(child_command(job, source), limits or Limits())
-    if done.timed_out:
-        raise SandboxTimeout
-    if done.overflow or len(done.stdout) > MAX_OUTPUT_BYTES:
-        raise SandboxBadOutput("too_much_output")
-    if done.returncode < 0:
-        raise SandboxKilled(-done.returncode)
-    if done.returncode != 0:
-        raise SandboxFailed(done.returncode)
+    limits = limits or Limits()
+    done = spawn(child_command(job, source), limits)
+    error = ending(done, limits)
+    if error is not None:
+        raise error
     try:
         document = json.loads(done.stdout.decode("utf-8", errors="strict"))
     except ValueError:
-        raise SandboxBadOutput("bad_output") from None
+        raise SandboxBadOutput from None
     if not isinstance(document, dict):
-        raise SandboxBadOutput("bad_output")
+        raise SandboxBadOutput
     try:
         return model.model_validate(document)
     except ValueError:
-        raise SandboxBadOutput("bad_output") from None
+        raise SandboxBadOutput from None
 
 
 def inspect(source: Path, *, limits: Limits | None = None, spawn: Spawn = spawn) -> InspectResult:

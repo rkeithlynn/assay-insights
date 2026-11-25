@@ -8,9 +8,17 @@ Part 1 (build step 6, second half): the `inspect` step.
    directory, and its SHA-256 is checked against the registration once more.
 3. A sandbox child opens it (`sandbox.runner.inspect`). The parent never does.
    - needs a password: the document is held (`on_hold`, `pdf_encrypted`);
-   - not a PDF that opens, or the child was stopped (a crash, the timeout, a limit): the
-     document fails (`not_a_pdf`, `pdf_unreadable`). A stopped child is logged at ERROR: it
-     is what a broken file looks like, and what an attack on the parser looks like.
+   - not a PDF that opens: the document fails (`not_a_pdf`);
+   - the child did not end well: the document fails (`pdf_unreadable`, which is all a tenant
+     user sees). How it ended is named (`sandbox.runner.ending`) in the log line and in the
+     event's `error_type`, which master admins see: `sandbox.cpu_limit` and
+     `sandbox.wall_clock_timeout` are the sandbox's limits doing their job;
+     `sandbox.signal_SIGSEGV` and the like are a child that died some other way. The two
+     kinds have different log messages. Both are logged at ERROR, which raises the worker's
+     alarm: either is what a broken file looks like, and what an attack on the parser looks
+     like;
+   - the child could not be started at all: that is the task's fault, not the file's, so the
+     step fails (`inspect_failed`) and the document is not blamed.
    - otherwise the PDF, and its companion file at its own clean version, are copied to
      `originals/`, and the document gets its key and page count.
 4. Steps 5 to 10 follow in the later stages. Until then the document stays `processing`.
@@ -37,7 +45,12 @@ from assay_db import batches
 from assay_tss import keys
 from assay_workers import progress
 from assay_workers.runtime import TenantStorage
-from assay_workers.sandbox.runner import InspectResult, SandboxError
+from assay_workers.sandbox.runner import (
+    InspectResult,
+    SandboxError,
+    SandboxLimit,
+    SandboxNotStarted,
+)
 from assay_workers.worker.db import Job
 
 log = logging.getLogger("assay.worker")
@@ -45,6 +58,12 @@ log = logging.getLogger("assay.worker")
 CONTINUE, ON_HOLD, FAILED, NOT_ELIGIBLE = "continue", "on_hold", "failed", "not_eligible"
 INSPECT = "inspect"
 PDF_UNREADABLE = "pdf_unreadable"
+# The two log messages for a sandbox child that did not end well. They differ on purpose: a
+# limit that did its job is not the same event as a child that died some other way.
+STOPPED_AT_A_LIMIT = "the PDF check was stopped at a sandbox limit"
+ENDED_UNEXPECTEDLY = "the PDF check ended unexpectedly"
+# The prefix of an event's error type that names a sandbox ending: `sandbox.cpu_limit`.
+SANDBOX = "sandbox"
 CHECKSUM_MISMATCH = "checksum_mismatch"
 
 
@@ -125,11 +144,20 @@ def load(conn: Connection, job: Job) -> Document | None:
 
 
 def _finish(
-    deps: Deps, doc: Document, *, status: str, outcome: str, code: str, level: int = logging.INFO
+    deps: Deps,
+    doc: Document,
+    *,
+    status: str,
+    outcome: str,
+    code: str,
+    error_type: str | None = None,
+    level: int = logging.INFO,
 ) -> str:
-    """The document stops here: held or failed, with its code."""
+    """The document stops here: held or failed, with its code. `error_type` is a name for
+    master admins (how a sandbox child ended); a tenant user sees the code's words only."""
+    detail = {"error": code} if error_type is None else {"error": code, "error_type": error_type}
     with deps.engine.begin() as conn:
-        _event(conn, doc, INSPECT, outcome, {"error": code})
+        _event(conn, doc, INSPECT, outcome, detail)
         conn.execute(
             text(
                 "UPDATE assay.documents SET status = :status, error_code = :code, "
@@ -167,10 +195,25 @@ def inspect(doc: Document, deps: Deps) -> str:
             )
         try:
             result = deps.inspect(path)
+        except SandboxNotStarted:
+            # The task could not start the child as the sandbox user. Not the file's fault:
+            # the step fails and the document is not blamed.
+            raise
         except SandboxError as exc:
-            # The reason is a code from the sandbox runner, never anything the child wrote.
-            log.error("the PDF could not be opened", extra=doc.fields | {"reason": exc.reason})
-            return _finish(deps, doc, status="failed", outcome=FAILED, code=PDF_UNREADABLE)
+            # The ending is a name from the sandbox runner, never anything the child wrote.
+            at_a_limit = isinstance(exc, SandboxLimit)
+            log.error(
+                STOPPED_AT_A_LIMIT if at_a_limit else ENDED_UNEXPECTEDLY,
+                extra=doc.fields | {"ending": exc.reason, "sandbox_limit": at_a_limit},
+            )
+            return _finish(
+                deps,
+                doc,
+                status="failed",
+                outcome=FAILED,
+                code=PDF_UNREADABLE,
+                error_type=f"{SANDBOX}.{exc.reason}",
+            )
 
     if result.problem == "pdf_encrypted":
         return _finish(deps, doc, status="on_hold", outcome=ON_HOLD, code=result.problem)

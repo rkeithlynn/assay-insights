@@ -83,6 +83,7 @@ def test_output_that_is_not_exactly_a_result_is_refused(document: Any) -> None:
     with pytest.raises(runner.SandboxBadOutput) as refused:
         runner.inspect(SOURCE, spawn=output(document))
     assert refused.value.reason == "bad_output"
+    assert not isinstance(refused.value, runner.SandboxLimit)
 
 
 @pytest.mark.parametrize(
@@ -110,44 +111,105 @@ def test_the_result_has_no_free_text_at_all() -> None:
         assert model.model_config.get("strict") is True
 
 
-def test_too_much_output_is_refused() -> None:
+def test_too_much_output_is_the_output_limit() -> None:
     big = Completed(returncode=0, stdout=b"x" * (runner.MAX_OUTPUT_BYTES + 1))
-    with pytest.raises(runner.SandboxBadOutput) as refused:
+    with pytest.raises(runner.SandboxLimit) as refused:
         runner.inspect(SOURCE, spawn=spawn_returning(big))
-    assert refused.value.reason == "too_much_output"
+    assert refused.value.reason == "output_limit"
     flagged = Completed(returncode=-9, stdout=b"x", overflow=True)
-    with pytest.raises(runner.SandboxBadOutput):
+    with pytest.raises(runner.SandboxLimit) as killed:
         runner.inspect(SOURCE, spawn=spawn_returning(flagged))
+    assert killed.value.reason == "output_limit"
+
+
+OK = b'{"problem": null, "pages": 3}'
+# The default limits allow 45 seconds of CPU time.
+CPU = Limits().cpu_seconds
 
 
 @pytest.mark.parametrize(
     ("done", "error", "reason"),
     [
-        (Completed(returncode=-9, stdout=b"", timed_out=True), runner.SandboxTimeout, "timeout"),
-        (Completed(returncode=-11, stdout=b""), runner.SandboxKilled, "signal_SIGSEGV"),
+        # --- The sandbox's own limits, each by its own name --------------------------------
+        # The parent stopped it at the wall clock (it knows: it did it).
+        (
+            Completed(returncode=-9, stdout=b"", timed_out=True),
+            runner.SandboxLimit,
+            "wall_clock_timeout",
+        ),
+        # The kernel's CPU limit: SIGXCPU at the soft limit...
+        (Completed(returncode=-24, stdout=b"", cpu_seconds=CPU), runner.SandboxLimit, "cpu_limit"),
+        # ...or, for a child that ignored that, SIGKILL at the hard limit, with the CPU
+        # time used to show for it.
+        (
+            Completed(returncode=-9, stdout=b"", cpu_seconds=CPU + 1.0),
+            runner.SandboxLimit,
+            "cpu_limit",
+        ),
+        (Completed(returncode=-25, stdout=b""), runner.SandboxLimit, "file_size_limit"),
+        (Completed(returncode=12, stdout=b""), runner.SandboxLimit, "memory_limit"),
+        # --- Anything else is never the name of a limit ---------------------------------------
+        # A SIGKILL with little CPU time used: not the CPU limit, whatever it was.
+        (
+            Completed(returncode=-9, stdout=b"", cpu_seconds=0.2),
+            runner.SandboxKilled,
+            "signal_SIGKILL",
+        ),
         (Completed(returncode=-9, stdout=b""), runner.SandboxKilled, "signal_SIGKILL"),
-        (Completed(returncode=12, stdout=b""), runner.SandboxFailed, "out_of_memory"),
+        (Completed(returncode=-11, stdout=b""), runner.SandboxKilled, "signal_SIGSEGV"),
+        (Completed(returncode=-6, stdout=b""), runner.SandboxKilled, "signal_SIGABRT"),
+        (
+            Completed(returncode=-7, stdout=b"", cpu_seconds=CPU * 2),
+            runner.SandboxKilled,
+            "signal_SIGBUS",
+        ),
+        (Completed(returncode=-200, stdout=b""), runner.SandboxKilled, "signal_200"),
         (Completed(returncode=1, stdout=b""), runner.SandboxFailed, "exit_1"),
         # A valid-looking result from a child that did not end well is not used.
+        (Completed(returncode=1, stdout=OK), runner.SandboxFailed, "exit_1"),
         (
-            Completed(returncode=1, stdout=b'{"problem": null, "pages": 3}'),
-            runner.SandboxFailed,
-            "exit_1",
+            Completed(returncode=0, stdout=OK, timed_out=True),
+            runner.SandboxLimit,
+            "wall_clock_timeout",
         ),
-        (
-            Completed(returncode=0, stdout=b'{"problem": null, "pages": 3}', timed_out=True),
-            runner.SandboxTimeout,
-            "timeout",
-        ),
+        (Completed(returncode=-11, stdout=OK), runner.SandboxKilled, "signal_SIGSEGV"),
     ],
 )
-def test_a_child_that_did_not_end_well_gives_a_short_reason_and_nothing_else(
+def test_every_ending_has_its_own_name(
     done: Completed, error: type[runner.SandboxError], reason: str
 ) -> None:
-    with pytest.raises(error) as raised:
+    with pytest.raises(runner.SandboxError) as raised:
         runner.inspect(SOURCE, spawn=spawn_returning(done))
+    assert type(raised.value) is error
     assert raised.value.reason == reason
     assert str(raised.value) == reason
+
+
+def test_a_limit_and_an_unexpected_kill_never_share_a_name() -> None:
+    """Whatever signal ends a child, an unexpected one is `signal_...`, and the names of the
+    sandbox's limits are used for nothing else."""
+    for number in range(1, 65):
+        for cpu in (0.0, CPU - 0.1):
+            done = Completed(returncode=-number, stdout=b"", cpu_seconds=cpu)
+            error = runner.ending(done, Limits())
+            assert error is not None
+            if isinstance(error, runner.SandboxLimit):
+                # Only the two signals that are limits by definition.
+                assert number in (runner.SIGXCPU, runner.SIGXFSZ)
+                assert error.reason in runner.LIMITS
+            else:
+                assert isinstance(error, runner.SandboxKilled)
+                assert error.reason.startswith("signal_") and error.reason not in runner.LIMITS
+    with pytest.raises(ValueError):
+        runner.SandboxLimit("signal_SIGKILL")
+    assert runner.ending(Completed(returncode=0, stdout=OK), Limits()) is None
+
+
+def test_the_cpu_limit_warns_before_it_kills() -> None:
+    """SIGXCPU at the soft limit names the ending; the hard limit follows a second later."""
+    assert confine.CPU_HARD_MARGIN_SECONDS == 1
+    source = (WORKERS / "sandbox" / "confine.py").read_text(encoding="utf-8")
+    assert "(limits.cpu_seconds, limits.cpu_seconds + CPU_HARD_MARGIN_SECONDS)" in source
 
 
 # --- How the child is started ---------------------------------------------------------------------
@@ -164,6 +226,8 @@ def test_the_child_runs_isolated_as_the_sandbox_user_with_an_empty_environment(
         raise PermissionError("not root")
 
     monkeypatch.setattr(subprocess, "Popen", popen)
+    # The children's CPU time is read from the kernel, which only Linux has in this form.
+    monkeypatch.setattr(runner, "_children_cpu_seconds", lambda: 0.0)
     # The switch of user was refused: the job does not run at all.
     with pytest.raises(runner.SandboxNotStarted) as refused:
         runner.inspect(SOURCE)

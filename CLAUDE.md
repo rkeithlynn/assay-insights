@@ -1608,7 +1608,9 @@ Owner decisions (2026-11-24):
 #### Stage 1, part 1: the worker task, the attempt grant, the sandbox, `app_worker`
 
 Deployed on 2026-11-25 from commit 4518d32 (owner). Stack update 31 failed after creating 15
-resources (its error was not kept; the history holds none); update 32 made the rest. A
+resources, on `assay-dev-tss-api-policy`: "Invalid policy document ... ensure that
+Principals are valid", straight after `assay-dev-pipeline-worker-task-role` was created in
+the same run (see "Policies that name a new role" below); update 32 made the rest. A
 preview straight after showed 355 unchanged. `uv run scripts/migrate.py` moved Aurora to
 revision `0010`; `--command verify` (read-only, 2026-11-25) reported `0010`,
 `rls_verified: true`, `roles_verified: true`. All 20 alarms `OK` (the new one is
@@ -1650,9 +1652,9 @@ How it works:
   row (`assay_schemas.pipeline.visible_events`). **Later stages: add each new step to
   `progress.WORKER_STEPS`, to the portal's `STEP_TEXT` and `RESULT_TEXT`, and to
   `PIPELINE_STEPS`.**
-- **A stopped sandbox child fails the document** (`pdf_unreadable`) and logs at ERROR, which
-  raises `worker-errors`: it is what a broken file looks like, and what an attack on the
-  parser looks like.
+- **A sandbox child that does not end well fails the document** (`pdf_unreadable`) and
+  logs at ERROR, which raises `worker-errors`. How it ended is named: see "Every ending of a
+  sandbox child has its own name" below.
 
 Binding the worker (owner decisions A1, A2, B5):
 
@@ -1693,6 +1695,43 @@ The sandbox (owner decisions B3, B4; `assay_workers.sandbox`):
 - The parent distrusts the child: one JSON object, at most 64 KB, validated against a model
   with only numbers and codes from fixed sets. No path or key comes from the child. If the
   child cannot be started as the sandbox user, the job does not run.
+- **Every ending of a sandbox child has its own name** (owner, 2026-11-25), so a limit that
+  did its job never reads the same as a child that died some other way
+  (`sandbox.runner.ending`):
+
+  | Ending | Name | Kind |
+  | --- | --- | --- |
+  | The kernel, at the CPU limit | `cpu_limit` | limit |
+  | The parent, at the wall clock | `wall_clock_timeout` | limit |
+  | The child reported that the address-space limit stopped it | `memory_limit` | limit |
+  | More output than the parent accepts | `output_limit` | limit |
+  | It tried to write a file | `file_size_limit` | limit |
+  | Any other signal (a crash, a kill from outside the sandbox) | `signal_SIGSEGV`, `signal_SIGABRT`, `signal_SIGKILL`, ... | unexpected |
+  | It exited with a failure status, or printed no valid result | `exit_<status>`, `bad_output` | unexpected |
+  | It could not be started as the sandbox user | `not_started` | the task's fault |
+
+  - The CPU limit warns before it kills: SIGXCPU at the soft limit, SIGKILL one second later
+    at the hard limit. SIGXCPU is the CPU limit by definition. A SIGKILL is named
+    `cpu_limit` only if the child had used its CPU time (it ignored the warning); any other
+    SIGKILL is `signal_SIGKILL`, which is what the task running out of memory would look
+    like.
+  - **Not distinguishable:** a native library that cannot get memory usually aborts, so the
+    address-space limit can also end as `signal_SIGABRT` or `signal_SIGSEGV`. Only a
+    Python-level failure to allocate is named `memory_limit`.
+  - **What a real document shows.** For every ending but `not_started`: status Failed, code
+    `pdf_unreadable`. A tenant user sees "The PDF could not be opened. Check the file and
+    upload it again." and nothing more. Master admins see the code and the ending on the
+    Inspection step: `pdf_unreadable · sandbox.cpu_limit`. It is kept in the event's
+    `error_type`, which `platform.ingestion_events_v` already shows them; the tenant's
+    document detail reads `detail.error` only. No migration and no grant changed.
+  - **Logs and the alarm.** One ERROR line per ending, with `ending` and `sandbox_limit`
+    (true or false), and two different messages: "the PDF check was stopped at a sandbox
+    limit" and "the PDF check ended unexpectedly". Both raise `worker-errors`: either is
+    what a broken file looks like, and what an attack on the parser looks like. The
+    execution succeeds (the task handled it), so `executionsfailed` stays quiet.
+  - `not_started` is not the file's fault: the step fails (`inspect_failed`, error type
+    `SandboxNotStarted`) and the document is not blamed. That raises `worker-errors`,
+    `steps-errors` and `executionsfailed`.
 - Not available on Fargate: a cgroup, network namespace or firewall rule for one process; a
   task-level seccomp or AppArmor profile; a second container with another role.
 - Residual risk (accepted by the owner, 2026-11-24): a parser exploit runs as the sandbox
@@ -1767,12 +1806,35 @@ First isolation run after the deploy (owner, 2026-11-25, 11:33 UTC):
   the kernel sends SIGKILL, not SIGXCPU). The image test had accepted either ending, and
   the unit test's stand-in answered `timeout`, so neither caught the wrong expectation. It
   also meant the wall-clock timeout itself was never shown on Fargate.
-- **Fix (same day):** two checks, each with limits only one of which can be reached: a
-  child that spins, with the wall clock far off, must be ended by the kernel (`cpu_limit`);
-  a child that only waits (`sleep`, no CPU time) must be ended by the parent
-  (`timeout`). The image test now requires exactly those. **Lesson: a check that accepts
-  several endings hides which mechanism worked; give each mechanism a case only it can
-  end.** Needs a `pulumi up` (new worker image) and a second isolation run.
+- **Fix (same day):** one check per ending, each with limits only one of which can be
+  reached, and each expecting that ending's own name: a child that spins, with the wall
+  clock far off (`limit:cpu_limit`); one that ignores the kernel's warning
+  (`limit:cpu_limit`); one that only waits, using no CPU time (`limit:wall_clock_timeout`);
+  one that crashes (`unexpected:signal_SIGABRT`). The image test requires exactly those.
+  **Lesson: a check that accepts several endings hides which mechanism worked; give each
+  mechanism a case only it can end.** Needs a `pulumi up` (new worker image) and a second
+  isolation run: expect 68 worker checks.
+- **Policies that name a new role** (owner, 2026-11-25). IAM is eventually consistent: for
+  some seconds after a role is created, another service may refuse a resource policy that
+  names it as a principal. That is what failed update 31. A policy's dependency on the role
+  is not enough (Pulumi waits for the role, not for IAM to tell every service), so each
+  such policy also depends on `iam_propagation` (`infra/assay_infra/propagation.py`): a
+  local command that waits 30 seconds once the roles exist. It runs when first created and
+  again only when the set of roles changes, never on an ordinary `pulumi up` or a preview,
+  and changes nothing in AWS.
+  - The three policies with a role of this program in a `Principal` element: the TSS API's
+    resource policy (API Gateway; the provider does not retry it, and it is the one that
+    failed), the tenant role's trust policy and the tenant-state key's policy (IAM and KMS;
+    the provider retries both, and each was created with its role in build step 4 without
+    failing; they wait all the same).
+  - Policies that name a role only in a condition (`aws:PrincipalArn`) are not checked
+    against IAM and need nothing: the ingest queue's, the state bucket's and every VPC
+    endpoint's.
+  - **A new policy that names a role of this program as a principal must depend on the
+    wait.** Part 2's security-notice topic will not: the scan role publishes through its own
+    IAM policy, and the topic's policy names only services.
+  - Not shown to work: it can only be shown by a run that creates a role and such a policy
+    together, and the next one that does is a new stack.
 
 Settled by that run and the deploy:
 

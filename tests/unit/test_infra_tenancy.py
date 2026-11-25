@@ -1651,3 +1651,67 @@ def test_the_tss_is_told_each_callers_accesses() -> None:
         "pl-worker-role": {"service": "worker", "access": ["worker"]},
         "pl-api-role": {"service": "api", "access": ["read", "upload"]},
     }
+
+
+# --- Policies that name a role created in the same run wait for IAM (2026-11-25) --------------
+
+
+@pulumi.runtime.test
+def test_policies_that_name_new_roles_wait_for_iam_to_know_them() -> Any:
+    """The first `pulumi up` of the second half failed: the TSS API's policy named the worker
+    task's role a moment after it was created, and API Gateway did not know it yet. Each
+    such policy now depends on a wait that runs once the roles exist."""
+    from assay_infra import propagation
+
+    stack = Stack("t9")
+
+    def check(_: list[Any]) -> None:
+        waits = {
+            name: inputs
+            for name, inputs in registered("command:local:Command", "t9-")
+            if name.endswith("-iam-propagation")
+        }
+        assert set(waits) == {"t9-tss-iam-propagation", "t9-provision-iam-propagation"}
+        for inputs in waits.values():
+            # It only waits: no AWS call, nothing to delete, nothing on an ordinary run.
+            assert inputs["create"] == propagation.WAIT == "import time; time.sleep(30)"
+            assert inputs["interpreter"][-2:] == ["python", "-c"]
+            assert "delete" not in inputs and "update" not in inputs
+        # It runs again when, and only when, the roles it waited for change.
+        [tss_roles] = waits["t9-tss-iam-propagation"]["triggers"]
+        assert len(tss_roles) == 2 and tss_roles == sorted(tss_roles)
+        assert any("t9-tss-role" in arn for arn in tss_roles)
+        assert any("t9-isolation-role" in arn for arn in tss_roles)
+        [provision_roles] = waits["t9-provision-iam-propagation"]["triggers"]
+        assert len(provision_roles) == 1 and "t9-provision-task-role" in provision_roles[0]
+
+    return pulumi.Output.all(
+        stack.ready(), stack.storage.iam_ready.id, stack.provisioning.iam_ready.id
+    ).apply(check)
+
+
+def test_each_policy_with_a_new_role_as_principal_depends_on_the_wait() -> None:
+    """Read from the source: the three resources whose policy names, as a principal, a role
+    this program creates. (A dependency is not among a resource's inputs, so the mocks
+    cannot show it.)"""
+    tss_source = (REPO_ROOT / "infra" / "assay_infra" / "tss.py").read_text(encoding="utf-8")
+    provisioning_source = (REPO_ROOT / "infra" / "assay_infra" / "provisioning.py").read_text(
+        encoding="utf-8"
+    )
+    waiting = "depends_on=[self.iam_ready]"
+
+    def options_of(source: str, resource: str) -> str:
+        start = source.index(resource)
+        return source[start : source.index("\n        )\n", start)]
+
+    assert waiting in options_of(tss_source, "self.api_policy = aws.apigateway.RestApiPolicy(")
+    assert waiting in options_of(tss_source, "self.tenant_role = aws.iam.Role(")
+    state_key = options_of(provisioning_source, "self.state_key = aws.kms.Key(")
+    assert waiting in state_key and "protect=True" in state_key
+
+
+def test_a_wait_needs_a_role() -> None:
+    from assay_infra import propagation
+
+    with pytest.raises(ValueError, match="at least one role"):
+        propagation.iam_propagation("w", roles=[], repo_root=REPO_ROOT)

@@ -60,6 +60,23 @@ size limit, that validates against a model with only numbers and codes from fixe
 path or key ever comes from the child. If the child cannot be started as the sandbox user,
 the job does not run.
 
+Every way a child can end without a result has its own name, in the log line (`ending`) and
+in the document's event (`error_type`, shown to master admins only):
+
+| Ending | Name |
+| --- | --- |
+| The kernel stopped it at the CPU limit | `sandbox.cpu_limit` |
+| The parent stopped it at the wall clock | `sandbox.wall_clock_timeout` |
+| The address-space limit stopped it, and it said so | `sandbox.memory_limit` |
+| It printed more than the parent accepts | `sandbox.output_limit` |
+| It tried to write a file | `sandbox.file_size_limit` |
+| Any other signal: a crash, or a kill from outside the sandbox | `sandbox.signal_SIGSEGV`, `sandbox.signal_SIGKILL`, ... |
+| It exited with a failure, or printed no valid result | `sandbox.exit_<status>`, `sandbox.bad_output` |
+
+The first five are the sandbox's limits doing their job; the rest are not, and the two kinds
+have different log messages. In every case the tenant sees only `pdf_unreadable` ("The PDF
+could not be opened"), and the line is logged at ERROR, which raises the worker's alarm.
+
 What Fargate cannot give one process, and so the sandbox does not have: its own cgroup
 (memory is limited by address space, with the task's 4 GB as the backstop), its own network,
 process or mount namespace, or a task-level seccomp or AppArmor profile.

@@ -128,6 +128,20 @@ def _spin() -> dict[str, Any]:
         pass
 
 
+def _spin_ignoring_the_warning() -> dict[str, Any]:
+    """Ignores SIGXCPU and keeps going: the hard CPU limit kills it a moment later."""
+    if sys.platform != "linux":
+        raise OSError("the sandbox runs on Linux only")
+    signal.signal(signal.SIGXCPU, signal.SIG_IGN)
+    while True:
+        pass
+
+
+def _crash() -> dict[str, Any]:
+    """Dies the way a parser does when it goes wrong: SIGABRT, not at any limit."""
+    os.abort()
+
+
 def _sleep() -> dict[str, Any]:
     """Waits without end and uses no processor time: only the parent's wall clock stops it."""
     while True:
@@ -164,6 +178,8 @@ def _fork_bomb() -> dict[str, Any]:
 SELFTESTS = {
     "report": _report,
     "spin": _spin,
+    "stubborn": _spin_ignoring_the_warning,
+    "crash": _crash,
     "sleep": _sleep,
     "memory": _exhaust_memory,
     "flood": _flood,

@@ -31,6 +31,7 @@ import pulumi_aws as aws
 from assay_infra.database import Database, db_user_arn
 from assay_infra.images import WORKSPACE_MANIFESTS, ContainerImage
 from assay_infra.network import Network
+from assay_infra.propagation import iam_propagation
 from assay_tss import policies
 from assay_tss.naming import tenant_pattern
 
@@ -475,6 +476,15 @@ class TenantStorage(pulumi.ComponentResource):
             ),
             opts=child,
         )
+        # The policies below name roles created in this same program as principals: the
+        # tenant role's trust policy (the TSS's role) and the API's resource policy (every
+        # caller's role). Each waits until IAM has had time to make those roles known.
+        self.iam_ready = iam_propagation(
+            f"{name}-iam-propagation",
+            roles=[self.role.arn, *[caller.role.arn for caller in callers.values()]],
+            repo_root=repo_root,
+            opts=child,
+        )
         self.tenant_role = aws.iam.Role(
             f"{name_prefix}-tenant-role",
             name=f"{name_prefix}-tenant",
@@ -486,7 +496,7 @@ class TenantStorage(pulumi.ComponentResource):
             ),
             # The shortest maximum IAM allows. The TSS asks for 900 seconds.
             max_session_duration=3600,
-            opts=child,
+            opts=pulumi.ResourceOptions(parent=self, depends_on=[self.iam_ready]),
         )
         aws.iam.RolePolicy(
             f"{name_prefix}-tenant-policy",
@@ -592,7 +602,9 @@ class TenantStorage(pulumi.ComponentResource):
                     worker_callers=list(v[2 + resolvers :]),
                 )
             ),
-            opts=child,
+            # API Gateway refuses a policy that names a role IAM has not yet made known to
+            # it, and the provider does not retry (the failed run of 2026-11-25).
+            opts=pulumi.ResourceOptions(parent=self, depends_on=[self.iam_ready]),
         )
         resource = aws.apigateway.Resource(
             f"{name}-api-resolve",

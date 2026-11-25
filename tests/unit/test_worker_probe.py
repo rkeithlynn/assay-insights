@@ -150,17 +150,19 @@ class GoodSandbox:
         "no_new_privs": 1,
         "seccomp": 2,
     }
-    # As on Fargate (2026-11-25): the kernel kills a spinning child at its CPU limit.
-    stopped = {  # noqa: RUF012
-        "spin": "signal_SIGKILL",
-        "sleep": "timeout",
-        "memory": "out_of_memory",
-        "flood": "too_much_output",
+    # How each misbehaving child ends in a sandbox that works: by name.
+    stopped: dict[str, runner.SandboxError] = {  # noqa: RUF012
+        "spin": runner.SandboxLimit("cpu_limit"),
+        "stubborn": runner.SandboxLimit("cpu_limit"),
+        "sleep": runner.SandboxLimit("wall_clock_timeout"),
+        "memory": runner.SandboxLimit("memory_limit"),
+        "flood": runner.SandboxLimit("output_limit"),
+        "crash": runner.SandboxKilled(6),
     }
 
     def selftest(self, name: str, *, limits: Limits | None = None) -> runner.SelfTestResult:
         if name in self.stopped:
-            raise runner.SandboxError(self.stopped[name])
+            raise self.stopped[name]
         return runner.SelfTestResult.model_validate(self.report)
 
     def inspect(self, path: Path) -> runner.InspectResult:
@@ -300,6 +302,8 @@ def test_every_check_passes_on_a_correct_system(world: World) -> None:
         "sandbox: the child cannot open a socket",
         "sandbox: the child cannot read the parent's memory",
         "sandbox: a child that spins is stopped by the CPU limit",
+        "sandbox: a child that ignores the CPU warning is still stopped by the CPU limit",
+        "sandbox: a child that crashes is reported as an unexpected signal, not a limit",
         "sandbox: a child that never finishes is stopped at the wall-clock timeout",
         "sandbox: a child that tries to exhaust memory is stopped",
         "sandbox: a child that floods its output is stopped",
@@ -431,29 +435,16 @@ def test_a_sandbox_that_is_not_confined_fails_its_check(
     assert any(check in p for p in problems), problems
 
 
+def without(*names: str) -> dict[str, runner.SandboxError]:
+    return {k: v for k, v in GoodSandbox.stopped.items() if k not in names}
+
+
 def test_a_child_that_is_not_stopped_fails_its_check(world: World) -> None:
     class Unlimited(GoodSandbox):
-        stopped = {  # noqa: RUF012
-            "spin": "signal_SIGKILL",
-            "sleep": "timeout",
-            "flood": "too_much_output",
-        }
+        stopped = without("memory")
 
     problems = failed(world.probe(world.prepare(), sandbox=Unlimited()).run())
     assert any("tries to exhaust memory is stopped" in p for p in problems)
-
-
-@pytest.mark.parametrize("signal", ["signal_SIGKILL", "signal_SIGXCPU"])
-def test_either_way_the_kernel_ends_a_process_at_its_cpu_limit_passes(
-    world: World, signal: str
-) -> None:
-    """The first run in AWS (2026-11-25) failed here: the check expected the wall-clock
-    timeout, and the kernel's CPU limit, which comes first, had done its job."""
-
-    class Kernel(GoodSandbox):
-        stopped = GoodSandbox.stopped | {"spin": signal}
-
-    assert failed(world.probe(world.prepare(), sandbox=Kernel()).run()) == []
 
 
 def test_each_time_limit_is_tried_where_only_it_can_stop_the_child(world: World) -> None:
@@ -465,34 +456,74 @@ def test_each_time_limit_is_tried_where_only_it_can_stop_the_child(world: World)
             return super().selftest(name, limits=limits)
 
     assert failed(world.probe(world.prepare(), sandbox=Watching()).run()) == []
-    spin, sleep = seen["spin"], seen["sleep"]
-    assert spin is not None and sleep is not None
-    # The spinning child: the CPU limit long before the wall clock.
-    assert spin.cpu_seconds * 5 <= spin.wall_seconds
-    # The waiting child: it uses no CPU time, so only the wall clock can end it.
+    for spinning in ("spin", "stubborn"):
+        limits = seen[spinning]
+        assert limits is not None
+        # The CPU limit long before the wall clock.
+        assert limits.cpu_seconds * 5 <= limits.wall_seconds
+    sleep = seen["sleep"]
+    assert sleep is not None
+    # It uses no CPU time, so only the wall clock can end it.
     assert sleep.wall_seconds * 5 <= sleep.cpu_seconds
 
 
-def test_a_cpu_limit_that_does_not_bite_fails_its_check(world: World) -> None:
-    """Without the CPU limit, a spinning child lasts until the wall clock: `timeout`, which
-    is not what this check accepts."""
+@pytest.mark.parametrize(
+    ("probe", "wrong", "check", "was"),
+    [
+        # The first run in AWS (2026-11-25): the kernel's kill at the CPU limit, reported
+        # only as the signal. It must be named as the limit it is.
+        (
+            "spin",
+            runner.SandboxKilled(9),
+            "that spins is stopped by the CPU limit",
+            "unexpected:signal_SIGKILL",
+        ),
+        # Without the CPU limit a spinning child lasts until the wall clock.
+        (
+            "spin",
+            runner.SandboxLimit("wall_clock_timeout"),
+            "that spins is stopped by the CPU limit",
+            "limit:wall_clock_timeout",
+        ),
+        (
+            "stubborn",
+            runner.SandboxKilled(9),
+            "that ignores the CPU warning is still stopped by the CPU limit",
+            "unexpected:signal_SIGKILL",
+        ),
+        # A crash given a limit's name would hide a parser that died some other way.
+        (
+            "crash",
+            runner.SandboxLimit("cpu_limit"),
+            "that crashes is reported as an unexpected signal, not a limit",
+            "limit:cpu_limit",
+        ),
+        (
+            "sleep",
+            runner.SandboxKilled(9),
+            "that never finishes is stopped at the wall-clock timeout",
+            "unexpected:signal_SIGKILL",
+        ),
+    ],
+)
+def test_an_ending_reported_under_the_wrong_name_fails_its_check(
+    world: World, probe: str, wrong: runner.SandboxError, check: str, was: str
+) -> None:
+    class Misnamed(GoodSandbox):
+        stopped = GoodSandbox.stopped | {probe: wrong}
 
-    class NoCpuLimit(GoodSandbox):
-        stopped = GoodSandbox.stopped | {"spin": "timeout"}
-
-    problems = failed(world.probe(world.prepare(), sandbox=NoCpuLimit()).run())
-    assert problems == [
-        "sandbox: a child that spins is stopped by the CPU limit: expected cpu_limit, was timeout"
-    ]
+    problems = failed(world.probe(world.prepare(), sandbox=Misnamed()).run())
+    assert len(problems) == 1 and check in problems[0] and problems[0].endswith(f"was {was}")
 
 
 def test_a_wall_clock_that_does_not_stop_a_waiting_child_fails_its_check(world: World) -> None:
     class NoWallClock(GoodSandbox):
-        stopped = {k: v for k, v in GoodSandbox.stopped.items() if k != "sleep"}  # noqa: RUF012
+        stopped = without("sleep")
 
     problems = failed(world.probe(world.prepare(), sandbox=NoWallClock()).run())
     assert any(
-        "stopped at the wall-clock timeout: expected timeout, was returned" in p for p in problems
+        "stopped at the wall-clock timeout: expected limit:wall_clock_timeout, was returned" in p
+        for p in problems
     )
 
 

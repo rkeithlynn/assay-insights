@@ -48,13 +48,23 @@ class Limits:
     processes: int = 16
 
 
+# How long after SIGXCPU a process that ignores it is killed.
+CPU_HARD_MARGIN_SECONDS = 1
+
+
 def apply_limits(limits: Limits) -> None:
     if sys.platform != "linux":
         raise OSError("the sandbox runs on Linux only")
     import resource
 
+    # At the soft CPU limit the kernel sends SIGXCPU, which ends a process that does not
+    # catch it and says plainly why. A process that ignores it is killed (SIGKILL) at the
+    # hard limit, a moment later; the parent then tells that from any other kill by the CPU
+    # time the child used (`runner.ending`).
+    resource.setrlimit(
+        resource.RLIMIT_CPU, (limits.cpu_seconds, limits.cpu_seconds + CPU_HARD_MARGIN_SECONDS)
+    )
     for name, value in (
-        (resource.RLIMIT_CPU, limits.cpu_seconds),
         (resource.RLIMIT_AS, limits.address_space_bytes),
         (resource.RLIMIT_FSIZE, limits.file_size_bytes),
         (resource.RLIMIT_NOFILE, limits.open_files),
