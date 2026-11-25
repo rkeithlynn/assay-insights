@@ -14,7 +14,7 @@ from botocore.exceptions import ClientError
 
 from assay_tss import handler as tss_handler
 from assay_tss import keys, naming, service
-from assay_tss.client import TssClient
+from assay_tss.client import TssClient, TssRequestError
 from assay_tss.models import (
     REQUESTABLE_ACCESS,
     IsolationMode,
@@ -677,3 +677,139 @@ def test_client_sends_a_worker_request_to_its_own_route(monkeypatch: pytest.Monk
     assert seen[0][0] == "/resolve-worker"
     assert json.loads(seen[0][1]) == {"document_id": str(DOCUMENT), "attempt": 1, "token": TOKEN}
     assert context.access is StorageAccess.WORKER and context.document_id == DOCUMENT
+
+
+# --- The client tries again when a call never reached the TSS (2026-11-25) ----------------------
+
+
+class Gateway:
+    """Stands in for urlopen: answers with each queued response in turn."""
+
+    def __init__(self, *answers: tuple[int, dict[str, Any]] | dict[str, Any]) -> None:
+        self.answers = list(answers)
+        self.calls = 0
+
+    def __call__(self, request: Any, timeout: float) -> Any:
+        import io
+        import urllib.error
+        from email.message import Message
+
+        self.calls += 1
+        answer = self.answers.pop(0)
+        if isinstance(answer, dict):
+            return io.BytesIO(json.dumps(answer).encode())
+        status, body = answer
+        raise urllib.error.HTTPError(
+            request.full_url, status, "error", Message(), io.BytesIO(json.dumps(body).encode())
+        )
+
+
+def retrying_client(
+    monkeypatch: pytest.MonkeyPatch, gateway: Gateway
+) -> tuple[TssClient, list[float]]:
+    import urllib.request
+
+    session = boto3.Session(
+        aws_access_key_id="AKIAFAKE", aws_secret_access_key="fake", region_name=REGION
+    )
+    waits: list[float] = []
+    tss = TssClient(
+        "https://abc123.execute-api.us-east-1.amazonaws.com/v1",
+        region=REGION,
+        session=session,
+        sleep=waits.append,
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", gateway)
+    return tss, waits
+
+
+# What API Gateway answered on 2026-11-25 when Lambda throttled the TSS's function.
+THROTTLED = (500, {"message": "Internal server error"})
+ISSUED = {"ok": True}
+
+
+def test_a_call_that_lambda_throttled_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    gateway = Gateway(THROTTLED, THROTTLED, ISSUED)
+    tss, waits = retrying_client(monkeypatch, gateway)
+    caplog.set_level(logging.WARNING)
+    assert tss.send(tss.signed_request("/resolve", b"{}")) == ISSUED
+    assert gateway.calls == 3 and len(waits) == 2
+    # Short waits that grow, each within its jitter.
+    assert 0.2 <= waits[0] <= 0.6 and 0.4 <= waits[1] <= 1.2
+    # A warning each time, never an error: nothing failed.
+    assert [r.levelname for r in caplog.records] == ["WARNING", "WARNING"]
+    assert caplog.records[0].status == 500  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (429, {"message": "Too Many Requests"}),
+        (502, {"message": "Internal server error"}),
+        (503, {"message": "Service Unavailable"}),
+        (504, {"message": "Endpoint request timed out"}),
+        (500, {}),
+    ],
+)
+def test_api_gateways_own_answers_are_tried_again(
+    monkeypatch: pytest.MonkeyPatch, answer: tuple[int, dict[str, Any]]
+) -> None:
+    gateway = Gateway(answer, ISSUED)
+    tss, waits = retrying_client(monkeypatch, gateway)
+    assert tss.send(tss.signed_request("/resolve", b"{}")) == ISSUED
+    assert gateway.calls == 2 and len(waits) == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (403, {"error": "access_not_allowed"}),
+        (403, {"error": "worker_grant_refused"}),
+        (403, {"Message": "User is not authorized to perform: execute-api:Invoke"}),
+        (404, {"error": "no_storage_for_tenant"}),
+        (409, {"error": "storage_not_active"}),
+        (400, {"error": "invalid_request"}),
+        # The TSS's own 500s: a fault that asking again will not cure.
+        (500, {"error": "tenant_role_refused"}),
+        (500, {"error": "storage_profile_invalid"}),
+        (500, {"error": "internal_error"}),
+    ],
+)
+def test_the_tsss_own_answers_are_never_tried_again(
+    monkeypatch: pytest.MonkeyPatch, answer: tuple[int, dict[str, Any]]
+) -> None:
+    gateway = Gateway(answer, ISSUED)
+    tss, waits = retrying_client(monkeypatch, gateway)
+    with pytest.raises(TssRequestError) as refused:
+        tss.send(tss.signed_request("/resolve", b"{}"))
+    assert refused.value.status == answer[0] and refused.value.transient is False
+    assert gateway.calls == 1 and waits == []
+
+
+def test_after_five_tries_the_last_answer_is_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway = Gateway(*[THROTTLED] * 6)
+    tss, waits = retrying_client(monkeypatch, gateway)
+    with pytest.raises(TssRequestError) as refused:
+        tss.send(tss.signed_request("/resolve", b"{}"))
+    assert (refused.value.status, refused.value.code) == (500, "Internal server error")
+    assert refused.value.transient is True
+    assert gateway.calls == 5 and len(waits) == 4
+    assert sum(waits) < 10  # well inside a Lambda function's time
+
+
+def test_a_call_that_took_too_long_is_not_repeated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 504 after API Gateway's 29 seconds: another try would outlast the caller."""
+    import itertools
+    import time
+
+    gateway = Gateway((504, {"message": "Endpoint request timed out"}), ISSUED)
+    tss, waits = retrying_client(monkeypatch, gateway)
+    # The clock the client reads: the call began at 0 and came back 29.5 seconds later.
+    calls = itertools.count()
+    monkeypatch.setattr(time, "monotonic", lambda: 0.0 if next(calls) == 0 else 29.5)
+    with pytest.raises(TssRequestError) as refused:
+        tss.send(tss.signed_request("/resolve", b"{}"))
+    assert refused.value.status == 504
+    assert gateway.calls == 1 and waits == []

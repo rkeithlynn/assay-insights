@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run passed but for one check that was itself wrong (fixed; redeploy and re-run pending); browser checks pending. See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). Part 2 not started: the TSS API's empty access log is to be settled first. See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -261,6 +261,12 @@ Still open:
   below 5.16 (releases younger than two weeks on 2026-11-24).
 - **Before production (unchanged):** VPC flow logs to the Log Archive account; an
   approval-gated break-glass role; a Cognito signing-key rotation needs a `pulumi up`.
+- **Before deploying to Staging or Production (owner, 2026-11-25): request the Lambda
+  concurrent-executions quota increase in that account first.** A new account allows 10
+  concurrent executions (Service Quotas L-B99A9384), which is too few for the pipeline: see
+  "One scan result failed once" in the step 6 notes. Request 1,000, as for Development:
+  `aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --profile <profile> --region us-east-1`,
+  and wait until it is granted before the first `pulumi up`.
 
 ### Reading audit_log
 
@@ -1812,8 +1818,13 @@ First isolation run after the deploy (owner, 2026-11-25, 11:33 UTC):
   (`limit:cpu_limit`); one that only waits, using no CPU time (`limit:wall_clock_timeout`);
   one that crashes (`unexpected:signal_SIGABRT`). The image test requires exactly those.
   **Lesson: a check that accepts several endings hides which mechanism worked; give each
-  mechanism a case only it can end.** Needs a `pulumi up` (new worker image) and a second
-  isolation run: expect 68 worker checks.
+  mechanism a case only it can end.**
+- **Second isolation run** (owner, 2026-11-25 12:27 UTC, after stack update 34 deployed
+  commit 714ec8c): 71 of 71 in the isolation Lambda, 28 of 28 in the provisioning role's
+  probe, **68 of 68 in the worker probe**, 7 of 7 app client checks. So each ending is
+  reported by its own name on Fargate too: the CPU limit for a child that spins and for one
+  that ignores the warning, the wall-clock timeout for one that only waits, and an
+  unexpected signal for one that crashes.
 - **Policies that name a new role** (owner, 2026-11-25). IAM is eventually consistent: for
   some seconds after a role is created, another service may refuse a resource policy that
   names it as a principal. That is what failed update 31. A policy's dependency on the role
@@ -1851,13 +1862,74 @@ Settled by that run and the deploy:
 - **A worker task starts in about 18 seconds** (the probe task: created 11:33:03, image
   pulled in 6 seconds, started 11:33:21 UTC), not the 30 to 90 estimated.
 
+Browser check (owner, Infinity Loans, `--fresh` set, batch received 2026-11-25 11:51 UTC,
+on stack update 33; update 34 deployed commit 714ec8c afterwards, at 12:21 UTC, and the
+isolation run has not been repeated on it yet):
+
+- 02 `processing`, Inspection: Passed (fingerprint 11:56:11, inspection 11:56:37: 26 seconds
+  from fingerprint to the inspection's result, the task's start included); 01 `duplicate`
+  (which of the two is the original depends on which is fingerprinted first).
+- 04 `processing` with its companion; 05 `processing` after "Close without the companion
+  file"; 06 `failed` at Fingerprint, "The file is not a PDF."
+- **03 and 07 `on_hold` at the scan: GuardDuty held both the 40-bit and the 128-bit
+  protected PDF** (`scan_unsupported`). So neither reached the worker; its own check was
+  shown by the probe on Fargate (both `pdf_encrypted`).
+
+**One scan result failed once, and Lambda's retry recovered it** (same batch):
+
+- `assay-dev-pipeline-scan-errors` (11:52 UTC) and `-scan-failed` (11:53 UTC) fired. One
+  invocation, request ID `61eaf513-114b-40cd-831b-0834a5b6bad0`, raised
+  `TssRequestError: TSS refused the request: 500 Internal server error` at its call for a
+  storage context (`scan.py`, `deps.storage.pipeline`). It was the result for 02's file
+  (`86845ddc-…`). Lambda retried it 59 seconds later with the same request ID and event,
+  and it was recorded clean at 11:52:24. Until then the file showed "Waiting for its scan".
+- **Cause: Lambda concurrency, not the files and not Aurora.** The account's quota is **10
+  concurrent executions** (`aws lambda get-account-settings`; Service Quotas L-B99A9384,
+  adjustable, never raised). Nine scan results arrived together, so nine scan functions ran
+  at once, each needing the TSS's function too. The account reached 10 concurrent
+  executions that minute and Lambda throttled one invocation of `assay-dev-tss`
+  (`Throttles` 1, `Errors` 0). API Gateway answered that call itself: 500 "Internal server
+  error" (its own `message`, not the TSS's `error`). The TSS's log has a "storage context
+  issued" line for each of the other eight files at 11:51:24 to 11:51:26 and none for this
+  one until 11:52:23: its function never ran for the failed call.
+  - Not the identical files: the failure came before anything about the file's content was
+    read, and 01's result, with the same bytes, was recorded with the others.
+  - Not Aurora: the invocation had already made its database lookup, and the other eight
+    were recorded within two seconds.
+- **What saved it:** only Lambda's retry of the asynchronous invocation (2 retries, events
+  kept an hour). Had all three attempts failed, the event would have gone to the scan
+  dead-letter queue (alarm), the file would have stayed `registered`, and after 30 minutes
+  the sweeper would have put its PDF `on_hold` (`scan_timeout`, alarm). Nothing is lost
+  silently, but a good document would have ended on hold.
+- **Fix in code** (no permission change): `TssClient.send` tries again, up to five times
+  over at most 20 seconds with jitter, when the answer is API Gateway's own (429, 502, 503,
+  504, or a 500 without the TSS's `error`). The TSS's own answers are never retried. It
+  logs a WARNING per retry. This covers every caller: the scan, step and sweeper functions,
+  the worker task and the API.
+- **That does not cure the limit.** With 10 concurrent executions, a batch of 200 PDFs
+  cannot work: scan functions would hold every slot while each waits for a TSS call that
+  cannot get one. Reserved concurrency cannot be set either, with a quota this low. The
+  same limit can throttle the Cognito triggers (a sign-in), the API's calls to the Cognito
+  admin function and the state machine's steps. **The owner asked AWS to raise the
+  quota to 1,000** on 2026-11-25 12:36 UTC (request `7902077dd06644889e37c4c5dde4b612UGimylpJ`,
+  `PENDING` when made; the usual default):
+  `aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --profile pilar-dev --region us-east-1`.
+  Once it is granted, propose the scan function's concurrency cap and the TSS's reserved
+  concurrency to the owner, with the reasoning for the numbers. **Set neither before then**
+  (owner, 2026-11-25). Staging and Production need the same request before their first
+  deploy (see "Before deploying to Staging or Production").
+- **Found on the way: the TSS API's access log has never received an entry.** The stage has
+  access logging set to `/aws/apigateway/assay-dev-tss`, and that log group has no stream
+  and 0 bytes since build step 4. So API Gateway's own record of the 500 (caller,
+  integration status) does not exist. Not yet investigated.
+
 Still not known:
 
 - How a RunTask refused for the vCPU quota reaches Step Functions. The design does not
   depend on it: any failed task with no `worker`/`running` event is waited out.
-- Whether GuardDuty holds every kind of password-protected PDF at the scan (see the note
-  below; `07-password-protected-128.pdf` is the one to try).
-- The browser checks: a fresh upload reaching Inspection: Passed.
+- Whether GuardDuty holds every kind of password-protected PDF at the scan. It held both
+  kinds tried (40-bit and 128-bit RC4); AES-encrypted PDFs were not tried.
+- Why the TSS API's access log is empty.
 
 Notes:
 
@@ -1894,6 +1966,6 @@ Notes:
     in the real sandbox, on Fargate, on a plain PDF, both protected PDFs and a broken one
     (`assay_workers/worker/probe_files.py`, the test-file script's own output).
   `07-password-protected-128.pdf` (128-bit RC4) is a second kind to try through the browser.
-  If GuardDuty passes it, the panel shows Inspection: On hold. If it holds it too, the panel
-  shows the scan's "Could not be scanned", as for 03. Record which here once it is tried.
+  **Tried on 2026-11-25: GuardDuty held it too** (`scan_unsupported`, "Could not be
+  scanned"), as it holds 03. So no upload has yet reached the worker's own check.
 
