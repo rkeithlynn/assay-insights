@@ -36,44 +36,59 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) complete and verified in dev** (2026-11-27). Stages 3 and 4 not started. Next: stage 3, which needs its plan first. See "Start here" below |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) complete and verified in dev** (2026-11-27). After it, the upload screen's fixes and the scan role's limit to `inbox/`, deployed and verified in dev (2026-11-27). Stages 3 and 4 not started. Next: stage 3, which needs its plan first. See "Start here" below |
 | 7–9 | Not started |
 
-## Start here: stage 2 of the second half of step 6 is deployed and verified; stage 3 needs its plan (state on 2026-11-27)
+## Start here: everything built is deployed and verified in dev; stage 3 needs its plan (state on 2026-11-27)
 
 A new session starts from this section and BUILD_SPEC.md section 8. Everything below it is
 the record: read the part a task touches. **Stage 2 (step 5, text) is built, deployed and
-verified in dev.** Stage 3 is not started and needs its own plan first.
+verified in dev, and so are the two changes made after it** (the upload screen's fixes and
+the scan role's limit to `inbox/`). **Nothing is built and waiting for a deploy.** Stage 3
+is not started and needs its own plan first: "For stage 3" below is where that plan starts.
 
 ### Where things stand
 
 - **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
   against `main`. `main` has not been fast-forwarded yet (the owner does that). Stage 3
   continues on `build-step-6`.
-- **Deployed: stage 2, as stack update 41** (2026-11-27, commit 524a0aa), with Aurora at
-  migration `0012` (owner).
+- **Deployed: stack update 42** (2026-11-27 about 22:56 UTC, commit c9b70a1, 38 seconds;
+  owner), with Aurora at migration `0012`. Update 41 (commit 524a0aa) was stage 2. Update 42
+  carried the scan role's policy and the portal build with the upload screen's fixes: its
+  history line reads 1 updated and 363 unchanged, as the preview said (the line does not
+  print a replacement, which is what the portal build was).
 - **Verified in dev by the owner (2026-11-27).**
-  - The isolation suite passes: 73 in the isolation Lambda, 28 in the provisioning role's
-    probe, 101 in the worker probe, 28 Cognito checks.
-  - The Text line is right for the five synthetic files: 01 and 04 all from the text layer;
-    08 three pages by OCR; 09 one from the text layer and two by OCR; 10 one by OCR.
-  - The 1,000-page file was read in 7 minutes 48 seconds ("The 1,000-page run" below).
-- **Built after that, not deployed.** One `pulumi up` carries both; neither has a
-  migration.
-  1. The upload screen's fixes ("Upload: files that went missing" below): the portal build.
-  2. The scan role's object access limited to `inbox/` ("The scan role's reach" below): one
-     role policy. **The owner tests it on Isolation Test A before anything else is
-     uploaded.**
-- **Tested (2026-11-27), with the upload fixes and the scan role's switch in.** The whole
-  suite with the test PostgreSQL and the image tests required (`ASSAY_REQUIRE_DB_TESTS=1`,
-  `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,796 passed, none failed, none skipped (1,792 at stage 2,
-  and four new tests of the scan role's policy). The portal's type check, lint and 118 unit
-  tests pass, and the rendered check passes, 58 of 58 (the 48 layout checks and the 10 new
-  upload checks). CI passed on commit e70eaea (`python`, `portal`, `portal-render`).
-- **The preview for these changes** (2026-11-27, commit e70eaea): 1 to update (the scan
-  role's policy: the `Resource` of `AllowPostScanTag` and `AllowMalwareScan`, from
-  `assay-dev-t-*/*` to `assay-dev-t-*/inbox/*`, and nothing else in it), 1 to replace (the
-  portal build), 363 unchanged, and two new outputs.
+  - Stage 2. The isolation suite passes: 73 in the isolation Lambda, 28 in the provisioning
+    role's probe, 101 in the worker probe, 28 Cognito checks. The Text line is right for the
+    five synthetic files: 01 and 04 all from the text layer; 08 three pages by OCR; 09 one
+    from the text layer and two by OCR; 10 one by OCR. The 1,000-page file was read in 7
+    minutes 48 seconds ("The 1,000-page run" below).
+  - The scan role's limit to `inbox/`, after update 42 ("The scan role's reach" below): the
+    deployed policy ends in `/inbox/*`; on Isolation Test A a clean file was scanned and
+    processed, and EICAR was quarantined with its security notice; all four plans `ACTIVE`;
+    the isolation suite again 73, 28, 101 and 28; `check_deployment.py` clean. **One check
+    is still due: the plans' status again on 2026-11-28** ("Open items").
+- **Tested (2026-11-27), the code that is deployed** (commit e70eaea; every commit since is
+  documentation only). The whole suite with the test PostgreSQL and the image tests required
+  (`ASSAY_REQUIRE_DB_TESTS=1`, `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,796 passed, none failed,
+  none skipped (1,792 at stage 2, and four new tests of the scan role's policy). The
+  portal's type check, lint and 118 unit tests pass, and the rendered check passes, 58 of 58
+  (the 48 layout checks and the 10 new upload checks). CI passed on commits e70eaea and
+  c9b70a1 (`python`, `portal`, `portal-render`).
+- **Two changes that are not built** (checked 2026-11-27 in the repository: no commit on any
+  branch, nothing in the working tree, no stash). Neither is deployed, and nothing above
+  depends on either.
+  1. **The worker's read of its document's companion upload.** Still the proposal under
+     "The scan role's reach": the TSS admits a PDF and a companion
+     (`WORKER_MAX_INBOX_KEYS` is 2 in `tss/assay_tss/policies.py`), and the worker probe has
+     no "reading its document's companion upload is refused" check (its count is still 101).
+  2. **A price on the probe's Textract usage row.** The worker probe still records its one
+     Textract call at no price (`unit_price` 0, `cost` 0; `Probe.usage_row` in
+     `workers/assay_workers/worker/probe.py`, whose docstring says the price is not the
+     probe's to know). No design for a change is recorded anywhere in this file or the spec.
+  The owner's note of 2026-11-27 asked to confirm both as committed; they were not found.
+  **Before building either, ask the owner** what the usage-price fix is to do, and whether
+  the companion-read proposal is approved as written.
 - **Rule 6** (checked 2026-11-27, before stage 2 was built): the AI services opt-out policy
   in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
   UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is the
@@ -369,9 +384,40 @@ of the portal with that one fix undone, inside the container only, and failed th
 - The server's logs can show how many files a request registered, by its size, and never
   which files.
 
-### The scan role's reach: `inbox/` only, behind a switch (built 2026-11-27, not deployed)
+### The scan role's reach: `inbox/` only, behind a switch (deployed and verified in dev 2026-11-27)
 
 The owner's decision (2026-11-27), as its own change after stage 2.
+
+**Verified in dev on 2026-11-27, after stack update 42** (owner; the test below, in its
+order):
+
+| Check | Result |
+| --- | --- |
+| The deployed policy | `AllowMalwareScan` and `AllowPostScanTag` both end in `/inbox/*` |
+| A clean file, Isolation Test A | Scanned clean, and processed after the batch was closed |
+| EICAR, Isolation Test A | Quarantined, and the security notice arrived |
+| The malware protection plans | All four `ACTIVE` |
+| The isolation suite | 73, 28, 101 and 28: the counts of stage 2 |
+| `check_deployment.py` | Clean |
+
+- **Read again from AWS at 23:29 UTC the same day** (read-only): both statements'
+  `Resource` is `arn:aws:s3:::assay-dev-t-*/inbox/*`; the four plans (`assay-dev-t-36b4e055`,
+  `-3f2d2180`, `-cfd08356`, `-db2a578b`) are each `ACTIVE`, with the prefix `inbox/` and no
+  status reason, about half an hour after the deploy.
+- **What this settles.** GuardDuty scans an upload, and tags it or not, with read and tag
+  access to `inbox/` alone: a clean result and a threat result both arrived, and the threat
+  was really read (EICAR was quarantined, not passed).
+- **What it does not settle.**
+  1. **Whether GuardDuty checks a plan's role again later**, and needs its validation
+     object for that (the role can still write that object, and can no longer read or tag
+     it). Every plan was `ACTIVE` half an hour after the change; it is not known when
+     GuardDuty next checks. **The owner reads the plans' status again on 2026-11-28**
+     (step 5's command, below). A plan in `WARNING` or `ERROR` then: stop, record the status
+     reason, and go back ("Going back" below) unless the owner decides otherwise.
+  2. **Whether the object tags are still written.** The pipeline does not use them, and
+     nobody has looked. The policy allows tagging under `inbox/`, so they should be.
+  3. Only Isolation Test A was tried. The role and its policy are one for every tenant, so
+     nothing differs for another tenant but the bucket's name.
 
 - **What changes.** Two statements of the GuardDuty scan role's IAM policy:
   `AllowMalwareScan` (read an object and its versions) and `AllowPostScanTag` (read and
@@ -401,9 +447,10 @@ The owner's decision (2026-11-27), as its own change after stage 2.
   | `s3:PutObject` on the validation object | allowed | allowed |
   | `s3:ListBucket` and the two notification actions on the bucket | allowed | allowed |
 
-- **Not known, and the risk.** AWS's page for the role says that with an object prefix its
-  access should be limited to the targeted prefixes, and shows no such policy. Two things
-  are not known:
+- **Not known before the deploy, and the risk** (the first is settled by the test: scans
+  work; the second is what the check of 2026-11-28 is for). AWS's page for the role says
+  that with an object prefix its access should be limited to the targeted prefixes, and
+  shows no such policy. Two things were not known:
   1. That GuardDuty reads and tags nothing outside the prefix when it scans.
   2. Whether GuardDuty reads or tags its validation object
      (`malware-protection-resource-validation-object`, at the bucket's root) after writing
@@ -414,7 +461,9 @@ The owner's decision (2026-11-27), as its own change after stage 2.
 - **The baseline** (read 2026-11-27, before the change): all four tenants' plans are
   `ACTIVE`, with the prefix `inbox/` and no status reason.
 
-**The test, in this order** (owner; PowerShell, one line each):
+**The test, in this order** (owner; PowerShell, one line each). Done on 2026-11-27, and
+every step passed; step 5 is to be run once more on 2026-11-28. Kept as the order for
+Staging and Production, where the role's and the policy's names will differ:
 
 1. Deploy when nobody is uploading: `pulumi up --cwd infra --stack pilartech/assay-platform/dev`.
    Its preview (2026-11-27) showed one role policy updated (`assay-dev-malware-scan-policy`,
@@ -459,7 +508,8 @@ The owner's decision (2026-11-27), as its own change after stage 2.
 4. A file that was put on hold is not scanned again: discard its batch and upload it anew.
 
 **The worker's read of its document's companion upload: it can be dropped. Proposed, not
-built** (the owner decides).
+built** (the owner decides; still not built at the end of 2026-11-27, checked in the
+repository).
 
 - The task never reads that object. It reads the PDF, and the companion's `batch_files` row
   to say whether the document has one. The `companion` step, a Lambda with its own PIPELINE
@@ -476,6 +526,15 @@ built** (the owner decides).
   PDF, needs a migration for the same effect.
 
 ### For stage 3 (steps 6 to 8: split, signer details, field extraction)
+
+**Stage 3 needs its plan first, approved by the owner, as stage 2 had.** Nothing of it is
+built. The plan lists the decisions for the owner by number, every new grant and
+permission, and what goes to Bedrock. What to read: BUILD_SPEC.md section 8 (steps 6, 7
+and 8, and "The worker"), section 7 (the tables), section 7b (models) and section 14;
+"Step 6, second half" further down for the plan's decisions (6, C and D most of all);
+"Stage 2: what was built" above for the pattern to follow.
+
+**The owner's rules for it** (each recorded; none is new here):
 
 - **Extracted text is content chosen by whoever made the PDF. It must be handled as data,
   never as instructions, when it is shown to a model** (owner, 2026-11-27). That holds for
@@ -494,6 +553,74 @@ built** (the owner decides).
   tenant, document and attempt (`pipeline.bound_attempt()` exists now). A SQL check passes on
   NULL: require each value outright (`units IS NOT NULL AND units >= 1`).
 - Add each step to `progress.WORKER_STEPS`, the portal's `STEP_TEXT` and `RESULT_TEXT`.
+- **Model IDs are never in code** (working rules): the model comes from the tenant's
+  selection in `tenant_models` and the catalog in `ai_models`, and Bedrock is called only
+  through a `us.` inference profile from us-east-1 (BUILD_SPEC.md section 2).
+- **PDFs are opened only in a sandbox child** (decision B). `pyHanko` reads the PDF, so its
+  check runs there, not in the task's main process and not in a Lambda.
+- **Every AI call writes an `ai_usage` row; no prompt or response content is logged
+  anywhere; throttling is retried with backoff** (decision C). A test uses a document that
+  contains instructions (decision D).
+- **The tenant's document panel shows each form's extracted fields with page and
+  confidence; no master view ever shows an extracted value, and a test says so** (decision
+  6).
+- **Rule 6 before the deploy:** `uv run scripts/check_deployment.py --ai-services`, read
+  with the owner. Bedrock gets tenant content for the first time in this stage.
+
+**What stage 3 starts from** (read from the repository and from AWS on 2026-11-27):
+
+| What | State |
+| --- | --- |
+| The worker's steps | `progress.WORKER_STEPS` is `("inspect", "text")`; `worker/run.py` runs them in that order. The new steps follow `text` |
+| The tables | `document_parts`, `signature_check`, `signing_events` and `extracted_fields` exist since migration `0001`, empty, **with no `attempt` column**. `signers` has one (`0011`); its `source` may be `audit_trail` or `companion`, and only companion rows are written today. `app_worker` has no grant on any of the five |
+| The next migration | `0013`. It also owes what `0011` left for this stage: the `attempt` columns, and the master view's count of current parts (`platform_view_owner` reading `content_attempt` and `document_parts.attempt`) |
+| `ai_usage` for a model call | The table's check already admits `service = 'bedrock'` with a `model_id` (`0012`). `app_worker`'s INSERT is on 15 columns, and `model_id` is not one of them: a Bedrock row needs that grant |
+| The model the worker calls | `app_worker` can read neither `tenant_models` nor `ai_models`. How the task learns its tenant's `ingest` model and that model's prices is for the plan |
+| The catalog | Three Claude profiles in stack config with prices set, loaded into `ai_models`; `defaultIngestModel` is the Haiku 4.5 profile. Each profile was test-called by `seed.py` on 2026-11-23 with fixed text, by the script itself with the owner's credentials: no call has yet gone through the VPC's endpoint or from the worker task's role |
+| The Bedrock endpoint | `bedrock-runtime` is an interface endpoint since step 2, `available`, **with the default policy (allow everything)**. Textract's was narrowed to one action for the worker task's role when stage 2 first used it |
+| Bedrock permissions | None: the worker task's role has no Bedrock action, and neither has the isolation Lambda's |
+| `pyHanko` | Not in `uv.lock`. Its native dependencies had Python 3.14 Linux x86-64 wheels on 2026-11-23; check again when it is added. A lock change rebuilds all eight images and needs `uv run scripts/image_packages.py --write` |
+| The fields object | `derived/fields/{doc}.json` (`keys.fields_key`) is already in the worker's session policy, read and write. Nothing writes it yet |
+| The text to read | `derived/text/{doc}.json` at `documents.text_version_id`: per page `text` (the source), and for some `ocr` pages `text_layer` (`is_source: false`) |
+| The steps panel | `laterStepsPending` is keyed on the text step's result. It stays until stage 4, and must then be keyed on stage 3's last step |
+| Statuses | A document that passes every step stays `processing` until stage 4. "Mark as reviewed" and its route exist, and no document can be `needs_review` yet |
+| Test files | `make_test_files.py`'s package is three pages: a loan application, a paystub and a "Certificate of completion" (an e-signature audit trail with an envelope ID, a signer, a time, an IP address and an authentication method). 08, 09 and 10 are scanned, mixed and filled-form variants. None has an ID document, a PDF signature or seal, a "Page 1 of 3" marker, or text that gives instructions |
+
+**Questions the plan must answer** (a list made on 2026-11-27 from the facts above, not
+owner decisions; the plan may find more):
+
+1. **The Bedrock permission.** Which ARNs the worker role's `bedrock:InvokeModel` names
+   (the inference profile, and the foundation model in each Region the profile routes to),
+   whether `aws:SourceVpce` holds for Bedrock as it did for Textract (not known), and the
+   endpoint's policy narrowed to the worker task's role. The isolation Lambda's role then
+   gets the same statement so that only the endpoint can refuse it, as in stage 2.
+2. **Which model, and how the task learns it** without a model ID in code and without
+   `app_worker` reading the catalog: a column grant, a lookup function, or a value the
+   `claim` step hands over.
+3. **The `ai_usage` row for a Converse call:** `model_id`, tokens, cost from the catalog's
+   prices, `model_version`, the request ID, and which part or page it was for. One row per
+   call that Bedrock billed, the retry of a failed validation included.
+4. **`needs_review` before stage 4.** Section 8 says a validation that fails twice, or a
+   field below 0.7, sets `needs_review`; final statuses are stage 4's. So stage 3 must
+   record the reasons where stage 4 can read them, or set the status itself: the owner
+   decides.
+5. **Where each step's rows go and when the content pointer moves** (after the last content
+   step), and what a "Process again" leaves behind (nothing is deleted; rows by attempt).
+6. **The sandbox jobs:** `pyHanko`'s check as a child job with a result of numbers and
+   codes, and whether the split's rules need anything from the PDF beyond the stored text.
+7. **What goes into a prompt:** only a page's source text; how it is marked as data; the
+   size of a part against the model's limits; a part too long for one call.
+8. **A spend guard for Bedrock**, as `textractDailyPagesAlarm` is for Textract, and what an
+   isolation run will then cost (stage 2's positive control is one billed page a run).
+9. **Throttling and quotas:** the account's Bedrock limits for the ingest model have not
+   been read; two Textract calls in flight was stage 2's answer.
+10. **New test files:** a signed PDF (and one changed after signing), an ID document, a
+    form no schema fits (`GeneralForm`), page markers for the split's rules, and a document
+    that contains instructions.
+11. **Whether `text_layer` is used to cross-check a value** OCR also read (the owner's
+    decision, offered above).
+12. **The panel and the master view:** the extracted fields in the tenant's document panel,
+    and what the master step view may show for the new steps (counts and codes only).
 
 ### For stage 4: the 30 seconds after a task's last step (owner's decision, 2026-11-27)
 
@@ -555,8 +682,17 @@ Each is recorded in full further down; this is the index.
 Decisions the owner has still to make, or things to do:
 
 - **`main`**: fast-forward to `build-step-6` (pull request #5, CI green).
-- **Deploy the upload fixes** (the next `pulumi up`; the portal build), and look at the
-  line after an addition in a browser.
+- **Check the malware protection plans' status again on 2026-11-28** (owner; the scan
+  role's limit to `inbox/` was deployed and verified on 2026-11-27, and it is not known when
+  GuardDuty next checks a plan's role). Every plan must be `ACTIVE` with no status reason:
+  `(aws guardduty list-malware-protection-plans --profile pilar-dev --region us-east-1 --query "MalwareProtectionPlans[].MalwareProtectionPlanId" --output text) -split "\s+" | ForEach-Object { aws guardduty get-malware-protection-plan --malware-protection-plan-id $_ --profile pilar-dev --region us-east-1 --query "[ProtectedResource.S3Bucket.BucketName,Status,StatusReasons]" --output json }`
+  Record the result under "The scan role's reach". A plan in `WARNING` or `ERROR`: stop,
+  keep the status reason, and see "Going back" there.
+- **The upload fixes are deployed** (stack update 42). Not reported yet: the line after an
+  addition, looked at in a browser ("6 files chosen: 6 added.").
+- **Two changes the owner expected to find committed are not built** ("Where things stand"):
+  the worker's companion-read narrowing (below) and a price on the probe's Textract usage
+  row. Each needs the owner's word before it is built.
 - **When the usage and cost view is built: verify that `11-scanned-1000-pages.pdf`
   (Infinity Loans, 2026-11-27) shows exactly 1,000 Textract rows** (owner, 2026-11-27). No
   read path reaches `ai_usage` today, and none is to be added for this. The evidence so far
@@ -566,12 +702,10 @@ Decisions the owner has still to make, or things to do:
   says little about real ones.
 - **Stage 4: the final status inside the task, the companion step before or beside it**
   (owner, 2026-11-27; "For stage 4" above). Nothing changes before then.
-- **Deploy and test the scan role's limit to `inbox/`** (built 2026-11-27 behind
-  `malwareScanInboxOnly`, on in dev; "The scan role's reach" above has the steps, what a
-  failure looks like and the way back). Try it on Isolation Test A first, with a clean file
-  and EICAR.
 - **The worker's read of its document's companion upload in the inbox: proposed, not
-  built** ("The scan role's reach" above). The task reads only the PDF.
+  built** ("The scan role's reach" above; checked again 2026-11-27). The task reads only
+  the PDF.
+- **Stage 3's plan** ("For stage 3" above): not written. It comes before any stage 3 code.
 - **Concurrency numbers**: 50 and 300 rest on a small sample (43 scan runs, 9 at once at
   most). Measure again once real batches have run.
 - **The 74 files Git checks out with CRLF** on the owner's machine (the portal's `.ts` and
@@ -614,8 +748,8 @@ Known gaps: things not proven, or proven only in part:
 - **Platform-pool MFA enrolment** is not recorded, and **failed sign-ins** are not audited
   (both owner decisions; "Known limits").
 - **Cognito's `amr` claim**: whether it shows MFA has still not been checked.
-- **The worker's session policy** still names the companion key for writing; the task no
-  longer writes it.
+- **The scan role's limit to `inbox/`**: GuardDuty's later checks of a plan's role, and
+  whether object tags are still written, have not been seen ("The scan role's reach").
 - **The break-glass log** is empty because the role has never been assumed.
 
 Step 1 was verified on 2026-11-23:
@@ -3194,6 +3328,6 @@ For later stages:
 - A step that asks "did I already run?" must ask about its own attempt's events.
 - Derived rows carry an attempt and are read through the document's pointer; nothing is
   deleted.
-- The worker's session policy still names the companion key for writing; the task no
-  longer writes it. Narrowing it is a change to the TSS (no tenant stack run) for a later
-  stage, or part of stage 2's worker changes.
+- The worker's session policy still named the companion key for writing after part 2,
+  though the task no longer wrote it. **Done in stage 2** (decision 9, 2026-11-27): the key
+  left the policy (`policies.worker_document_keys`).

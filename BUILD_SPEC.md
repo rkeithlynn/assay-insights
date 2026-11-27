@@ -969,6 +969,11 @@ owner accepted.
    exactly 1,000 Textract rows for `11-scanned-1000-pages.pdf` (Infinity Loans, 2026-11-27).
 6. Every isolation run makes one real Textract call, on a page the probe draws, and records
    it in `ai_usage`.
+7. The scan role's limit to `inbox/` (section 6 above) is deployed and verified in dev: the
+   deployed policy ends in `/inbox/*`; on Isolation Test A a clean file was scanned and
+   processed and EICAR was quarantined with its security notice; all four plans stayed
+   `ACTIVE`; the isolation suite passes with the same counts. The plans' status is read once
+   more on 2026-11-28, because it is not known when GuardDuty next checks a plan's role.
 7. The GuardDuty scan role's object access stops at `inbox/`, behind a stack switch (the
    tenant isolation list above). Tested first on Isolation Test A, with a clean file and
    EICAR.
