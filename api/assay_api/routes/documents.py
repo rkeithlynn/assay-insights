@@ -43,6 +43,17 @@ from assay_tss.models import StorageAccess
 router = APIRouter()
 log = logging.getLogger(__name__)
 
+# A document's step events, for its tenant: the step's code (`detail.error`), who opened the
+# PDF, and the Text step's page counts. Nothing else of an event's detail: a failed step's
+# error type is for master admins, in their own view. Fixed text; the only value bound at run
+# time is the document's ID.
+STEP_EVENTS = (
+    "SELECT step, status, at, attempt, detail ->> 'error' AS error_code, "  # noqa: S608  # nosec B608
+    "detail ->> 'viewer' AS viewer, "
+    + ingestion_read.text_counts_sql("detail")
+    + " FROM assay.document_events WHERE document_id = :id ORDER BY at, id"
+)
+
 DocumentStatus = Literal[
     "uploaded",
     "scanning",
@@ -121,6 +132,8 @@ class DocumentEventOut(BaseModel):
     viewer: str | None
     # Which run of the pipeline the event belongs to ("Process again" starts a new one).
     attempt: int
+    # The Text step's page counts (its result only): how many pages it read, and how.
+    text_pages: ingestion_read.TextPages | None = None
 
 
 class DocumentPartOut(BaseModel):
@@ -389,11 +402,7 @@ def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail
     # A step that is finished shows its result, not also the mark that it had started.
     events = visible_events(
         caller.conn.execute(
-            text(
-                "SELECT step, status, at, attempt, detail ->> 'error' AS error_code, "
-                "detail ->> 'viewer' AS viewer FROM assay.document_events "
-                "WHERE document_id = :id ORDER BY at, id"
-            ),
+            text(STEP_EVENTS),
             {"id": document_id},
         ).all()
     )
@@ -421,6 +430,7 @@ def get_document(document_id: uuid.UUID, caller: TenantMember) -> DocumentDetail
                 error_code=e.error_code,
                 viewer=e.viewer if show_viewer and e.step == "viewed" else None,
                 attempt=e.attempt,
+                text_pages=ingestion_read.text_pages(e),
             )
             for e in events
         ],

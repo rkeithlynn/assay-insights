@@ -99,3 +99,16 @@ config:
         users:
           - email: keith@keithlynn.com
             role: tenant-user
+  # Step 5, text (build step 6, second half, stage 2). All four are required: a stack without
+  # one fails `pulumi preview`. The worker task gets the first three in its environment.
+  # What one Textract DetectDocumentText page costs, in US dollars. Recorded with every call
+  # (ai_usage.unit_price and cost). Set by the owner.
+  assay-platform:textractPricePerPage: "0.0015"
+  # A page whose quality score is below this goes to Textract (above 0, at most 1). With
+  # 0.90, an image over about a tenth of a page sends it there.
+  assay-platform:textQualityThreshold: "0.90"
+  # A document with more pages than this fails before any text is read (`too_many_pages`).
+  assay-platform:textMaxPages: "1000"
+  # The spend guard: an alarm, sent to the alarms topic, when Textract has read more than this
+  # many pages in a day across the account (every caller, the isolation probe included).
+  assay-platform:textractDailyPagesAlarm: "2000"

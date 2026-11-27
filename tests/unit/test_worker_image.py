@@ -318,6 +318,140 @@ def test_the_child_opens_real_pdfs_and_survives_malformed_ones(image: str) -> No
     assert results["garbage"].get("problem") == "not_a_pdf" or "error" in results["garbage"]
 
 
+# --- The page channel (stage 2): the real `text` and `render` jobs, and a hostile child ----------
+
+PAGES = """
+import base64, json, os, sys
+from pathlib import Path
+from assay_workers.sandbox import runner
+from assay_workers.sandbox.confine import Limits
+from assay_workers.worker.__main__ import harden
+harden()
+files = {n: base64.b64decode(e) for n, e in zip(sys.argv[1::2], sys.argv[2::2])}
+files["garbage"] = b"%PDF-1.7 " + bytes(range(256)) * 64
+open_before = sorted(os.listdir("/proc/self/fd"))
+results = {}
+for name, body in files.items():
+    directory = Path("/work") / name
+    directory.mkdir(mode=0o755)
+    path = directory / "document.pdf"
+    path.write_bytes(body)
+    os.chmod(path, 0o444)
+    pages, images = [], []
+    try:
+        count = runner.inspect(path).pages or 0
+        runner.read_text(path, 1, count, pages.append)
+        runner.render(path, list(range(1, count + 1)), images.append)
+        results[name] = {
+            "pages": [
+                [p.page, len(p.text), p.image_coverage, p.annotations, len(p.words)] for p in pages
+            ],
+            "first_words": [w[4] for w in pages[0].words[:2]],
+            "images": [
+                [i.page, i.width, i.height, i.dpi, i.data[:8] == runner.PNG_SIGNATURE, len(i.data)]
+                for i in images
+            ],
+        }
+    except runner.SandboxError as exc:
+        results[name] = {"error": type(exc).__name__, "reason": exc.reason}
+hostile = {}
+short = Limits(wall_seconds=10.0, cpu_seconds=8, address_space_bytes=512 * 1024**2)
+for probe in ("flood", "wrong_page", "not_a_record", "descriptors", "write_a_file"):
+    try:
+        record = runner.pageprobe(probe, limits=short)
+        hostile[probe] = {"objects": None if record is None else record.objects}
+    except runner.SandboxError as exc:
+        hostile[probe] = {"error": type(exc).__name__, "reason": exc.reason}
+# The child wrote no file, anywhere the parent can look, and the parent kept no pipe open.
+left = sorted(str(p.relative_to("/work")) for p in Path("/work").rglob("*") if p.is_file())
+print(json.dumps({
+    "results": results, "hostile": hostile, "left": left,
+    "descriptors_kept": sorted(os.listdir("/proc/self/fd")) == open_before,
+}))
+"""
+
+
+@pytest.fixture(scope="module")
+def paged(image: str) -> dict[str, Any]:
+    made = synthetic_files()
+    files = {
+        "normal": made["01-normal.pdf"],
+        "scanned": made["08-scanned.pdf"],
+        "mixed": made["09-mixed.pdf"],
+        "form": made["10-filled-form.pdf"],
+    }
+    arguments: list[str] = []
+    for name, body in files.items():
+        arguments += [name, base64.b64encode(body).decode()]
+    result: dict[str, Any] = as_the_task(image, PAGES, arguments=tuple(arguments))
+    return result
+
+
+def test_the_real_child_sends_each_pages_text_and_facts_down_the_page_channel(
+    paged: dict[str, Any],
+) -> None:
+    results = paged["results"]
+    normal = results["normal"]
+    # page, characters of text, image coverage, drawn annotations, words.
+    assert [p[0] for p in normal["pages"]] == [1, 2, 3]
+    assert all(p[1] > 200 and p[2] == 0 and p[3] == 0 and p[4] > 20 for p in normal["pages"])
+    assert normal["first_words"] == ["SYNTHETIC", "TEST"]
+    # Pictures only: no text layer, and an image over the whole page.
+    assert [p[1:4] for p in results["scanned"]["pages"]] == [[0, 1.0, 0]] * 3
+    first, second, third = results["mixed"]["pages"]
+    assert first[2] == 0 and 0.40 <= second[2] <= 0.45 and third[2] == 1.0
+    assert second[1] > 100 and third[1] > 20  # each still has its typed lines
+    [form] = results["form"]["pages"]
+    assert form[3] == 3 and form[1] > 100  # three form fields; the questions are typed
+
+
+def test_the_real_child_draws_each_page_as_a_png_and_writes_no_file(paged: dict[str, Any]) -> None:
+    for name, pages in (("normal", 3), ("scanned", 3), ("mixed", 3), ("form", 1)):
+        images = paged["results"][name]["images"]
+        assert [i[0] for i in images] == list(range(1, pages + 1)), name
+        for _page, width, height, dpi, is_png, size in images:
+            assert (width, height, dpi) == (1700, 2200, 200), name
+            assert is_png and 1000 < size < runner.MAX_IMAGE_BYTES, name
+    # Nothing but the PDFs the parent put there: the child left no picture and no text.
+    assert paged["left"] == [
+        "form/document.pdf",
+        "garbage/document.pdf",
+        "mixed/document.pdf",
+        "normal/document.pdf",
+        "scanned/document.pdf",
+    ]
+    assert paged["descriptors_kept"] is True
+
+
+def test_a_malformed_pdf_never_becomes_a_page_record(paged: dict[str, Any]) -> None:
+    outcome = paged["results"]["garbage"]
+    assert outcome.get("error") in (
+        "SandboxFailed",
+        "SandboxKilled",
+        "SandboxLimit",
+        "SandboxBadOutput",
+    ), outcome
+
+
+def test_a_child_that_misbehaves_on_the_page_channel_is_stopped_or_refused_by_name(
+    paged: dict[str, Any],
+) -> None:
+    hostile = paged["hostile"]
+    assert hostile["flood"] == {"error": "SandboxLimit", "reason": "output_limit"}
+    assert hostile["wrong_page"] == {"error": "SandboxBadOutput", "reason": "bad_output"}
+    assert hostile["not_a_record"] == {"error": "SandboxBadOutput", "reason": "bad_output"}
+
+
+def test_a_page_job_has_the_channel_and_nothing_else_of_the_parents_and_still_writes_no_file(
+    paged: dict[str, Any],
+) -> None:
+    hostile = paged["hostile"]
+    # Standard input, output and error, and the page channel: four descriptors.
+    assert hostile["descriptors"] == {"objects": 4}
+    # It could write a page's picture to no file: the page channel is the only way out.
+    assert hostile["write_a_file"] == {"objects": 0}
+
+
 NOT_STARTED = """
 import json
 from pathlib import Path

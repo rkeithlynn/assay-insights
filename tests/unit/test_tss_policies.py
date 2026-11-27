@@ -388,10 +388,13 @@ def test_worker_policy_names_exactly_its_documents_keys() -> None:
         f"{bucket}/inbox/{BATCH}/{DOC_1}",
         f"{bucket}/inbox/{BATCH}/{COMPANION_FILE}",
         f"{bucket}/originals/{DOC_1}.pdf",
-        f"{bucket}/originals/{DOC_1}.companion.json",
         f"{bucket}/derived/text/{DOC_1}.json",
         f"{bucket}/derived/fields/{DOC_1}.json",
     }
+    # Owner decision F (2026-11-27): the stored companion file is the companion step's to
+    # write, not the task's. It is no longer in the worker's policy at all.
+    assert f"{bucket}/originals/{DOC_1}.companion.json" not in object_resources(policy)
+    assert ".companion.json" not in json.dumps(policy)
     other = {r for s in policy["Statement"] for r in as_list(s["Resource"])} - object_resources(
         policy
     )

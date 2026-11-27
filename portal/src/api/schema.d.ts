@@ -913,6 +913,7 @@ export interface components {
             status: string;
             /** Step */
             step: string;
+            text_pages?: components["schemas"]["TextPages"] | null;
             /** Viewer */
             viewer: string | null;
         };
@@ -1078,6 +1079,7 @@ export interface components {
             status: string;
             /** Step */
             step: string;
+            text_pages?: components["schemas"]["TextPages"] | null;
         };
         /** IngestionPage */
         IngestionPage: {
@@ -1342,6 +1344,20 @@ export interface components {
             status: "provisioning" | "active" | "suspended" | "failed";
             /** Users */
             users: number;
+        };
+        /**
+         * TextPages
+         * @description What the Text step did with a document's pages. Numbers only.
+         */
+        TextPages: {
+            /** Native */
+            native: number;
+            /** Ocr */
+            ocr: number;
+            /** Total */
+            total: number;
+            /** Unread */
+            unread: number;
         };
         /** UploadOut */
         UploadOut: {

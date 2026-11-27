@@ -37,6 +37,19 @@ was, and a limit doing its job never reads the same as a child that died some ot
 
 Starting the child needs the parent to be root with CAP_SETUID and CAP_SETGID (to switch
 user) and CAP_KILL (to stop it). If the switch is refused, the job does not run at all.
+
+**The page channel** (stage 2). Two jobs send more than a small result: `text` (each page's
+text layer) and `render` (pages drawn as pictures for Textract). For those, and only those,
+the child inherits one more descriptor: the write end of a pipe (`spawn_with_channel`). It
+writes one JSON record per line, and `Channel` hands the parent each line as it is finished,
+so the parent holds one record at a time. Everything above still holds: the child writes no
+file, has no network, and its standard output is still one small object of numbers. A
+record is untrusted too: a strict model, the pages that were asked for and in that order, a
+cap on each record (1 MB for a page, 8 MB for a picture) and on everything one child sends.
+Text that arrives this way is data for the tenant's own text object; it never becomes a
+path, a key, SQL or a log line. A picture is checked for its first eight bytes and its
+length, and is never decoded here. A child that sends too much ends as `output_limit`; one
+that sends anything else ends as `bad_output`.
 """
 
 from __future__ import annotations
@@ -714,9 +727,11 @@ def pageprobe(
     *,
     limits: Limits | None = None,
     spawn: ChannelSpawn = spawn_with_channel,
-) -> None:
-    """`probe` is one of jobs.PAGE_PROBES: a child that misbehaves on the page channel. One
-    page is asked for; whatever arrives is dropped."""
+) -> PageRecord | None:
+    """`probe` is one of jobs.PAGE_PROBES: a child that misbehaves on the page channel, or
+    reports about itself in a page record's numbers. One page is asked for; the record that
+    arrives, if one does, is returned."""
+    got: list[PageRecord] = []
     _pages(
         "pageprobe",
         Path(probe),
@@ -724,8 +739,9 @@ def pageprobe(
         expect=[1],
         model=PageRecord,
         check=_checked_text,
-        handle=lambda _record: None,
+        handle=got.append,
         max_record=MAX_PAGE_RECORD_BYTES,
         limits=limits,
         spawn=spawn,
     )
+    return got[0] if got else None

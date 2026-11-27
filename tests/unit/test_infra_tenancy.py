@@ -34,6 +34,7 @@ from tests.unit.test_infra_data import DB, NET
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "assay-dev"
+TEXTRACT_ENDPOINT = "vpce-0textract0000000"
 BREAK_GLASS_PRINCIPAL = f"arn:aws:iam::{ACCOUNT_ID}:role/aws-reserved/sso.amazonaws.com/Admin"
 TAGS = {"app": "assay-insights", "env": "dev"}
 ROLE = f"arn:aws:iam::{ACCOUNT_ID}:role"
@@ -220,6 +221,7 @@ class Stack:
                 tenant_role_arn=self.storage.tenant_role.arn,
                 invite_function_arn=self.provisioning.invite_function.arn,
                 api_cognito_function_arn=self.cognito_admin_api.function.arn,
+                textract_endpoint_id=TEXTRACT_ENDPOINT,
             )
 
     def ready(self) -> pulumi.Output[list[Any]]:
@@ -1461,6 +1463,7 @@ def test_runner_probes_are_limited_to_tenant_resources() -> None:
             log_group="arn:logs",
             db_user="arn:dbuser/app_tenant",
             tenant_role=f"{ROLE}/{PREFIX}-tenant",
+            textract_endpoint=TEXTRACT_ENDPOINT,
         )
     )
     keys = by_sid(policy, "ProbeTenantKeys")
@@ -1470,7 +1473,25 @@ def test_runner_probes_are_limited_to_tenant_resources() -> None:
     assert all("assay-dev-t-*" in r for r in buckets["Resource"])
     services = {a.split(":")[0] for s in policy["Statement"] for a in as_list(s["Action"])}
     # No Rekognition (a collection has no resource policy to refuse it) and no Lambda.
-    assert services == {"logs", "ec2", "rds-db", "sts", "s3", "kms", "s3vectors"}
+    # Textract since stage 2 (owner, 2026-11-27, permission 3): the worker task's own
+    # permission, with the same condition, so that the Textract endpoint's policy is the only
+    # thing that can refuse the runner.
+    assert services == {"logs", "ec2", "rds-db", "sts", "s3", "kms", "s3vectors", "textract"}
+    from assay_infra.pipeline import textract_statement, worker_role_policy
+
+    probe = by_sid(policy, "ProbeTextractEndpoint")
+    worker = by_sid(
+        json.loads(worker_role_policy(db_user="arn:db", textract_endpoint=TEXTRACT_ENDPOINT)),
+        "ReadPagesWithTextract",
+    )
+    assert {k: v for k, v in probe.items() if k != "Sid"} == {
+        k: v for k, v in worker.items() if k != "Sid"
+    }
+    assert probe["Condition"] == {"StringEquals": {"aws:SourceVpce": TEXTRACT_ENDPOINT}}
+    assert probe == textract_statement("ProbeTextractEndpoint", TEXTRACT_ENDPOINT)
+    assert [a for s in policy["Statement"] for a in as_list(s["Action"]) if "textract" in a] == [
+        "textract:DetectDocumentText"
+    ]
     assert by_sid(policy, "ConnectAsAppTenant")["Resource"].endswith("/app_tenant")
 
 

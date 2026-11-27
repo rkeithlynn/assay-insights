@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy import Connection, Row, text
 
 from assay_api.audit_read import csv_cell
@@ -47,6 +48,52 @@ _TAIL = "d.received_at DESC, d.id DESC"
 # No grant was needed: the master view reads the same events through
 # `platform.ingestion_events_v`, which `platform_reader` could already read.
 STARTED_STEP = "queued"
+
+# --- The Text step's page counts (build step 6, second half, stage 2) -----------------------
+#
+# The worker's `text` event says how many pages it read, how many from the text layer, how
+# many through Textract, and how many Textract would not take. Both step panels show them
+# (owner decision C, 2026-11-27: the unread count in the tenant view and the master view).
+# Counts only: no page's text is in any response, and none is in the database to begin with.
+TEXT_STEP = "text"
+TEXT_COUNT_KEYS = ("pages", "pages_native", "pages_ocr", "pages_unread")
+
+
+def text_counts_sql(detail: str) -> str:
+    """The four counts as columns, from an event's `detail`: each only for a `text` event,
+    and only if the stored value is a plain whole number. `detail` is a column name from this
+    module's callers, never anything from a request."""
+    return ", ".join(
+        f"CASE WHEN step = '{TEXT_STEP}' AND {detail} ->> '{key}' ~ '^[0-9]{{1,7}}$' "
+        f"THEN ({detail} ->> '{key}')::integer END AS {key}"
+        for key in TEXT_COUNT_KEYS
+    )
+
+
+class TextPages(BaseModel):
+    """What the Text step did with a document's pages. Numbers only."""
+
+    # Every page of the document.
+    total: int
+    # Read from the page's own text layer.
+    native: int
+    # Read by Textract from the page's picture.
+    ocr: int
+    # Sent to Textract, which would not read them: these pages have no text.
+    unread: int
+
+
+def text_pages(event: Any) -> TextPages | None:
+    """The counts of a `text` event's row (from `text_counts_sql`, or the master view's own
+    columns), or None for any other event and for a `text` event that has none."""
+    if event.step != TEXT_STEP or event.pages is None:
+        return None
+    return TextPages(
+        total=event.pages,
+        native=event.pages_native or 0,
+        ocr=event.pages_ocr or 0,
+        unread=event.pages_unread or 0,
+    )
 
 
 def _started(*, events: str, same_document: str, received: str) -> str:

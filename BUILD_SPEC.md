@@ -9,8 +9,8 @@ Status of decisions: all confirmed by the owner (Keith Lynn) on 2026-11-21.
 
 Amended during the build, each time by an owner decision. Section 14 lists every amendment
 with its date; where it differs from an earlier section, section 14 wins. Sections 2, 3, 7,
-7a, 8, 10, 11 and 12 have been brought into line with it (last on 2026-11-27, at the end of
-stage 1 of the second half of build step 6). `CLAUDE.md` holds the reasoning, the evidence
+7a, 8, 10, 11 and 12 have been brought into line with it (last on 2026-11-27, when stage 2
+of the second half of build step 6 was built). `CLAUDE.md` holds the reasoning, the evidence
 and the working notes.
 
 ## 1. Goal and scope
@@ -160,7 +160,9 @@ Build in this order. Tag every resource `app=assay-insights`, `env=dev`.
    limit. No IP allow-list yet.
 8. **Pipeline.** Section 8.
 9. **Observability.** Structured JSON logs to CloudWatch with 30-day retention; alarms
-   on dead-letter queue depth, Step Functions failures and API 5xx rate.
+   on dead-letter queue depth, Step Functions failures and API 5xx rate, and a spend guard:
+   an alarm when Textract has read more than `textractDailyPagesAlarm` pages in 24 hours
+   across the account.
 
 The API has no internet route, so it cannot fetch Cognito's signing keys at runtime
 unless a Cognito endpoint is reachable. First check whether a VPC endpoint for Cognito
@@ -253,6 +255,11 @@ chat/{conversation_id}/{message_id}.json  question, retrieved passages, answer
 No object key contains a file name. An upload is stored under an opaque `file_id`, and its
 `file_name` is kept only in the database.
 
+Every version of every object is kept: Object Lock's default applies to the whole bucket, no
+role may delete a version, and there is no lifecycle rule. "Process again" writes a new
+version of `derived/text/{doc_id}.json`; the document's row names the version to read
+(`documents.text_version_id`) and each attempt's `text` event names its own (section 14).
+
 Tenant provisioning: `POST /admin/tenants` inserts the tenant with status `provisioning`
 and starts a Step Functions execution that runs a Fargate task. The task uses Pulumi's
 Automation API with one stack per tenant (`assay-tenant/{tenant_id}`) to create the
@@ -328,6 +335,13 @@ and grants; section 14 says why):
   at the current version of the companion data and `documents.companion_file_id` at the
   upload it came from; `documents.content_attempt` is the same pointer for text and
   extraction (unused until a stage writes them). Nothing is deleted on reprocessing.
+- Text (stage 2): `pages.attempt`, one row per page per attempt, read through
+  `documents.content_attempt`; `documents.text_version_id`, the S3 version of the text object
+  that pointer stands for. No page text is stored in the database: `pages` holds numbers and
+  each page's source.
+- `ai_usage` also records a service billed by the page: `service` (`bedrock` or `textract`),
+  `operation`, `model_version`, `attempt`, `page_no`, `units`, `unit` and `unit_price`. A
+  Textract row has no `model_id` and no tokens.
 - Also: `documents.queued_at`, `users.sessions_revoked_at`, and views in schema `platform`
   for the admin routes (among them `platform_users_v`, `ai_models_v`, `tenant_models_v`
   and `ingestion_events_v`).
@@ -439,7 +453,20 @@ Trigger: a PDF starts only when its batch is closed **and** its malware scan is 
 5. **Text.** Read the embedded text layer with `pypdfium2`, in the sandbox. Score each page;
    pages that fail go to Textract `DetectDocumentText`. Write `derived/text/{doc}.json` and
    the `pages` rows. Do not use PyMuPDF (AGPL), and do not use `pdfplumber` (owner,
-   2026-11-24).
+   2026-11-24). As built (owner, 2026-11-27; section 14 has each decision):
+   - A page's score is 1.0 if it is blank, 0.0 if annotations draw on it (form fields,
+     stamps) or it has content and no text, and otherwise its text's legibility times the
+     share of the page that no image covers. A page below `textQualityThreshold` (0.90) goes
+     to Textract, so a page with an image over about a tenth of it does, whatever its text
+     layer says.
+   - Such a page is drawn in the sandbox as a greyscale PNG and sent to Textract as bytes,
+     one page a call, by the worker task with its own role, through the VPC's Textract
+     endpoint. Textract never reads a bucket.
+   - A page is `native` or `ocr`. An `ocr` page whose text layer reads well keeps that text
+     beside Textract's, marked as not its source. Only a page's source text feeds extraction,
+     search and embedding.
+   - A document with more than `textMaxPages` (1,000) pages fails (`too_many_pages`). A page
+     Textract will not take is recorded as unread and the document goes on.
 6. **Split into forms.** Assign every page to a part. Rules first (form titles, form
    numbers, "Page 1 of 3" markers), then the extraction model for the rest. The e-sign
    audit trail, typically the last pages, is its own part.
@@ -486,6 +513,11 @@ The worker (owner decisions, 2026-11-24; `CLAUDE.md` has the detail):
 - Every AI call writes an `ai_usage` row. No prompt or response content is logged anywhere.
   Bedrock and Textract throttling is retried with backoff. Textract and Bedrock are called
   with the worker's own role and bytes; Rekognition only with tenant credentials.
+- **Page text and pictures leave the sandbox by the page channel**: a pipe the parent opened
+  and reads one record at a time. A child's standard output is still one small object of
+  numbers and codes, and the child still writes no file. The parent never opens a picture.
+- **Extracted text is content chosen by whoever made the PDF**: it is data, never
+  instructions, when it is shown to a model.
 - Before content first goes to Textract or Bedrock, re-check the AI services opt-out policy
   and that model invocation logging is off, and show the owner the output.
 - Only `ready` documents are retrieved. "Mark as reviewed" (tenant admins) moves
@@ -496,7 +528,7 @@ Stages of steps 5 to 10 (each a deploy and the owner's checks):
 | Stage | Builds | Content to AI services | Status |
 | --- | --- | --- | --- |
 | 1 | The worker task, the attempt grant, the sandbox, `app_worker`; attempts and "Process again"; step 9; companion attach and replace; the quarantine notice; "Mark as reviewed" (migrations `0010`, `0011`) | None | Complete, verified 2026-11-27 |
-| 2 | Step 5: text layer, Textract for pages that fail the quality score | Textract | Not started |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Built 2026-11-27, not deployed |
 | 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) | Not started |
 | 4 | Step 10: chunk, embed, index; final statuses; the Titan catalog row | Bedrock (Titan) | Not started |
 
@@ -683,7 +715,8 @@ hides what a role can't do. Generate the portal's API client from the OpenAPI sc
 Rules: an admin can't change their own role or disable themselves; a tenant always keeps
 one active admin; one open batch per user; a batch can't close while it holds an invalid
 or unmatched companion file (including one whose `TenantID` doesn't match); an open batch closes automatically after 24 hours; a
-suspended tenant's users can't sign in or upload. Limits: 100 MB per PDF, 25 MB per
+suspended tenant's users can't sign in or upload. Limits: 100 MB per PDF, 1,000 pages per
+PDF (`textMaxPages`; checked by the pipeline, not at upload), 25 MB per
 attachment, 200 primary PDFs per batch, 20 attachments per PDF, 64 KB per companion file,
 50 files per registration request, file names up to 255 characters, `.pdf` and `.json`
 only. Every user and tenant change writes an `audit_log` row, and so does every CSV export
@@ -737,7 +770,8 @@ and `GET /me` decides the navigation.
   status, forms found, duration, uploaded by. Master columns: received, tenant, batch
   ID, document ID, pages, size, companion file, status, forms found, duration. A row
   opens a panel with each pipeline step, its time and any error; tenants also see the
-  forms found and can open the PDF.
+  forms found and can open the PDF. The Text step's line says how many pages were read from
+  the text layer, how many by OCR and how many could not be read, in both views.
 - **Document actions** (tenant admins, in the tenant's ingestion history; owner,
   2026-11-24): "Process again" for one document or several selected, with a confirmation
   that says how many are Ready (running the AI steps again costs money); "Mark as reviewed";
@@ -865,6 +899,43 @@ owner accepted.
   Lambda's queue for up to an hour, then go to the scan dead-letter queue) and 300 for the
   TSS (a guarantee). Stack config, both or neither. An account must allow at least 750
   concurrent executions before they can be set; a new account allows 10 (2026-11-25).
+
+**Stage 2 of the second half of step 6: text and Textract (section 8, step 5; all 2026-11-27)**
+
+1. Page text and page pictures leave the sandbox by the page channel: one more inherited
+   descriptor for the two page jobs, a pipe the parent reads one record at a time. Caps: 1 MB
+   a page record, 8 MB a picture record, 5,000,000 bytes a picture, 128 MB for a document's
+   text object.
+2. A Textract call's `ai_usage` row: `service` `textract`, `operation` `DetectDocumentText`,
+   no catalog model, no tokens, one unit of `page` at the configured price. One row per
+   successful call.
+3. The quality threshold is 0.90 (`textQualityThreshold`), and the score keeps its vowel
+   factor (English only).
+4. New permissions: `textract:DetectDocumentText` for the worker task's role, only through
+   the VPC's Textract endpoint (`aws:SourceVpce`); the same statement for the isolation test
+   role; the endpoint's policy narrowed from allow-everything to that action for the worker
+   task's role alone; `app_worker` may insert its bound attempt's `pages` and `ai_usage` rows
+   and set its bound attempt's content pointer, and can read neither table.
+5. A document may have at most 1,000 pages (`textMaxPages`).
+6. A page with images over about a tenth of it, or with form fields or stamps, goes to
+   Textract even when its text layer is good. The text layer's text is then kept beside
+   Textract's, marked as not the page's source. Only a page's source text feeds extraction,
+   search and embedding.
+7. A document with pages Textract could not read goes on; stage 4 makes it `needs_review`.
+   The unread count shows in the step panel's Text line in the tenant view and the master
+   view (the master step view gains the text step's four page counts, and nothing else).
+8. What a Textract page costs is stack config (`textractPricePerPage`), never code.
+9. The worker's session policy no longer names the stored companion file.
+10. **Every version of the text object is kept.** No lifecycle rule and no delete permission.
+    Each attempt's S3 version ID is in its `text` event, so an old version can be found
+    without listing. Deleting a tenant's data (offboarding, a retention period, a deletion
+    request) has no design yet and needs one before production, covering originals, derived
+    objects and noncurrent versions together.
+11. A spend guard: an alarm on Textract pages in 24 hours across the account
+    (`textractDailyPagesAlarm`, 2,000), sent to the alarms topic.
+12. The AI services check (the opt-out policy in effect, and Bedrock invocation logging off)
+    is part of `scripts/check_deployment.py` in every mode, and must pass before any content
+    goes to an AI service.
 
 **Audit and what master roles see (sections 5 and 7a)**
 

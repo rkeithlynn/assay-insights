@@ -33,6 +33,7 @@ from assay_infra.pipeline import (
     WORKER_SERVICE,
     Pipeline,
     pipeline_roles,
+    textract_endpoint_policy,
 )
 from assay_infra.provisioning import Provisioning
 from assay_infra.seed import SeedFunction
@@ -222,9 +223,21 @@ pipeline = Pipeline(
     alarm_topic_arn=alerts.topic.arn,
     security_topic_arn=security_notices.topic.arn,
     notices_key_arn=alerts.key.arn,
+    text_quality_threshold=config.text.quality_threshold,
+    text_max_pages=config.text.max_pages,
+    textract_price_per_page=config.text.textract_price_per_page,
+    textract_daily_pages_alarm=config.text.textract_daily_pages_alarm,
+    textract_endpoint_id=network.interface_endpoints["textract"].id,
     worker_max_per_tenant=config.pipeline.worker_max_per_tenant,
     scan_reserved_concurrency=config.pipeline.scan_reserved_concurrency,
     aws_profile=aws_profile,
+)
+# Through the Textract endpoint: the worker task's role and DetectDocumentText, nothing else.
+# Never deleted or recreated: without a policy resource an endpoint allows everything.
+aws.ec2.VpcEndpointPolicy(
+    f"{prefix}-textract-endpoint-policy",
+    vpc_endpoint_id=network.interface_endpoints["textract"].id,
+    policy=pipeline_role.worker.arn.apply(lambda arn: textract_endpoint_policy(worker_role=arn)),
 )
 
 api = ApiService(
@@ -335,6 +348,7 @@ if config.tenancy.isolation_tests:
         tenant_role_arn=storage.tenant_role.arn,
         invite_function_arn=provisioning.invite_function.arn,
         api_cognito_function_arn=cognito_admin_api.function.arn,
+        textract_endpoint_id=network.interface_endpoints["textract"].id,
         aws_profile=aws_profile,
     )
     pulumi.export("isolation_function_name", isolation.function.name)

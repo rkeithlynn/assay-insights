@@ -10,9 +10,9 @@ tenants:
   run, `discarded` after it, so it shows in no history view by default), one clean PDF row
   in `batch_files`, and a `start` event, so the sweeper never queues it and the pipeline
   never starts an execution for it;
-- one small object at each document's `originals/` key, written once with the tenant's
-  pipeline credentials and kept by Object Lock. A refused read proves something only for an
-  object that exists;
+- one small object at each document's `originals/` key and (stage 2) at its
+  `derived/text/` key, written once with the tenant's pipeline credentials and kept by Object
+  Lock. A refused read proves something only for an object that exists;
 - grants in every state, made as the pipeline's `claim` step makes them: a live one for the
   first document of tenant A (the probe's own), an ended one and then a live one for the
   second (the live one is ended mid-run, on request), and an expired one for tenant B's.
@@ -130,6 +130,31 @@ def ensure_object(context: StorageContext, document: uuid.UUID) -> None:
         api.put_object(Bucket=context.bucket, Key=key, Body=BODY, ContentType="application/pdf")
 
 
+TEXT_BODY = (
+    b'{"isolation_test_fixture": "the worker probe reads this; it is no document\'s text"}\n'
+)
+
+
+def ensure_text_object(context: StorageContext, document: uuid.UUID) -> None:
+    """One small object at the document's `derived/text/` key, written once (stage 2): the
+    probe reads its own document's and must be refused every other's."""
+    api: Any = context.session().client("s3", region_name=context.region)
+    key = context.text_key(document)
+    try:
+        api.head_object(Bucket=context.bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in MISSING_CODES:
+            raise
+        api.put_object(
+            Bucket=context.bucket, Key=key, Body=TEXT_BODY, ContentType="application/json"
+        )
+
+
+def ensure_objects(context: StorageContext, document: uuid.UUID) -> None:
+    ensure_object(context, document)
+    ensure_text_object(context, document)
+
+
 def _claim(conn: Connection, tenant_id: uuid.UUID, document: uuid.UUID) -> dict[str, Any]:
     token = grants.claim(
         conn,
@@ -150,7 +175,7 @@ def prepare(
     tenant_a: uuid.UUID,
     tenant_b: uuid.UUID,
     *,
-    write: Callable[[StorageContext, uuid.UUID], None] = ensure_object,
+    write: Callable[[StorageContext, uuid.UUID], None] = ensure_objects,
 ) -> dict[str, Any]:
     """Documents, objects and grants; returns the probe's cases."""
     with engine.begin() as conn:

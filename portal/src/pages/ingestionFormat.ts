@@ -91,6 +91,10 @@ export const ERROR_TEXT: Record<string, string> = {
   not_a_pdf: "The file is not a PDF.",
   pdf_unreadable: "The PDF could not be opened. Check the file and upload it again.",
   pdf_encrypted: "This PDF is password-protected and can't be processed. Remove the password and upload it again.",
+  // The text step (build step 6, second half, stage 2).
+  too_many_pages: "This PDF has more pages than can be processed. Split it into smaller files and upload them.",
+  page_unreadable: "A page of this PDF could not be read. Check the file and upload it again.",
+  text_too_large: "This PDF has more text than can be processed. Split it into smaller files and upload them.",
   not_uploaded: "The file was never uploaded.",
   removed: "Removed from the batch.",
   timeout: "Processing took too long.",
@@ -184,10 +188,34 @@ export function laterStepsPending(
   now: number = Date.now(),
 ): boolean {
   if (status !== "processing") return false;
+  // The text step is the last one there is (stage 2). Once it has started, only its own
+  // result says the document has passed everything: while it runs, or after it stopped, the
+  // note would be wrong.
+  const text = events.filter((e) => e.step === "text");
+  if (text.length > 0) return text.some((e) => e.status === "continue");
+  // A document processed before the text step existed stops after its inspection.
   if (events.some((e) => e.step === "inspect" && e.status === "continue")) return true;
   const fingerprint = events.find((e) => e.step === "fingerprint" && e.status === "continue");
   if (!fingerprint || events.some((e) => e.step === "worker" || e.step === "inspect")) return false;
   return fingerprint.at === undefined || now - new Date(fingerprint.at).getTime() > NO_TASK_COMING_MS;
+}
+
+/** What the Text step did with a document's pages, as the API reports it. */
+export interface TextPages {
+  total: number;
+  native: number;
+  ocr: number;
+  unread: number;
+}
+
+/**
+ * The Text step's line: how many pages, how many were read from their own text layer, how
+ * many were read from their picture (OCR), and how many could not be read at all. The last
+ * count is always there, also when it is none (owner, 2026-11-27).
+ */
+export function textPagesText(pages: TextPages): string {
+  const total = `${pages.total} ${pages.total === 1 ? "page" : "pages"}`;
+  return `${total}: ${pages.native} from the text layer, ${pages.ocr} read by OCR, ${pages.unread} could not be read`;
 }
 
 /** A pipeline step's name, for the step list. */
@@ -201,6 +229,8 @@ export const STEP_TEXT: Record<string, string> = {
   claim: "Scheduling",
   worker: "Processing task",
   inspect: "Inspection",
+  // Step 5: each page's text, from its text layer or read from its picture.
+  text: "Text",
   companion: "Companion file",
   review: "Review",
   failed: "Failed",

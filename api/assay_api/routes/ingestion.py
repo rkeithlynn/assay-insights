@@ -88,6 +88,8 @@ class IngestionEvent(BaseModel):
     # A failed step's error name (an exception type, an AWS error code or a `States.*` name),
     # for master admins only; never a message. The tenant's document detail has no such field.
     error_type: str | None
+    # The Text step's page counts: numbers only, as the tenant's own panel shows them.
+    text_pages: ingestion_read.TextPages | None = None
 
 
 class IngestionDetail(BaseModel):
@@ -208,7 +210,8 @@ def ingestion_detail(document_id: uuid.UUID, caller: PlatformMember) -> Ingestio
     events = visible_events(
         caller.conn.execute(
             text(
-                "SELECT step, status, at, error_code, error_type "
+                "SELECT step, status, at, error_code, error_type, pages, pages_native, "
+                "pages_ocr, pages_unread "
                 "FROM platform.ingestion_events_v WHERE document_id = :id ORDER BY at"
             ),
             {"id": document_id},
@@ -223,6 +226,7 @@ def ingestion_detail(document_id: uuid.UUID, caller: PlatformMember) -> Ingestio
                 at=e.at,
                 error_code=e.error_code,
                 error_type=e.error_type,
+                text_pages=ingestion_read.text_pages(e),
             )
             for e in events
         ],

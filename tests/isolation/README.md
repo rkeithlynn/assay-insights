@@ -46,11 +46,28 @@ The script runs three things and waits for each:
      cannot read the parent's environment or memory; it is stopped at the timeout, the
      memory limit and the output limit;
    - the task's main process has exactly CAP_SETUID, CAP_SETGID and CAP_KILL, on a read-only
-     root filesystem.
+     root filesystem;
+   - for the text step (stage 2): the document's own text object is read, and another
+     document's or the other tenant's is refused, to read and to write; writing the stored
+     companion file is refused; a bound session writes its own attempt's `pages` and
+     `ai_usage` rows and no other's (row security), can read neither table, sets the content
+     pointer for its bound attempt only, and can update no other column of `documents`;
+   - the real `text` and `render` jobs run in the sandbox on a synthetic PDF, and a child
+     that misbehaves on the page channel is stopped or refused by name;
+   - Textract `DetectDocumentText` reads the synthetic page the sandbox drew, with the task's
+     own role through the VPC's endpoint; `AnalyzeDocument` and
+     `StartDocumentTextDetection` are refused; Textract pointed at a tenant's bucket is
+     refused; the document's storage credentials are refused Textract.
+
+   The isolation Lambda also checks (`test_textract.py`) that the Textract endpoint refuses
+   its own role, which holds the worker's Textract permission word for word: the endpoint's
+   policy is the only thing left to refuse it.
 
    The isolation Lambda prepares its fixture first (`worker_fixture.py`): three documents
    with fixed IDs in the two test tenants, one small object at each one's `originals/` key
-   (written once, kept by Object Lock), and grants in every state. It ends one grant when
+   and at its `derived/text/` key (written once, kept by Object Lock), and grants in every
+   state. The probe leaves a `pages` row, an `ai_usage` row (for its one Textract call, at no
+   price) and the content pointer on its own fixture document. It ends one grant when
    the probe says it is watching, and clears the grants afterwards. The fixture documents
    are `discarded` between runs, so they show in no history view by default, and each has a
    `start` event, so the pipeline never queues or processes them.

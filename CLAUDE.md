@@ -36,98 +36,234 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stages 2 to 4 not started.** Next: stage 2 (step 5, text). See "Start here" below |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) built on 2026-11-27, not deployed.** Stages 3 and 4 not started. Next: the owner's deploy and checks of stage 2. See "Start here" below |
 | 7–9 | Not started |
 
-## Start here: stage 2 of the second half of step 6 (state on 2026-11-27)
+## Start here: stage 2 of the second half of step 6 is built and waits for its deploy (state on 2026-11-27)
 
-A new session can begin stage 2 from this section and BUILD_SPEC.md section 8. Everything
-below it is the record: read the part a task touches.
+A new session starts from this section and BUILD_SPEC.md section 8. Everything below it is
+the record: read the part a task touches. **Stage 2 (step 5, text) is built and tested, and
+not deployed.** The next things are the owner's: the deploy, the checks under "Deploying
+stage 2", and the 1,000-page run. Stage 3 is not started and needs its own plan first.
 
 ### Where things stand
 
 - **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
-  against `main`, with CI green. `main` has not been fast-forwarded yet (the owner does
-  that). Stage 2 continues on `build-step-6`.
-- **Deployed.** Stack update 40 (2026-11-27). `pulumi preview` shows 363 unchanged. Aurora
-  is at migration `0011`. All 20 alarms are `OK` (read 2026-11-27 16:48 UTC).
-- **Verified by the owner on 2026-11-27**: the isolation suite passes in all four sections
-  (71 in the isolation Lambda, 28 in the provisioning role's probe, 68 in the worker probe,
-  28 Cognito client checks); refresh-token rotation is on for both portal clients; a forced
-  refresh returns 200 from `/oauth2/token` on both portals; a stale tab shows "Your session
-  has ended. Sign in again to continue."; `check_deployment.py` passes on both reservations
-  (50 and 300, 650 unreserved) and 24 of 25 logs (the break-glass log is not proven: nobody
-  has assumed the role).
-- **What the pipeline does today.** Upload, scan, close, fingerprint (Lambda), claim, the
-  worker task's `inspect` step, release, `companion` (Lambda). Then the execution ends and
-  the document stays `processing`: steps 5 to 8 and 10 do not exist yet, and the portal's
-  steps panel says so (`laterStepsPending`). No content has gone to any AI service.
+  against `main`. `main` has not been fast-forwarded yet (the owner does that). Stage 3
+  continues on `build-step-6`.
+- **Deployed.** Still stack update 40 (2026-11-27), Aurora at migration `0011`: stage 2 is
+  not in AWS yet. The preview for stage 2 creates 2 resources (the Textract endpoint's
+  policy and the spend alarm), replaces every image and the three task definitions, and
+  updates what names them.
+- **Rule 6, checked before stage 2 was built** (2026-11-27): the AI services opt-out policy
+  in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
+  UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is now
+  the first part of `uv run scripts/check_deployment.py` in every mode;
+  `uv run scripts/check_deployment.py --ai-services` runs it alone. Run it again, and read
+  it, before the deploy.
+- **What the pipeline does once stage 2 is deployed.** Upload, scan, close, fingerprint
+  (Lambda), claim, the worker task's `inspect` and `text` steps, release, `companion`
+  (Lambda). Then the execution ends and the document stays `processing`: steps 6 to 8 and 10
+  do not exist yet, and the steps panel says so (`laterStepsPending`, now keyed on the text
+  step's result). **Textract is the first AI service that gets tenant content.**
 
-### Stage 2: what it is, and what must happen first
+### Stage 2: what was built
 
-Step 5 of BUILD_SPEC.md section 8: read each page's text layer with `pypdfium2`, score it,
-send the pages that fail to Textract `DetectDocumentText`, and write
-`derived/text/{doc}.json` and the `pages` rows. **It is the first stage that sends tenant
-content to an AI service.** The plan for all four stages was approved on 2026-11-24 ("Step
-6, second half" below has every decision); stage 2's own design has not been written. Work
-on this one stage, stop when it is done, and report.
+Step 5 of BUILD_SPEC.md section 8, in the worker task, after `inspect`
+(`workers/assay_workers/worker/text.py`):
 
-Before building, propose to the owner what the plan left open:
+1. **The text layer.** Sandbox children read it, 25 pages a child, and send one record a
+   page down the **page channel**. The parent scores each page as it arrives
+   (`worker/quality.py`).
+2. **Textract.** Pages that fail the score are drawn by sandbox children as greyscale PNGs,
+   8 pages a child, and the task's main process sends each to `DetectDocumentText`, as
+   bytes, two calls at a time (`worker/ocr.py`). One `ai_usage` row per successful call,
+   written at once.
+3. **The text object.** `derived/text/{doc}.json`, uploaded from a file with fresh
+   credentials for that one document. Its S3 version ID goes into the step's event and into
+   `documents.text_version_id`.
+4. **The rows.** One `pages` row a page for the attempt, and the content pointer
+   (`documents.content_attempt`), in the transaction that writes the step's result.
 
-1. **How page text leaves the sandbox.** A sandbox child may write no file and may return
-   only one JSON object of at most 64 KB, validated against a model of numbers and codes
-   (`assay_workers.sandbox`). Page text is neither small nor a code. The parent must still
-   never open a PDF and must still distrust the child. This is a design decision for the
-   owner (owner decision B and condition d).
-2. **What an `ai_usage` row holds for Textract** (decision C: every AI call writes one,
-   with tenant, model, tokens and document). Textract is billed by the page, has no tokens,
-   and is not in `ai_models`.
-3. **The quality score**: what makes a page fail and go to Textract.
-4. **Every new permission**, for approval before it is built and listed in the pull
-   request: the worker task role's `textract:DetectDocumentText` (approved in principle,
-   decision 5, for this stage only); a policy for the `textract` interface endpoint, which
-   exists since step 2 with the default policy (the `sqs` and `sns` endpoints name their
-   role, action and resource); `app_worker`'s grants and policies on `pages` and
-   `ai_usage`.
+**The page channel** (`sandbox/runner.py`, `sandbox/jobs.py`). A sandbox child's standard
+output keeps its rule: one JSON object of numbers and codes, at most 64 KB. The two page
+jobs (`text`, `render`) also get one inherited descriptor, the write end of a pipe, and write
+one JSON record per line to it. The parent reads the pipe as the child writes and holds one
+record at a time. The child still writes no file (the file-size limit stays 0), has no
+network and no credentials, and the seccomp filter and the limits are unchanged. The parent
+never opens a PDF or a picture: a picture is checked for its first eight bytes and its
+length, and forwarded.
 
-Before stage 2's deploy (decision E, and rule 6): run both checks and **show the owner the
-output**. Last run 2026-11-25 03:58 UTC: `optOut` for every service; no invocation logging
-configuration.
+| Cap | Value |
+| --- | --- |
+| One page's text | 256 KB |
+| One page record (text and word positions) | 1 MB |
+| One page's picture | 5,000,000 bytes (AWS's pages say 5 MB in one place and 10 MB in another) |
+| One picture record (the picture in base64) | 8 MB |
+| One `text` child | 25 pages, so 25 MB at most |
+| One `render` child | 8 pages, so 64 MB at most |
+| The text object | 128 MB (`text_too_large` above it) |
+| Textract calls in flight from one task | 2 |
 
-- `aws organizations describe-effective-policy --policy-type AISERVICES_OPT_OUT_POLICY --profile pilar-dev`
-- `aws bedrock get-model-invocation-logging-configuration --profile pilar-dev --region us-east-1`
+**What an attacker who controls the PDF, and by exploit the child, can now get out:** text
+of their choosing (256 KB a page), which is stored in that tenant's own text object, and
+bytes of their choosing that begin as a PNG does (5 MB a page), which go unopened to
+Textract and nowhere else. No credentials, no other document, no network, no path or key.
 
-Rules stage 2 must follow, each already decided (the detail is where the pointer says):
+**The quality score** (`worker/quality.py`). 1.0 for a blank page; 0.0 for a page with
+annotations that draw content (form fields, stamps, free text, ink) or with content and no
+text; otherwise `legible x (1 - image coverage)`. `legible` is the share of ordinary
+characters times the share of longer words that contain a vowel (English only; it needs 30
+such words before it says anything). A page below the threshold goes to Textract.
 
-- **A PDF is opened only in a sandbox child**, never by the task's main process and never in
-  a Lambda ("The sandbox"). `pypdfium2` is the `worker` extra of `assay-workers`, capped
-  below 5.16. No `pdfplumber`, no PyMuPDF.
-- **The worker is bound to one document.** It has that document's keys only; its session
-  policy already names the text object (`derived/text/{doc}.json`) for reading and writing.
-  It signs in as `app_worker`, which sees one document ("Binding the worker").
-- **Migration `0012`** is stage 2's: `pages` gets an `attempt` column and is read through
-  `documents.content_attempt` (the pointer exists, unused); nothing is deleted on
-  reprocessing. `app_worker` gets column-level grants and policies for what the step uses.
-  Keep the SQL inline; update `EXPECTED_PRIVILEGES` in `test_db_security.py` in the same
-  change; test as each role, never only as a superuser. (The plan's table gave `0012` to
-  stage 4's Titan row; that takes the next free number when it comes.)
-- **Steps name themselves.** Add the step to `progress.WORKER_STEPS` (which puts it in
-  `PIPELINE_STEPS`), and to the portal's `STEP_TEXT` and `RESULT_TEXT` in plain words. A step
-  that asks "did I already run?" asks about its own attempt's events; a superseded attempt
-  writes nothing.
-- **Textract** is called with the worker's own role and the page's bytes (decision 18),
-  through the VPC endpoint. Throttling is retried with backoff. No page text, prompt or
-  response is logged anywhere; document text is untrusted input.
-- **Master roles never see page text.** No master view or audit row may hold it; add a test.
-- **Tests.** Database tests against a real PostgreSQL signed in as each role; the worker
-  image test in the task's image; the worker probe (`run_isolation.py`) for any new access.
-  A check requires the service's own answer by name, never "refused" in general.
-- **Deploy order.** Deploy when no document is in progress. `pulumi up`; then
-  `uv run scripts/migrate.py` straight away; `uv run scripts/run_isolation.py --tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`;
-  browser checks; `uv run scripts/check_deployment.py`.
-- **Still for stage 4, not stage 2:** where the final status is set (step 9 now runs after
-  the task), removing `laterStepsPending`, and the Titan catalog row with its price blank
-  for the owner.
+**A page is `native` or `ocr`.** An `ocr` page's text is what Textract read on its picture,
+the typed parts included. When such a page's text layer reads well by itself (it went to
+Textract because of an image or annotations), the text layer's text is kept in the text
+object too, as `text_layer`, with `is_source: false` and no word positions.
+
+**What stops a document at this step:**
+
+| Case | Status | Code |
+| --- | --- | --- |
+| More pages than `textMaxPages` | `failed` | `too_many_pages` (before any text is read) |
+| A sandbox child did not end well | `failed` | `page_unreadable`, error type `sandbox.<ending>`; ERROR line, `worker-errors` |
+| The child could not be started | the step fails | `text_failed`, `SandboxNotStarted` |
+| Textract busy for 5 minutes on one page, or refusing the task | the step fails | `text_failed`, error type Textract's own (`ThrottlingException`, `AccessDeniedException`, ...) |
+| The text object over 128 MB | `failed` | `text_too_large` |
+| The task over 30 minutes | the step fails | `text_failed`, `States.Timeout` |
+
+A page Textract will not take (`UnsupportedDocumentException`, `BadDocumentException`,
+`DocumentTooLargeException`, `InvalidParameterException`) is recorded as unread and the
+document goes on. The Text line of both step panels shows the count.
+
+### The owner's decisions on stage 2 (2026-11-27)
+
+1. **How page text leaves the sandbox:** the page channel, above.
+2. **An `ai_usage` row for Textract:** `service` `textract`, `operation`
+   `DetectDocumentText`, no `model_id`, Textract's own `model_version`, the `attempt` and
+   `page_no`, tokens 0, `units` 1, `unit` `page`, `unit_price` and `cost` from stack config,
+   and the request ID. One row per successful call.
+3. **The threshold is 0.90** (`textQualityThreshold`), and the vowel factor stays.
+4. **Permissions** (all six approved; "New grants and permissions" below).
+5. **A document may have 1,000 pages** (`textMaxPages`). The spec had no page limit.
+6. **A page with images over about a tenth of it, or with form fields or stamps, always goes
+   to Textract**, even when its text layer is good: the text is then what a person sees.
+   **Only a page's source text (`text`) feeds extraction, search and embedding.** The stored
+   `text_layer` is there to compare with; nothing in stage 2 reads it.
+7. **A document with unread pages goes on**, and stage 4 makes it `needs_review`. The unread
+   count shows in the Text line of the step panel in the tenant view and the master view.
+8. **The price of a page** is the owner's, in stack config (`textractPricePerPage`). No
+   price is in code.
+9. **The stored companion file left the worker's session policy**
+   (`originals/{doc}.companion.json`): the companion step writes it, not the task.
+10. **Every version of the text object is kept.** Object Lock's default (governance, 1 day)
+    applies to `derived/text/` as to everything in the bucket, no role may delete a version,
+    and there is no lifecycle rule. "Process again" writes a new version; the old one stays.
+    Each attempt's version ID is in its `text` event (`detail.version_id`), so an old
+    version can be found without listing. No lifecycle rule and no delete permission were
+    added. (A discarded document never has a text object: only an open batch can be
+    discarded.)
+11. **The spend guard:** an alarm on Textract pages in 24 hours across the account
+    (`textractDailyPagesAlarm`, 2,000), sent to the alarms topic.
+12. **The Textract endpoint's policy admits the worker task's role only.** The plan's table
+    said "plus the role in 3" (the isolation Lambda's); that would have defeated the test the
+    role exists for, so it was built the narrower way: the isolation role holds the same IAM
+    permission, with the same `aws:SourceVpce` condition, and the endpoint must refuse it.
+
+### New grants and permissions (stage 2; also in the pull request)
+
+- **IAM, worker task role:** `textract:DetectDocumentText` on `*` (Textract has no
+  resource-level permissions), only with `aws:SourceVpce` equal to the Textract endpoint.
+- **IAM, isolation Lambda's role:** the same statement, word for word, so that the endpoint's
+  policy is the only thing that can refuse it.
+- **Textract endpoint policy:** from the default (allow everything) to one statement:
+  `textract:DetectDocumentText` for the worker task's role. Narrower than before. It is a
+  `VpcEndpointPolicy` resource: never delete or recreate it (an endpoint without one allows
+  everything).
+- **Database (migration `0012`):**
+  - `app_worker`: INSERT on 8 columns of `pages` and 15 of `ai_usage`, each with a policy
+    that admits only its bound tenant, document and attempt. It can read neither table.
+  - `app_worker`: UPDATE on `documents.content_attempt` and `documents.text_version_id`. A
+    trigger (`worker_content_pointer_guard`) refuses the worker any value but its bound
+    attempt, and an empty version.
+  - `app_worker`: EXECUTE on the new `pipeline.bound_attempt()` (owned by `pipeline_lookup`).
+  - `platform_reader`: four more integer columns of `platform.ingestion_events_v`, for a
+    `text` event only: `pages`, `pages_native`, `pages_ocr`, `pages_unread`. Counts, shown
+    only if the stored value is a plain whole number.
+- **Narrowed:** the worker's session policy lost `originals/{doc}.companion.json`.
+- **No change** to the tenant role, any bucket, key or vector bucket policy, any KMS key or
+  grant, security groups, the set of endpoints, queues, topics, the state machine's role or
+  any Lambda's role. No `update_tenants.py` run: no tenant stack resource changes.
+
+### Deploying stage 2 (the owner)
+
+Stack config, all four required (a stack without one fails `pulumi preview`):
+`textractPricePerPage` (set by the owner: `0.0015`), `textQualityThreshold` (`0.90`),
+`textMaxPages` (`1000`), `textractDailyPagesAlarm` (`2000`). All four are in
+`infra/Pulumi.dev.yaml`.
+
+1. `uv run scripts/check_deployment.py --ai-services` and read the output. Both must be ok.
+2. Deploy when no document is in progress: `pulumi up --cwd infra --stack pilartech/assay-platform/dev`.
+3. Straight away: `uv run scripts/migrate.py` (to `0012`). Until it is in, the text step
+   fails, so upload nothing in between. Then `uv run scripts/migrate.py --command verify`.
+4. `uv run scripts/run_isolation.py --tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`.
+   **If "textract: reads a synthetic page (the task's role)" is refused with
+   `AccessDeniedException`, stop and tell the owner:** it would mean Textract does not
+   honour the `aws:SourceVpce` condition, and removing it is the owner's decision.
+5. `uv run scripts/make_test_files.py --fresh`, upload as Infinity Loans, and read each
+   document's Text line: 01 and 04 all from the text layer; 08 three read by OCR; 09 one
+   from the text layer and two by OCR; 10 one by OCR.
+6. Compare the pages read by OCR with Textract's own count: CloudWatch, `AWS/Textract`,
+   `SuccessfulRequestCount`, `Operation` `DetectDocumentText`. (`ai_usage` has no read path
+   from outside the VPC.)
+7. Check the alarms are `OK`, then `uv run scripts/check_deployment.py`.
+8. The 1,000-page run: `uv run scripts/make_test_files.py --fresh --pages-1000`, upload
+   `11-scanned-1000-pages.pdf` alone, and compare with the figures below. It sends 1,000
+   pages to Textract, half the spend alarm's threshold.
+
+### What the 1,000-page run is compared with (estimates, not measured)
+
+- **Time:** 12 to 17 minutes for the text step, inside the task's 30 minutes.
+- **Memory:** the task has 4,096 MB and 1 vCPU. Expected peak near 0.5 GB: about 250 MB in
+  the parent (one record in hand, two Textract calls in flight) and 200 to 400 MB in the
+  child. The caps bound the worst case near 2.3 GB (the child's address space stops at
+  2 GiB). Read the task's peak from Container Insights (`MemoryUtilized`, cluster
+  `assay-dev-pipeline-worker`).
+- **Disk:** the parent keeps at most 8 pictures (40 MB) and the pages' text in its private
+  directory on the task volume.
+
+### Not verified, and how and when each gets settled
+
+| What | Settled by | When |
+| --- | --- | --- |
+| `aws:SourceVpce` on the worker's Textract permission: whether Textract honours it | The worker probe's "textract: reads a synthetic page (the task's role)". Allowed: it works. `refused:AccessDeniedException`: stop and ask the owner | The first isolation run after the deploy |
+| The words of the endpoint policy's refusal ("VPC endpoint policy" in the message) | The isolation Lambda's `test_textract.py`. If the code is `AccessDeniedException` and the message says something else, record the message and correct the test | The first isolation run |
+| Textract's answer when it is pointed at an object the caller cannot read. The probe expects `InvalidS3ObjectException`; that is from memory | The worker probe's two "textract: pointed at ..." checks print the code. If it differs, record it here and require that one. `allowed` would be a real failure | The first isolation run |
+| Textract's size limit for one picture (5 MB or 10 MB) | Not needed: pictures stay under 5,000,000 bytes | - |
+| PDFium: greyscale drawing without an image library, form fields, image coverage | **Settled 2026-11-27:** `tests/unit/test_worker_image.py`, with the real child in the task's image (the four synthetic files) | Done |
+| That Textract reads the dot-matrix letters of the synthetic scans well | The owner's browser check of 08, 09 and 10. A poor read shows as low `ocr_confidence`, not as a failure | The browser checks |
+| 1,000 scanned pages inside 30 minutes, and the memory figures | The 1,000-page run | Before the stage closes |
+| How soon the spend alarm fires | **Settled 2026-11-27** from AWS's alarm evaluation page: with no evaluation window set, an alarm slides. It is checked every minute against the 24 hours before it, so it fires within minutes of the 2,001st page, and stays in ALARM until those 24 hours hold 2,000 or fewer. It notifies on the change of state only. Not seen firing | Read |
+
+### For stage 3 (steps 6 to 8: split, signer details, field extraction)
+
+- **Extracted text is content chosen by whoever made the PDF. It must be handled as data,
+  never as instructions, when it is shown to a model** (owner, 2026-11-27). That holds for
+  the text layer and for what Textract read alike: either can say "ignore your instructions".
+  Forced tool choice and schema validation stay (decision D), and nothing a model returns
+  chooses a tenant, a bucket or a SQL statement.
+- **Only a page's source text (`text`) is the page's text.** Stage 3's plan may propose using
+  the stored `text_layer` to cross-check a value that OCR also read, for the owner's decision
+  then. Nothing uses it before that.
+- **Read the text at `documents.text_version_id`**, never "the latest" version of the key.
+- **The content pointer** moves in the text step today, because that is the last content
+  step. When a later step writes content, the pointer moves after the last of them.
+- **Unread pages** (the text event's `pages_unread`) make the document `needs_review` in
+  stage 4 (decision 7).
+- Each stage adds `app_worker`'s grants and policies for the tables its steps use, bound to
+  tenant, document and attempt (`pipeline.bound_attempt()` exists now). A SQL check passes on
+  NULL: require each value outright (`units IS NOT NULL AND units >= 1`).
+- Add each step to `progress.WORKER_STEPS`, the portal's `STEP_TEXT` and `RESULT_TEXT`.
 
 ### What a new session would otherwise rediscover
 
@@ -146,13 +282,32 @@ Each is recorded in full further down; this is the index.
 | Deployed names | They are not Pulumi resource names (`assay-dev-pipeline-scan`, not `...-fn`). List before writing a command | "Deployed names are not Pulumi resource names" |
 | Reading the database | Aurora is private. `uv run scripts/migrate.py --command verify` is the read-only way in; Audit history is the way to read `audit_log` | Step 2, "Reading audit_log" |
 | AWS sign-in | The owner's SSO session expires during a long session; `pulumi preview` then fails. The owner runs `aws sso login --profile pilar-dev` | - |
+| The page channel | A sandbox child's standard output is still one small object of numbers. Page text and pictures leave by a pipe the parent reads one record at a time; the child writes no file | "Stage 2: what was built" |
+| A SQL check passes on NULL | `units >= 1` admits a row with no units. Require the value outright; a database test as the role caught it | Stage 2, migration `0012` |
+| `SET col = col` proves nothing about UPDATE | It is refused for the missing SELECT alone. The probe sets a column to its default and rolls back | The worker probe, stage 2 |
+| The spend alarm slides | An alarm with a one-day period is checked every minute against the last 24 hours, not at midnight | "Not verified, and how and when" |
+| Shell edits with backslashes | A bash heredoc halves them and can hang on `python`. Write the script with the Write tool, then run it with `uv run python` | - |
 
 ### Open items and known gaps
 
 Decisions the owner has still to make, or things to do:
 
 - **`main`**: fast-forward to `build-step-6` (pull request #5, CI green).
-- **Stage 2's four open design points** (above).
+- **Stage 2's deploy, checks and 1,000-page run** ("Deploying stage 2" above).
+- **Straight after stage 2, as its own change: limit the GuardDuty scan role to `inbox/`**
+  (owner, 2026-11-27). Today that role's policy reaches every object in every tenant bucket
+  (originals, text objects) and may decrypt through S3; only GuardDuty can assume it. AWS's
+  page for the role says that with an object prefix its access should be limited to the
+  targeted prefixes, and shows no policy. The least invasive form changes two statements of
+  the role's IAM policy (`AllowMalwareScan`, `AllowPostScanTag`) from the whole bucket to
+  `inbox/*`: the platform stack only, no tenant stack run. Leave `s3:ListBucket` and the
+  validation-object write alone. **Try it first on Isolation Test A with a clean file and
+  EICAR.** The risk: it is not known that GuardDuty reads nothing outside the prefix; if it
+  does, new uploads end `on_hold` (`scan_access_denied`, or `scan_timeout` after 30 minutes
+  with an alarm). Nothing is lost silently, and restoring the policy undoes it.
+- **A further narrowing to consider with it:** the worker's session policy still lets the
+  task read its document's companion upload in the inbox (the grant's row lists every clean
+  file). The task reads only the PDF.
 - **Concurrency numbers**: 50 and 300 rest on a small sample (43 scan runs, 9 at once at
   most). Measure again once real batches have run.
 - **The 74 files Git checks out with CRLF** on the owner's machine (the portal's `.ts` and
@@ -165,6 +320,11 @@ Decisions the owner has still to make, or things to do:
   break-glass role; exercise the break-glass rule, log and alarm once; a Cognito signing-key
   rotation needs a `pulumi up`. **Before Staging or Production**: raise the Lambda quota
   first, then set the two reservations.
+- **Before production: there is no designed way to delete a tenant's data** (owner,
+  2026-11-27): offboarding, a retention period, a deletion request. No role may delete an
+  object version, there is no lifecycle rule, and every version of every object is kept
+  (inbox uploads, originals, text objects, noncurrent versions). It needs its own design
+  covering originals, derived objects and noncurrent versions together. **Not designed.**
 
 Known gaps: things not proven, or proven only in part:
 
@@ -371,9 +531,9 @@ Still open:
 
 - **Rule 6, before stage 2's deploy:** re-check the AI services opt-out policy and that
   Bedrock invocation logging is off, and show the owner the output, before any content first
-  goes to Textract or Bedrock (last checked 2026-11-25 03:58 UTC: `optOut` for every
-  service, logging off). Nothing built so far sends content to any AI service. The commands
-  are under "Start here".
+  goes to Textract or Bedrock (last checked 2026-11-27: `optOut` for every service, logging
+  off). The check is `uv run scripts/check_deployment.py --ai-services`, and it runs first in
+  every mode of that script. Stage 2, once deployed, sends page pictures to Textract.
 - **The second-half plan** (owner, 2026-11-24) is approved; its decisions are under "Step 6,
   second half". What it had to include is all built in stage 1: one worker task per document
   (owner decision 1), reprocessing with attempt numbers, attaching or replacing a companion
@@ -1856,7 +2016,7 @@ owner's checks:
 | --- | --- | --- | --- |
 | 1, part 1 | The worker task, the attempt grant, the PDF sandbox, `app_worker`, migration `0010` | None | Complete (2026-11-25) |
 | 1, part 2 | Attempts and "Process again", step 9 (companion), companion attach and replace, the quarantine notice, refresh-token rotation, migration `0011` | None | Complete, verified 2026-11-27 |
-| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Not started. See "Start here" |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Built 2026-11-27, not deployed. See "Start here" |
 | 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) | Not started |
 | 4 | Step 10: chunk, embed, index; final statuses; Titan catalog row | Bedrock (Titan) | Not started |
 

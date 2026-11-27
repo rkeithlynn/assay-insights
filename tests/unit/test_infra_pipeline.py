@@ -41,6 +41,10 @@ def _one(type_token: str, name: str) -> dict[str, Any]:
     return matches[0]
 
 
+TEXTRACT_ENDPOINT = "vpce-0textract0000000"
+TEST_PRICE = "0.0100"
+
+
 def _stack(prefix: str, *, scan_reserved: int | None = None) -> pipeline.Pipeline:
     network = Network(prefix, cfg=NET, region=REGION, account_id=ACCOUNT_ID)
     database = Database(f"{prefix}-db", cfg=DB, network=network, account_id=ACCOUNT_ID)
@@ -60,6 +64,13 @@ def _stack(prefix: str, *, scan_reserved: int | None = None) -> pipeline.Pipelin
         security_topic_arn=NOTICES,
         notices_key_arn=NOTICES_KEY,
         scan_reserved_concurrency=scan_reserved,
+        # Step 5 (stage 2). The price here is a stand-in: the real one is the owner's, in
+        # stack config.
+        text_quality_threshold="0.90",
+        text_max_pages=1000,
+        textract_price_per_page=TEST_PRICE,
+        textract_daily_pages_alarm=2000,
+        textract_endpoint_id=TEXTRACT_ENDPOINT,
     )
 
 
@@ -580,18 +591,30 @@ def test_the_state_machine_may_pass_only_the_workers_two_roles() -> Any:
 
 
 @pulumi.runtime.test
-def test_the_worker_role_may_only_sign_in_as_app_worker() -> Any:
+def test_the_worker_role_signs_in_as_app_worker_and_has_exactly_one_textract_action() -> Any:
+    """Stage 2 (owner, 2026-11-27, permission 1): `textract:DetectDocumentText`, only through
+    the VPC's Textract endpoint. Nothing else of its own: no storage, no key, no queue, no
+    other AI service, not even logs (the task's execution role writes them)."""
     p = _stack("pl13")
 
     def check(_: list[Any]) -> None:
         policy = _policy(ROLE_POLICY, "pl13-pipeline-worker-task-policy")
-        # Nothing of its own but the database sign-in. No storage, no key, no queue, no AI
-        # service (those arrive with the stages that use them), not even logs: the task's
-        # execution role writes them.
-        assert _actions(policy) == {"rds-db:connect"}
-        [statement] = policy["Statement"]
+        assert _actions(policy) == {"rds-db:connect", "textract:DetectDocumentText"}
+        statement, textract = policy["Statement"]
         assert statement["Resource"].endswith("/app_worker")
         assert not statement["Resource"].endswith("/app_tenant")
+        # Exactly that statement: the one operation, and only through the endpoint.
+        assert textract == {
+            "Sid": "ReadPagesWithTextract",
+            "Effect": "Allow",
+            "Action": "textract:DetectDocumentText",
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:SourceVpce": TEXTRACT_ENDPOINT}},
+        }
+        # Every other service is still out, as it is for every Lambda role.
+        for forbidden in FORBIDDEN_SERVICES:
+            if forbidden != "textract:":
+                assert not any(a.startswith(forbidden) for a in _actions(policy)), forbidden
         role = _one("aws:iam/role:Role", "pl13-pipeline-worker-task-role")
         trust = json.loads(role["assumeRolePolicy"])
         assert trust["Statement"][0]["Principal"] == {"Service": "ecs-tasks.amazonaws.com"}
@@ -676,10 +699,144 @@ def test_every_alarm_notifies_the_alarm_topic() -> Any:
         for function in pipeline.FUNCTIONS:
             assert {f"pl7-pipeline-{function}-errors", f"pl7-pipeline-{function}-failed"} <= names
         assert "pl7-pipeline-worker-errors" in names
+        assert "pl7-pipeline-textract-pages-day" in names
         for _name, inputs in alarms:
             assert inputs["alarmActions"] == [TOPIC], inputs["name"]
 
     return _ready(p).apply(check)
+
+
+@pulumi.runtime.test
+def test_the_spend_guard_counts_textract_pages_in_a_day_across_the_account() -> Any:
+    """Owner, 2026-11-27 (addition 2). Textract has no pages metric; one successful
+    DetectDocumentText call is one page, whoever in the account made it."""
+    p = _stack("pl15")
+
+    def check(_: list[Any]) -> None:
+        alarm = _one(
+            "aws:cloudwatch/metricAlarm:MetricAlarm", "pl15-pipeline-textract-pages-day-alarm"
+        )
+        assert (alarm["namespace"], alarm["metricName"]) == (
+            "AWS/Textract",
+            "SuccessfulRequestCount",
+        )
+        # The operation only: no tenant, role or function in the dimensions.
+        assert alarm["dimensions"] == {"Operation": "DetectDocumentText"}
+        assert (alarm["statistic"], alarm["period"], alarm["evaluationPeriods"]) == (
+            "Sum",
+            86400,
+            1,
+        )
+        assert alarm["threshold"] == 2000
+        assert alarm["comparisonOperator"] == "GreaterThanThreshold"
+        # No call at all is not an alarm.
+        assert alarm["treatMissingData"] == "notBreaching"
+        assert alarm["alarmActions"] == [TOPIC]
+
+    return _ready(p).apply(check)
+
+
+def test_the_textract_endpoint_admits_one_role_and_one_action() -> None:
+    worker = f"arn:aws:iam::{ACCOUNT_ID}:role/x-pipeline-worker-task-role"
+    policy = json.loads(pipeline.textract_endpoint_policy(worker_role=worker))
+    assert policy["Statement"] == [
+        {
+            "Sid": "WorkerTaskReadsPages",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "textract:DetectDocumentText",
+            "Resource": "*",
+            "Condition": {"ArnEquals": {"aws:PrincipalArn": worker}},
+        }
+    ]
+    text = json.dumps(policy)
+    # Not the operations that keep results on AWS's side or read forms and tables.
+    for other in ("StartDocument", "AnalyzeDocument", "GetDocument", "textract:*"):
+        assert other not in text
+
+
+def test_the_program_gives_the_textract_endpoint_that_policy_and_names_no_other_role() -> None:
+    program = (REPO_ROOT / "infra" / "__main__.py").read_text(encoding="utf-8")
+    start = program.index('f"{prefix}-textract-endpoint-policy"')
+    block = program[start : program.index(")\n", start + 400)]
+    assert 'vpc_endpoint_id=network.interface_endpoints["textract"].id' in block
+    assert "textract_endpoint_policy(worker_role=arn)" in block
+    assert "pipeline_role.worker.arn" in block and "isolation" not in block
+    # The worker's permission and the isolation probe's are tied to the same endpoint.
+    assert program.count('textract_endpoint_id=network.interface_endpoints["textract"].id') == 2
+
+
+def test_no_lambda_or_other_role_in_the_pipeline_module_gets_textract() -> None:
+    """`textract:` appears in one statement builder, used by the worker task's policy (and
+    by the isolation probe, in its own module), and in the endpoint's policy."""
+    source = (REPO_ROOT / "infra" / "assay_infra" / "pipeline.py").read_text(encoding="utf-8")
+    assert source.count('"textract:DetectDocumentText"') == 1
+    assert source.count("textract_statement(") == 2  # its definition and the worker's policy
+    for function in pipeline.FUNCTIONS:
+        policy = json.loads(
+            pipeline.function_role_policy(
+                function,
+                log_group="arn:logs",
+                db_user="arn:db/app_tenant",
+                ingest_queue="arn:queue",
+                scan_dlq="arn:dlq",
+                state_machine="arn:sfn",
+                security_topic=NOTICES,
+                notices_key=NOTICES_KEY,
+                region=REGION,
+            )
+        )
+        assert "textract" not in json.dumps(policy), function
+
+
+def test_the_worker_task_gets_the_text_steps_settings_from_stack_config_only() -> None:
+    """No price, threshold or page limit in the program: each is a required stack config
+    key, and the task does not start without it."""
+    from assay_infra.config import TextConfig, validate_text
+
+    assert {"TEXT_QUALITY_THRESHOLD", "TEXT_MAX_PAGES", "TEXTRACT_PRICE_PER_PAGE"} <= set(
+        pipeline.WORKER_VARIABLES
+    )
+    good = TextConfig(
+        quality_threshold="0.90",
+        max_pages=1000,
+        textract_price_per_page=TEST_PRICE,
+        textract_daily_pages_alarm=2000,
+    )
+    assert validate_text(good) is good
+    import dataclasses
+
+    import pytest
+
+    for change, message in (
+        ({"textract_price_per_page": ""}, "textractPricePerPage is not set"),
+        ({"textract_price_per_page": "  "}, "textractPricePerPage is not set"),
+        ({"textract_price_per_page": "cheap"}, "textractPricePerPage must be a number"),
+        ({"textract_price_per_page": "-0.01"}, "textractPricePerPage must be zero or more"),
+        ({"textract_price_per_page": "NaN"}, "textractPricePerPage must be zero or more"),
+        ({"quality_threshold": "0"}, "textQualityThreshold"),
+        ({"quality_threshold": "1.01"}, "textQualityThreshold"),
+        ({"quality_threshold": "high"}, "textQualityThreshold must be a number"),
+        ({"max_pages": 0}, "textMaxPages"),
+        ({"max_pages": 3001}, "textMaxPages"),
+        ({"textract_daily_pages_alarm": 0}, "textractDailyPagesAlarm"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            validate_text(dataclasses.replace(good, **change))
+    for path in (REPO_ROOT / "infra").rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        assert "0.0015" not in source, path.name
+    config = (REPO_ROOT / "infra" / "assay_infra" / "config.py").read_text(encoding="utf-8")
+    for key in ("textQualityThreshold", "textMaxPages", "textractDailyPagesAlarm"):
+        assert f'conf.require("{key}")' in config or f'conf.require_int("{key}")' in config, key
+    stack = (REPO_ROOT / "infra" / "Pulumi.dev.yaml").read_text(encoding="utf-8")
+    for key in (
+        "textractPricePerPage",
+        "textQualityThreshold",
+        "textMaxPages",
+        "textractDailyPagesAlarm",
+    ):
+        assert f"assay-platform:{key}:" in stack, key
 
 
 @pulumi.runtime.test

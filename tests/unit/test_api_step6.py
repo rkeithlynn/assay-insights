@@ -534,3 +534,64 @@ def test_role_matrix(w: World, sub: str, method: str, path: str, status: int) ->
 def test_a_range_must_have_a_time_zone(w: World) -> None:
     naive = dt.datetime(2026, 11, 1).isoformat()
     assert w.req("GET", f"/api/documents?from={naive}", "a-user").status_code == 422
+
+
+# --- The Text step's page counts (stage 2) ------------------------------------------------------
+
+
+def test_both_step_panels_show_the_text_steps_page_counts_and_nothing_else_of_it(
+    w: World, ready_doc: dict[str, Any]
+) -> None:
+    """Owner decision C (2026-11-27): the unread page count shows in the Text line of the
+    tenant view and of the master view. Counts only: not the text object's version, not the
+    threshold, and never any text."""
+    doc_id = uuid.UUID(ready_doc["id"])
+    # The document's two pages were read from their text layer. Make one of the counts an
+    # unread page, as the worker's event has it when Textract will not take a page.
+    w.db.execute(
+        "UPDATE assay.document_events SET detail = detail || "
+        """'{"pages": 12, "pages_native": 9, "pages_ocr": 2, "pages_unread": 1}'::jsonb """
+        "WHERE document_id = %s AND step = 'text' AND status = 'continue'",
+        doc_id,
+    )
+    stored = w.db.row(
+        "SELECT detail FROM assay.document_events WHERE document_id = %s AND step = 'text' "
+        "AND status = 'continue'",
+        doc_id,
+    )
+    assert stored is not None and "version_id" in stored[0] and stored[0]["threshold"] == 0.9
+    counts = {"total": 12, "native": 9, "ocr": 2, "unread": 1}
+    for sub, path in (
+        ("a-admin", f"/api/documents/{doc_id}"),
+        ("a-user", f"/api/documents/{doc_id}"),
+        ("m-admin", f"/api/admin/ingestion/{doc_id}"),
+        ("m-user", f"/api/admin/ingestion/{doc_id}"),
+    ):
+        response = w.req("GET", path, sub)
+        assert response.status_code == 200, (sub, response.text)
+        events = response.json()["events"]
+        [text_event] = [e for e in events if e["step"] == "text"]
+        assert text_event["status"] == "continue" and text_event["text_pages"] == counts, sub
+        # No other step has page counts: the inspection's own `pages` is not the Text line's.
+        assert all(e["text_pages"] is None for e in events if e["step"] != "text"), sub
+        assert stored[0]["version_id"] not in response.text, sub
+        assert "version_id" not in response.text and "threshold" not in response.text, sub
+
+
+def test_a_text_event_with_counts_that_are_not_whole_numbers_shows_none(
+    w: World, ready_doc: dict[str, Any]
+) -> None:
+    doc_id = uuid.UUID(ready_doc["id"])
+    w.db.execute(
+        "UPDATE assay.document_events SET detail = "
+        """'{"pages": "twelve", "pages_native": -3, "pages_ocr": 1.5}'::jsonb """
+        "WHERE document_id = %s AND step = 'text' AND status = 'continue'",
+        doc_id,
+    )
+    for sub, path in (
+        ("a-admin", f"/api/documents/{doc_id}"),
+        ("m-admin", f"/api/admin/ingestion/{doc_id}"),
+    ):
+        events = w.req("GET", path, sub).json()["events"]
+        [text_event] = [e for e in events if e["step"] == "text"]
+        assert text_event["text_pages"] is None, sub

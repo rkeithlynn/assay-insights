@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 import pulumi
 
@@ -88,6 +89,23 @@ class PipelineConfig:
 
 
 @dataclass(frozen=True)
+class TextConfig:
+    """Step 5, text (build step 6, second half, stage 2). Every value is the owner's, from
+    stack config: none has a default here, and a stack without one fails its preview."""
+
+    # A page whose quality score is below this goes to Textract (`textQualityThreshold`).
+    quality_threshold: str
+    # A document with more pages than this is not read at all (`textMaxPages`).
+    max_pages: int
+    # What one Textract DetectDocumentText page costs, in US dollars
+    # (`textractPricePerPage`). Recorded with every call (ai_usage.unit_price).
+    textract_price_per_page: str
+    # The spend guard: an alarm when the account's Textract pages in a day pass this
+    # (`textractDailyPagesAlarm`).
+    textract_daily_pages_alarm: int
+
+
+@dataclass(frozen=True)
 class TenancyConfig:
     # The only principal that may assume the break-glass role (an IAM role ARN).
     break_glass_principal_arn: str
@@ -130,6 +148,7 @@ class PlatformConfig:
     alerts: AlertsConfig
     edge: EdgeConfig
     models: ModelsConfig
+    text: TextConfig
     pipeline: PipelineConfig = PipelineConfig()
 
 
@@ -227,6 +246,38 @@ def validate_pipeline(cfg: PipelineConfig) -> PipelineConfig:
     if scan is not None and tss is not None and tss < scan:
         # Every running scan function may be waiting for a TSS call at the same moment.
         raise ValueError("tssReservedConcurrency must be at least scanReservedConcurrency")
+    return cfg
+
+
+# The worker task has 30 minutes: more pages than this could not be read in them.
+TEXT_MAX_PAGES_RANGE = (1, 3000)
+TEXTRACT_DAILY_PAGES_RANGE = (1, 10_000_000)
+
+
+def validate_text(cfg: TextConfig) -> TextConfig:
+    try:
+        threshold = Decimal(cfg.quality_threshold)
+    except InvalidOperation:
+        raise ValueError("textQualityThreshold must be a number") from None
+    if not threshold.is_finite() or not 0 < threshold <= 1:
+        raise ValueError("textQualityThreshold must be above 0 and at most 1")
+    low, high = TEXT_MAX_PAGES_RANGE
+    if not low <= cfg.max_pages <= high:
+        raise ValueError(f"textMaxPages must be between {low} and {high}")
+    if not cfg.textract_price_per_page.strip():
+        raise ValueError(
+            "textractPricePerPage is not set: enter what one Textract DetectDocumentText page "
+            "costs, in US dollars"
+        )
+    try:
+        price = Decimal(cfg.textract_price_per_page)
+    except InvalidOperation:
+        raise ValueError("textractPricePerPage must be a number") from None
+    if not price.is_finite() or price < 0:
+        raise ValueError("textractPricePerPage must be zero or more")
+    low, high = TEXTRACT_DAILY_PAGES_RANGE
+    if not low <= cfg.textract_daily_pages_alarm <= high:
+        raise ValueError(f"textractDailyPagesAlarm must be between {low} and {high}")
     return cfg
 
 
@@ -338,6 +389,14 @@ def load_config() -> PlatformConfig:
                 worker_max_per_tenant=conf.require_int("workerMaxPerTenant"),
                 scan_reserved_concurrency=conf.get_int("scanReservedConcurrency"),
                 tss_reserved_concurrency=conf.get_int("tssReservedConcurrency"),
+            )
+        ),
+        text=validate_text(
+            TextConfig(
+                quality_threshold=conf.require("textQualityThreshold").strip(),
+                max_pages=conf.require_int("textMaxPages"),
+                textract_price_per_page=(conf.get("textractPricePerPage") or "").strip(),
+                textract_daily_pages_alarm=conf.require_int("textractDailyPagesAlarm"),
             )
         ),
         edge=validate_edge(

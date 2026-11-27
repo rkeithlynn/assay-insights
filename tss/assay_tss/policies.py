@@ -389,10 +389,15 @@ WORKER_MAX_INBOX_KEYS = 2
 
 
 def worker_document_keys(document_id: uuid.UUID) -> tuple[str, ...]:
-    """The stored objects of one document: its original, companion, text and fields."""
+    """The stored objects of one document that the worker task reads or writes: its
+    original, its text and its fields.
+
+    Not `originals/{doc}.companion.json`: the pipeline's `companion` step stores that, with
+    its own PIPELINE context, and the task has had no use for the key since (owner decision F,
+    2026-11-27).
+    """
     return (
         keys.original_key(document_id),
-        keys.companion_key(document_id),
         keys.text_key(document_id),
         keys.fields_key(document_id),
     )

@@ -63,6 +63,8 @@ import {
   formatShortTime,
   STATUS_OPTIONS,
   stepText,
+  textPagesText,
+  type TextPages,
 } from "./ingestionFormat";
 
 export const PAGE_SIZE = 50;
@@ -160,6 +162,8 @@ interface StepEvent {
   viewer?: string | null;
   // The tenant view: which run of the pipeline ("Process again" starts a new one).
   attempt?: number;
+  // Both views, on the Text step's result: its page counts.
+  text_pages?: TextPages | null;
 }
 
 /** What the confirmation says before documents are processed again. */
@@ -219,6 +223,8 @@ export function ReprocessResult({ outcome, onDismiss }: { outcome: ReprocessOutc
 
 function result(e: StepEvent): string {
   const words = resultText(e.status);
+  // The Text step says what it did with the pages, the unread count included.
+  if (e.step === "text" && e.text_pages) return `${words} \u00b7 ${textPagesText(e.text_pages)}`;
   return e.step === "viewed" && e.viewer ? `${words} by ${e.viewer}` : words;
 }
 

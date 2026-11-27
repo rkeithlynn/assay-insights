@@ -11,6 +11,7 @@ import {
   reprocessSummary,
   resultText,
   stepText,
+  textPagesText,
 } from "./ingestionFormat";
 
 describe("resultText", () => {
@@ -51,6 +52,49 @@ describe("laterStepsPending (until steps 5 to 10 exist)", () => {
     expect(laterStepsPending("duplicate", [{ step: "fingerprint", status: "duplicate" }], now)).toBe(false);
     expect(laterStepsPending("ready", inspected, now)).toBe(false);
     expect(laterStepsPending("on_hold", [fresh, { step: "inspect", status: "on_hold" }], now)).toBe(false);
+  });
+});
+
+describe("the text step (stage 2)", () => {
+  const now = new Date("2026-11-25T12:00:00Z").getTime();
+  const passed = [
+    { step: "fingerprint", status: "continue", at: "2026-11-25T11:58:00Z" },
+    { step: "inspect", status: "continue", at: "2026-11-25T11:59:30Z" },
+  ];
+
+  it("has a plain name, and its stops have plain words", () => {
+    expect(stepText("text")).toBe("Text");
+    expect(errorText("text_failed")).toBe("The text step failed.");
+    expect(errorText("too_many_pages")).toBe(
+      "This PDF has more pages than can be processed. Split it into smaller files and upload them.",
+    );
+    expect(errorText("page_unreadable")).toBe("A page of this PDF could not be read. Check the file and upload it again.");
+    expect(errorText("text_too_large")).toBe(
+      "This PDF has more text than can be processed. Split it into smaller files and upload them.",
+    );
+  });
+
+  it("says what it did with the pages, the unread count always included", () => {
+    expect(textPagesText({ total: 12, native: 9, ocr: 2, unread: 1 })).toBe(
+      "12 pages: 9 from the text layer, 2 read by OCR, 1 could not be read",
+    );
+    expect(textPagesText({ total: 3, native: 3, ocr: 0, unread: 0 })).toBe(
+      "3 pages: 3 from the text layer, 0 read by OCR, 0 could not be read",
+    );
+    expect(textPagesText({ total: 1, native: 0, ocr: 1, unread: 0 })).toBe(
+      "1 page: 0 from the text layer, 1 read by OCR, 0 could not be read",
+    );
+  });
+
+  it("is the last step there is: the note waits for its result", () => {
+    // While it runs, the document has not passed everything yet.
+    expect(laterStepsPending("processing", [...passed, { step: "text", status: "running" }], now)).toBe(false);
+    // It stopped: the failure handler is about to say so.
+    expect(laterStepsPending("processing", [...passed, { step: "text", status: "error" }], now)).toBe(false);
+    expect(laterStepsPending("processing", [...passed, { step: "text", status: "continue" }], now)).toBe(true);
+    expect(laterStepsPending("failed", [...passed, { step: "text", status: "failed" }], now)).toBe(false);
+    // A document processed before the text step existed still shows the note.
+    expect(laterStepsPending("processing", passed, now)).toBe(true);
   });
 });
 

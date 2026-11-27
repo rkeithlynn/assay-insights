@@ -44,8 +44,10 @@ Lambda errors.
 The worker task's role has even less (owner conditions A and B, 2026-11-24). It may connect
 to the database as `app_worker` only, whose sessions see one document while its grant is
 live, and call the TSS's `/resolve-worker` route only, which issues credentials for that one
-document's keys. It has no S3, KMS or queue permission and, in part 1, no AI-service
-permission (Textract and Bedrock arrive with the stages that use them). Its container runs
+document's keys. It has no S3, KMS or queue permission. Since stage 2 it has one AI-service
+permission: Textract `DetectDocumentText`, only through the VPC's Textract endpoint, whose
+policy admits this one role and that one action. The operation takes a page's picture as
+bytes and reads nothing stored. Bedrock arrives with the stage that uses it. Its container runs
 as root with every capability dropped except SETUID, SETGID and KILL, which starting and
 stopping the sandbox child as another user needs, on a read-only root filesystem.
 
@@ -153,7 +155,17 @@ WORKER_VARIABLES = (
     "DB_PORT",
     "DB_NAME",
     "TSS_ENDPOINT_URL",
+    # Step 5 (stage 2), all from stack config: the quality threshold, the page limit and
+    # what a Textract page costs. The task does not start without them.
+    "TEXT_QUALITY_THRESHOLD",
+    "TEXT_MAX_PAGES",
+    "TEXTRACT_PRICE_PER_PAGE",
 )
+# The spend guard reads Textract's own count of successful calls. Each call is one page.
+TEXTRACT_NAMESPACE = "AWS/Textract"
+TEXTRACT_CALLS_METRIC = "SuccessfulRequestCount"
+TEXTRACT_OPERATION = "DetectDocumentText"
+DAY_SECONDS = 86400
 # How long a document waits before it asks again for a worker slot, or for Fargate capacity.
 SLOT_WAIT_SECONDS = 30
 CAPACITY_WAIT_SECONDS = 60
@@ -262,10 +274,32 @@ def pipeline_roles(name: str, account_id: pulumi.Input[str], region: str) -> Pip
     )
 
 
-def worker_role_policy(*, db_user: str) -> str:
-    """The worker task's own permissions: sign in to the database as `app_worker`, and
-    nothing else. Its one TSS route is granted by TenantStorage; it has no S3, KMS, queue or
-    AI-service permission (Textract and Bedrock arrive with the stages that use them)."""
+# The one Textract operation: synchronous, one page a call, the page's picture as bytes.
+TEXTRACT_ACTION = "textract:DetectDocumentText"
+
+
+def textract_statement(sid: str, textract_endpoint: str) -> dict[str, object]:
+    """`DetectDocumentText`, and only through the VPC's Textract endpoint.
+
+    Textract has no resource-level permissions, so the resource is `*`: the operation reads
+    nothing stored, only the bytes in the request. The condition ties the permission to the
+    endpoint, whose own policy says who may use it; credentials taken out of the VPC could
+    not call Textract with it.
+    """
+    return {
+        "Sid": sid,
+        "Effect": "Allow",
+        "Action": TEXTRACT_ACTION,
+        "Resource": "*",
+        "Condition": {"StringEquals": {"aws:SourceVpce": textract_endpoint}},
+    }
+
+
+def worker_role_policy(*, db_user: str, textract_endpoint: str) -> str:
+    """The worker task's own permissions: sign in to the database as `app_worker`, and (stage
+    2) have Textract read a page's picture. Its one TSS route is granted by TenantStorage; it
+    has no S3, KMS or queue permission, and no Bedrock permission until the stage that uses
+    it."""
     return _json(
         {
             "Version": "2012-10-17",
@@ -275,6 +309,27 @@ def worker_role_policy(*, db_user: str) -> str:
                     "Effect": "Allow",
                     "Action": "rds-db:connect",
                     "Resource": db_user,
+                },
+                textract_statement("ReadPagesWithTextract", textract_endpoint),
+            ],
+        }
+    )
+
+
+def textract_endpoint_policy(*, worker_role: str) -> str:
+    """Through the VPC's Textract endpoint: one role, one action. The endpoint had the default
+    allow-everything policy since build step 2; nothing called it."""
+    return _json(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "WorkerTaskReadsPages",
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": TEXTRACT_ACTION,
+                    "Resource": "*",
+                    "Condition": {"ArnEquals": {"aws:PrincipalArn": worker_role}},
                 }
             ],
         }
@@ -867,6 +922,14 @@ class Pipeline(pulumi.ComponentResource):
         # encrypted with (assay_infra.alerts.SecurityNotices).
         security_topic_arn: pulumi.Input[str],
         notices_key_arn: pulumi.Input[str],
+        # Step 5 (stage 2), from stack config: `textQualityThreshold`, `textMaxPages`,
+        # `textractPricePerPage` and `textractDailyPagesAlarm`.
+        text_quality_threshold: str,
+        text_max_pages: int,
+        textract_price_per_page: str,
+        textract_daily_pages_alarm: int,
+        # The VPC's Textract endpoint: the worker's permission holds only through it.
+        textract_endpoint_id: pulumi.Input[str],
         # The cap on one tenant's concurrent worker tasks (stack config workerMaxPerTenant).
         worker_max_per_tenant: int = 5,
         # The scan function's reserved concurrency (stack config scanReservedConcurrency):
@@ -1116,9 +1179,12 @@ class Pipeline(pulumi.ComponentResource):
         self.worker_policy = aws.iam.RolePolicy(
             f"{name}-worker-task-policy",
             role=roles.worker.id,
-            policy=db_user_arn(
-                region, account_id, database.cluster_resource_id, WORKER_DB_USER
-            ).apply(lambda arn: worker_role_policy(db_user=arn)),
+            policy=pulumi.Output.all(
+                db_user=db_user_arn(
+                    region, account_id, database.cluster_resource_id, WORKER_DB_USER
+                ),
+                textract_endpoint=textract_endpoint_id,
+            ).apply(lambda a: worker_role_policy(**a)),
             opts=child,
         )
         self.worker_execution_role = aws.iam.Role(
@@ -1151,6 +1217,9 @@ class Pipeline(pulumi.ComponentResource):
                 "AWS_REGION": region,
                 "NAME_PREFIX": name_prefix,
                 "DB_NAME": database_name,
+                "TEXT_QUALITY_THRESHOLD": text_quality_threshold,
+                "TEXT_MAX_PAGES": str(text_max_pages),
+                "TEXTRACT_PRICE_PER_PAGE": textract_price_per_page,
             }
         )
         self.worker_task_definition = aws.ecs.TaskDefinition(
@@ -1322,6 +1391,33 @@ class Pipeline(pulumi.ComponentResource):
                     dimensions={"StateMachineArn": self.state_machine.arn},
                 )
             )
+
+        # The spend guard (owner, 2026-11-27): Textract pages in any 24 hours, for the whole
+        # account in this Region, whoever called. One successful DetectDocumentText call is
+        # one page; Textract has no metric that counts pages. With no evaluation window set,
+        # CloudWatch slides the day: the alarm is checked every minute against the 24 hours
+        # before it, so it fires within minutes of the count being passed, and stays in ALARM
+        # until those 24 hours no longer hold that many.
+        self.textract_pages_alarm = aws.cloudwatch.MetricAlarm(
+            f"{name}-textract-pages-day-alarm",
+            name=f"{name}-textract-pages-day",
+            alarm_description=(
+                f"Textract read more than {textract_daily_pages_alarm} pages in 24 hours "
+                "(DetectDocumentText calls, the whole account)."
+            ),
+            alarm_actions=[self._alarm_topic_arn],
+            namespace=TEXTRACT_NAMESPACE,
+            metric_name=TEXTRACT_CALLS_METRIC,
+            dimensions={"Operation": TEXTRACT_OPERATION},
+            statistic="Sum",
+            period=DAY_SECONDS,
+            evaluation_periods=1,
+            threshold=textract_daily_pages_alarm,
+            comparison_operator="GreaterThanThreshold",
+            treat_missing_data="notBreaching",
+            opts=pulumi.ResourceOptions(parent=self),
+        )
+        self.alarms.append(self.textract_pages_alarm)
 
         self.register_outputs(
             {

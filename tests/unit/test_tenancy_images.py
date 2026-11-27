@@ -393,7 +393,13 @@ def test_isolation_image_collects_the_tests_as_lambdas_user(isolation_image: str
     result = lambda_python(isolation_image, code)
     assert result["exit"] == 0
     assert result["count"] >= 40
-    assert result["files"] == ["test_rows.py", "test_storage.py", "test_tss_api.py"]
+    # `test_textract.py` since stage 2: the Textract endpoint refuses the runner's role.
+    assert result["files"] == [
+        "test_rows.py",
+        "test_storage.py",
+        "test_textract.py",
+        "test_tss_api.py",
+    ]
 
 
 # --- The Cognito admin Lambda -----------------------------------------------------------------

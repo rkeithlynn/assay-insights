@@ -1108,6 +1108,16 @@
             "title": "Step",
             "type": "string"
           },
+          "text_pages": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TextPages"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "viewer": {
             "anyOf": [
               {
@@ -1588,6 +1598,16 @@
           "step": {
             "title": "Step",
             "type": "string"
+          },
+          "text_pages": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TextPages"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2215,6 +2235,35 @@
           "created_at"
         ],
         "title": "TenantOut",
+        "type": "object"
+      },
+      "TextPages": {
+        "description": "What the Text step did with a document's pages. Numbers only.",
+        "properties": {
+          "native": {
+            "title": "Native",
+            "type": "integer"
+          },
+          "ocr": {
+            "title": "Ocr",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "unread": {
+            "title": "Unread",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "native",
+          "ocr",
+          "unread"
+        ],
+        "title": "TextPages",
         "type": "object"
       },
       "UploadOut": {

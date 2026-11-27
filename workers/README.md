@@ -62,9 +62,26 @@ the event is retried and the notice sent then.
 
 `python -m assay_workers.worker`: one Fargate task per document's attempt, started by the
 state machine (`ecs:runTask.sync`) after `claim`. It is the only part of the pipeline that
-opens a PDF. Part 1 of the second half runs one step, `inspect` (does the PDF open, has it a
-password, how many pages), then copies the PDF and its companion file to `originals/`. Steps
-5 to 10 follow in the later stages.
+opens a PDF. Its first step is `inspect` (does the PDF open, has it a password, how many
+pages), which copies the PDF to `originals/`. Its second is `text` (step 5, stage 2), below.
+Steps 6 to 8 and 10 follow in the later stages.
+
+### The text step
+
+`assay_workers.worker.text`. Sandbox children read each page's text layer and send it to the
+parent down the page channel, a pipe the parent reads one record at a time
+(`assay_workers.sandbox.runner`). The parent scores each page (`worker/quality.py`). A page
+that fails is drawn by a sandbox child as a greyscale PNG, and the parent sends the picture to
+Textract `DetectDocumentText` as bytes (`worker/ocr.py`), with the task's own role, through
+the VPC's Textract endpoint. The parent never opens a PDF or a picture, and Textract never
+reads a bucket. The step writes `derived/text/{doc}.json` (and records its S3 version), one
+`pages` row a page, and one `ai_usage` row per Textract call.
+
+- Text from a PDF, and what Textract reads on a page, is content chosen by whoever made the
+  PDF: data, never instructions. It is never logged and never stored in the database.
+- The threshold, the page limit and the price of a Textract page come from stack config
+  (`TEXT_QUALITY_THRESHOLD`, `TEXT_MAX_PAGES`, `TEXTRACT_PRICE_PER_PAGE` in the task's
+  environment). There is no default: a task without them does not run.
 
 It is bound to one document by things it cannot choose:
 

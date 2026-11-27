@@ -39,6 +39,7 @@ from assay_workers.worker import probe as worker_probe
 from assay_workers.worker import probe_files
 from tests.isolation import worker_fixture
 from tests.unit.pgtest import _conninfo, requires_db
+from tests.unit.stage2 import in_process
 from tests.unit.step6 import ACCOUNT, PREFIX, REGION, Db
 
 pytestmark = requires_db
@@ -169,6 +170,62 @@ class GoodSandbox:
         """The real job, in this process (the child cannot run on the development machine)."""
         return runner.InspectResult.model_validate(jobs.inspect(path))
 
+    # How each child that misbehaves on the page channel ends (stage 2).
+    page_stopped: dict[str, runner.SandboxError] = {  # noqa: RUF012
+        "flood": runner.SandboxLimit("output_limit"),
+        "wrong_page": runner.SandboxBadOutput(),
+        "not_a_record": runner.SandboxBadOutput(),
+    }
+
+    def pageprobe(self, name: str, *, limits: Limits | None = None) -> None:
+        if name in self.page_stopped:
+            raise self.page_stopped[name]
+
+    def read_text(self, path: Path, first: int, last: int, handle: Any) -> None:
+        """The real job, its output through the parent's own channel and checks."""
+        runner.read_text(path, first, last, handle, spawn=in_process)
+
+    def render(self, path: Path, pages: Any, handle: Any) -> None:
+        runner.render(path, pages, handle, spawn=in_process)
+
+
+def textract_error(code: str, operation: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": "refused"}}, operation)
+
+
+class TaskTextract:
+    """Textract as the worker task's role meets it: one operation, bytes only. Its role can
+    read no bucket, so Textract cannot read an object for it."""
+
+    def __init__(self) -> None:
+        self.pictures: list[bytes] = []
+
+    def detect_document_text(self, *, Document: dict[str, Any]) -> dict[str, Any]:
+        if "S3Object" in Document:
+            raise textract_error("InvalidS3ObjectException", "DetectDocumentText")
+        self.pictures.append(Document["Bytes"])
+        return {
+            "DetectDocumentTextModelVersion": "1.0",
+            "ResponseMetadata": {"RequestId": "probe-request"},
+            "Blocks": [
+                {"BlockType": "LINE", "Text": "SYNTHETIC"},
+                {"BlockType": "WORD", "Text": "SYNTHETIC", "Confidence": 99.0},
+            ],
+        }
+
+    def analyze_document(self, **_: Any) -> dict[str, Any]:
+        raise textract_error("AccessDeniedException", "AnalyzeDocument")
+
+    def start_document_text_detection(self, **_: Any) -> dict[str, Any]:
+        raise textract_error("AccessDeniedException", "StartDocumentTextDetection")
+
+
+class SessionTextract:
+    """Textract for the credentials the TSS issued: their policy has no Textract action."""
+
+    def detect_document_text(self, **_: Any) -> dict[str, Any]:
+        raise textract_error("AccessDeniedException", "DetectDocumentText")
+
 
 class World:
     def __init__(self, db: Db, work_dir: Path) -> None:
@@ -176,6 +233,7 @@ class World:
         self.work_dir = work_dir
         self.tenant_a, self.tenant_b = db.tenants["a"], db.tenants["b"]
         self.sts = FakeSts()
+        self.task_textract = TaskTextract()
         self.objects: set[tuple[str, str]] = set()
         tss_engine = create_engine(
             "postgresql+psycopg://",
@@ -211,6 +269,11 @@ class World:
 
     def write(self, context: StorageContext, document: uuid.UUID) -> None:
         self.objects.add((context.bucket, context.original_key(document)))
+        # Stage 2: the fixture's text object, which the probe's own document may read.
+        self.objects.add((context.bucket, context.text_key(document)))
+
+    def textract(self, ctx: StorageContext | None = None) -> Any:
+        return self.task_textract if ctx is None else SessionTextract()
 
     def prepare(self) -> dict[str, Any]:
         cases = worker_fixture.prepare(
@@ -247,6 +310,8 @@ class World:
             "sleep": sleep,
             "s3": self.s3,
             "work_dir": self.work_dir,
+            "region": REGION,
+            "textract": self.textract,
         }
         return worker_probe.Probe(cases, **(arguments | changes))
 
@@ -277,8 +342,21 @@ def failed(checks: list[worker_probe.Check]) -> list[str]:
 # --- A correct system passes every check ---------------------------------------------------------
 
 
+def rows(world: World, table: str, document: uuid.UUID) -> int:
+    row = world.db.row(
+        f"SELECT count(*) FROM assay.{table} WHERE document_id = %s",  # nosec B608
+        document,
+    )
+    assert row is not None
+    return int(row[0])
+
+
 def test_every_check_passes_on_a_correct_system(world: World) -> None:
-    checks = world.probe(world.prepare()).run()
+    cases = world.prepare()
+    own = uuid.UUID(cases["own"]["document_id"])
+    # The fixture document keeps what earlier runs wrote: count from here.
+    pages_before, usage_before = rows(world, "pages", own), rows(world, "ai_usage", own)
+    checks = world.probe(cases).run()
     assert failed(checks) == []
     names = [c.name for c in checks]
     # Owner condition (b): each of these is tried, and held.
@@ -311,9 +389,73 @@ def test_every_check_passes_on_a_correct_system(world: World) -> None:
         "inspection: holds a password-protected PDF (40-bit)",
         "inspection: holds a password-protected PDF (128-bit)",
         "inspection: refuses a file that is not a PDF",
+        # Stage 2: the text step.
+        "storage: reads its own document's text",
+        "storage: another document's text, same tenant",
+        "storage: writing another document's text",
+        "storage: the other tenant's document's text",
+        "storage: writing the other tenant's text",
+        "storage: writing its own document's stored companion file",
+        "database: a pages row for its own attempt",
+        "database: a pages row for its tenant's other document",
+        "database: a pages row for the other tenant's document",
+        "database: a pages row for another attempt of its own document",
+        "database: a ai_usage row for its tenant's other document",
+        "database: a ai_usage row for the other tenant's document",
+        "database: a ai_usage row for another attempt of its own document",
+        "database: a bound session cannot read pages",
+        "database: a bound session cannot read ai_usage",
+        "database: the content pointer set for a later attempt",
+        "database: the content pointer set for an earlier attempt",
+        "database: the content pointer set for no attempt",
+        "database: the content pointer set for its bound attempt with no version",
+        "database: the content pointer set for its bound attempt",
+        "database: no other column of documents can be updated",
+        "database: a usage row for its own Textract call",
+        "sandbox: a child that floods the page channel is stopped",
+        "sandbox: a child that sends a page nobody asked for is refused",
+        "sandbox: a child that sends something that is not a record is refused",
+        "pages: the text job reads each page's text layer",
+        "pages: the render job draws a page as a PNG",
+        "textract: reads a synthetic page (the task's role)",
+        "textract: AnalyzeDocument",
+        "textract: StartDocumentTextDetection",
+        "textract: pointed at its own document in the bucket",
+        "textract: pointed at another tenant's document in its bucket",
+        "textract: with the document's storage credentials",
     ):
         assert expected in names, expected
-    assert len(checks) > 50
+    assert len(checks) > 85
+    # Each refusal is the mechanism's own, by name.
+    by_name = {c.name: c.expected for c in checks}
+    assert (
+        by_name["database: a pages row for its tenant's other document"] == "refused:row_security"
+    )
+    assert by_name["database: a bound session cannot read pages"] == "refused:permission_denied"
+    assert by_name["database: the content pointer set for a later attempt"] == (
+        "refused:not_the_bound_attempt"
+    )
+    assert by_name["textract: AnalyzeDocument"] == "refused:AccessDeniedException"
+    assert by_name["textract: pointed at another tenant's document in its bucket"] == (
+        "refused:InvalidS3ObjectException"
+    )
+    # The one picture Textract was given is the page the sandbox drew: a PNG.
+    [picture] = world.task_textract.pictures
+    assert picture.startswith(b"\x89PNG")
+    # What the probe left in the database: one page row, one usage row, the pointer.
+    assert rows(world, "pages", own) == pages_before + 1
+    assert rows(world, "ai_usage", own) == usage_before + 1
+    usage = world.db.rows(
+        "SELECT service, operation, units, unit, cost::text, request_id FROM assay.ai_usage "
+        "WHERE document_id = %s ORDER BY id",
+        own,
+    )
+    assert set(usage) == {
+        ("textract", "DetectDocumentText", 1, "page", "0.000000", "probe-request")
+    }
+    assert world.db.row(
+        "SELECT content_attempt, text_version_id FROM assay.documents WHERE id = %s", own
+    ) == (1, "isolation-probe")
 
 
 def test_the_fixture_documents_are_never_queued_and_are_cleared_afterwards(world: World) -> None:
@@ -541,6 +683,247 @@ def test_the_probe_fails_when_nothing_can_be_reached(world: World) -> None:
     problems = failed(world.probe(cases, tss=Down()).run())
     assert any("/resolve-worker serves the live grant" in p for p in problems)
     assert any("/resolve refuses the worker" in p for p in problems)
+
+
+# --- The text step's checks (stage 2) ------------------------------------------------------------
+
+
+def test_a_session_policy_that_still_names_the_companion_file_fails_its_check(
+    world: World,
+) -> None:
+    """Owner decision F: the stored companion file left the worker's policy."""
+    cases = world.prepare()
+
+    def with_companion(ctx: StorageContext) -> PolicyS3:
+        policy = world.sts.policies[ctx.credentials.access_key_id]
+        assert ctx.document_id is not None
+        extra = f"arn:aws:s3:::{ctx.bucket}/{ctx.companion_key(ctx.document_id)}"
+        return PolicyS3(
+            {
+                "Statement": [
+                    *policy["Statement"],
+                    {"Action": ["s3:PutObject"], "Resource": [extra]},
+                ]
+            },
+            world.objects,
+        )
+
+    problems = failed(world.probe(cases, s3=with_companion).run())
+    assert problems == [
+        "storage: writing its own document's stored companion file: expected denied, was allowed"
+    ]
+
+
+def test_a_session_policy_that_reaches_other_documents_text_fails_its_checks(
+    world: World,
+) -> None:
+    cases = world.prepare()
+
+    def wide(ctx: StorageContext) -> PolicyS3:
+        policy = world.sts.policies[ctx.credentials.access_key_id]
+        resources = [f"arn:aws:s3:::{b}/{k}" for b, k in world.objects if "/text/" in k]
+        return PolicyS3(
+            {
+                "Statement": [
+                    *policy["Statement"],
+                    {"Action": ["s3:GetObject", "s3:PutObject"], "Resource": resources},
+                ]
+            },
+            world.objects,
+        )
+
+    problems = failed(world.probe(cases, s3=wide).run())
+    for name in (
+        "another document's text, same tenant",
+        "writing another document's text",
+        "the other tenant's document's text",
+        "writing the other tenant's text",
+    ):
+        assert any(f"storage: {name}: expected denied, was allowed" == p for p in problems), name
+
+
+def as_superuser(world: World, *statements: str) -> None:
+    for statement in statements:
+        world.db.execute(statement)
+
+
+def test_a_policy_that_admits_any_row_fails_the_row_checks(world: World) -> None:
+    cases = world.prepare()
+    as_superuser(
+        world,
+        "CREATE POLICY lax ON assay.pages AS PERMISSIVE FOR INSERT TO app_worker WITH CHECK (true)",
+    )
+    try:
+        problems = failed(world.probe(cases).run())
+    finally:
+        as_superuser(world, "DROP POLICY lax ON assay.pages")
+    for name in (
+        "its tenant's other document",
+        "the other tenant's document",
+        "another attempt of its own document",
+    ):
+        expected = f"database: a pages row for {name}: expected refused:row_security, was allowed"
+        assert expected in problems, name
+    assert not [p for p in problems if "ai_usage" in p]
+
+
+def test_a_worker_that_can_read_pages_or_update_another_column_fails_its_checks(
+    world: World,
+) -> None:
+    cases = world.prepare()
+    as_superuser(
+        world,
+        "GRANT SELECT ON assay.pages TO app_worker",
+        "GRANT UPDATE (file_name, attempt) ON assay.documents TO app_worker",
+    )
+    try:
+        problems = failed(world.probe(cases).run())
+    finally:
+        as_superuser(
+            world,
+            "REVOKE SELECT ON assay.pages FROM app_worker",
+            "REVOKE UPDATE (file_name, attempt) ON assay.documents FROM app_worker",
+        )
+    assert (
+        "database: a bound session cannot read pages: expected refused:permission_denied, "
+        "was allowed"
+    ) in problems
+    assert (
+        "database: no other column of documents can be updated: expected none, "
+        "was attempt,file_name"
+    ) in problems
+
+
+def test_a_content_pointer_with_no_guard_fails_its_checks(world: World) -> None:
+    cases = world.prepare()
+    as_superuser(world, "ALTER TABLE assay.documents DISABLE TRIGGER worker_content_pointer_guard")
+    try:
+        problems = failed(world.probe(cases).run())
+    finally:
+        as_superuser(
+            world, "ALTER TABLE assay.documents ENABLE TRIGGER worker_content_pointer_guard"
+        )
+    for name in ("a later attempt", "its bound attempt with no version"):
+        expected = (
+            f"database: the content pointer set for {name}: "
+            "expected refused:not_the_bound_attempt, was allowed"
+        )
+        assert expected in problems, name
+    # Attempt 0 is then stopped by the column's own check, which is not the guard's answer.
+    assert (
+        "database: the content pointer set for an earlier attempt: "
+        "expected refused:not_the_bound_attempt, was error:23514"
+    ) in problems
+
+
+def test_a_textract_that_reads_a_tenants_bucket_or_does_more_fails_its_checks(
+    world: World,
+) -> None:
+    cases = world.prepare()
+
+    class Lax(TaskTextract):
+        def detect_document_text(self, *, Document: dict[str, Any]) -> dict[str, Any]:
+            return super().detect_document_text(Document={"Bytes": b"anything"})
+
+        def analyze_document(self, **_: Any) -> dict[str, Any]:
+            return {}
+
+        def start_document_text_detection(self, **_: Any) -> dict[str, Any]:
+            return {"JobId": "x"}
+
+    lax = Lax()
+    problems = failed(world.probe(cases, textract=lambda ctx=None: lax).run())
+    for name in (
+        "AnalyzeDocument",
+        "StartDocumentTextDetection",
+        "pointed at its own document in the bucket",
+        "pointed at another tenant's document in its bucket",
+        "with the document's storage credentials",
+    ):
+        assert any(
+            p.startswith(f"textract: {name}: ") and p.endswith("was allowed") for p in problems
+        ), name
+
+
+@pytest.mark.parametrize(
+    ("code", "outcome"),
+    [
+        # The refusal the owner asked to hear about: the endpoint condition not met.
+        ("AccessDeniedException", "refused:AccessDeniedException"),
+        ("ThrottlingException", "refused:ThrottlingException"),
+    ],
+)
+def test_a_textract_call_that_is_refused_fails_the_positive_control_by_name(
+    world: World, code: str, outcome: str
+) -> None:
+    cases = world.prepare()
+
+    class Refusing(TaskTextract):
+        def detect_document_text(self, *, Document: dict[str, Any]) -> dict[str, Any]:
+            raise textract_error(code, "DetectDocumentText")
+
+    refusing = Refusing()
+    own = uuid.UUID(cases["own"]["document_id"])
+    before = rows(world, "ai_usage", own)
+    problems = failed(world.probe(cases, textract=lambda ctx=None: refusing).run())
+    assert (
+        f"textract: reads a synthetic page (the task's role): expected allowed, was {outcome}"
+        in problems
+    )
+    # No call succeeded, so no usage row is written for one.
+    assert not [p for p in problems if "usage row" in p]
+    assert rows(world, "ai_usage", own) == before
+
+
+def test_an_endpoint_that_cannot_be_reached_is_an_error_never_a_refusal(world: World) -> None:
+    from botocore.exceptions import EndpointConnectionError
+
+    cases = world.prepare()
+
+    class Unreachable(TaskTextract):
+        def _down(self, **_: Any) -> dict[str, Any]:
+            raise EndpointConnectionError(endpoint_url="https://textract")
+
+        detect_document_text = analyze_document = start_document_text_detection = _down
+
+    unreachable = Unreachable()
+    problems = failed(world.probe(cases, textract=lambda ctx=None: unreachable).run())
+    assert (
+        "textract: AnalyzeDocument: expected refused:AccessDeniedException, "
+        "was error:EndpointConnectionError"
+    ) in problems
+
+
+def test_a_page_channel_that_lets_a_child_misbehave_fails_its_checks(world: World) -> None:
+    class Lax(GoodSandbox):
+        page_stopped: dict[str, runner.SandboxError] = {}  # noqa: RUF012
+
+    problems = failed(world.probe(world.prepare(), sandbox=Lax()).run())
+    for name in (
+        "that floods the page channel is stopped",
+        "that sends a page nobody asked for is refused",
+        "that sends something that is not a record is refused",
+    ):
+        assert any(
+            p.startswith(f"sandbox: a child {name}: ") and p.endswith("was returned")
+            for p in problems
+        ), name
+
+
+def test_a_page_job_whose_child_is_stopped_fails_its_check_and_no_page_goes_to_textract(
+    world: World,
+) -> None:
+    class Crashing(GoodSandbox):
+        def render(self, path: Path, pages: Any, handle: Any) -> None:
+            raise runner.SandboxKilled(11)
+
+    problems = failed(world.probe(world.prepare(), sandbox=Crashing()).run())
+    assert (
+        "pages: the render job draws a page as a PNG: expected png, was error:signal_SIGSEGV"
+        in (problems)
+    )
+    assert any(p.endswith("was no_picture") for p in problems)
+    assert world.task_textract.pictures == []
 
 
 # --- The inspection checks ---------------------------------------------------------------------

@@ -550,10 +550,50 @@ def _channel_not_a_record(channel: BinaryIO) -> dict[str, Any]:
     return {"pages": 1}
 
 
+def _blank_page(objects: int) -> dict[str, Any]:
+    return {
+        "kind": "page",
+        "page": 1,
+        "width": 612.0,
+        "height": 792.0,
+        "rotation": 0,
+        "objects": objects,
+        "image_coverage": 0.0,
+        "annotations": 0,
+        "oversize": False,
+        "text": "",
+        "words": [],
+    }
+
+
+def _channel_descriptors(channel: BinaryIO) -> dict[str, Any]:
+    """How many descriptors the child has open, sent as a page record's `objects`: its
+    standard input, output and error, and the page channel. Nothing else of the parent's."""
+    # Listing the directory opens one more for as long as the listing takes.
+    _emit(channel, _blank_page(len(list(Path("/proc/self/fd").iterdir())) - 1))
+    return {"pages": 1}
+
+
+def _channel_write_a_file(channel: BinaryIO) -> dict[str, Any]:
+    """Tries to leave a page's picture in a file instead of sending it. A page job writes no
+    file: the limit is still zero. Reports whether it could, as `objects` (1 if it could)."""
+    if sys.platform != "linux":
+        raise OSError("the sandbox runs on Linux only")
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    wrote = 0
+    for target in ("/work/page.png", "/tmp/page.png"):  # noqa: S108  # nosec B108
+        if _attempt(lambda target=target: Path(target).write_bytes(PNG_SIGNATURE)) == "allowed":
+            wrote = 1
+    _emit(channel, _blank_page(wrote))
+    return {"pages": 1}
+
+
 PAGE_PROBES = {
     "flood": _channel_flood,
     "wrong_page": _channel_wrong_page,
     "not_a_record": _channel_not_a_record,
+    "descriptors": _channel_descriptors,
+    "write_a_file": _channel_write_a_file,
 }
 
 

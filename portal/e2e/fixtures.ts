@@ -174,6 +174,17 @@ const EVENTS = [
   { step: "fingerprint", status: "continue", at: "2026-11-24T15:02:09Z", error_code: null, viewer: null, attempt: 1 },
   // The processing task's first step (build step 6, second half): it opened the PDF.
   { step: "inspect", status: "continue", at: "2026-11-24T15:03:20Z", error_code: null, viewer: null, attempt: 1 },
+  // Step 5 (stage 2): the page counts, with large numbers and a page that could not be read,
+  // to check the line fits and wraps in both views.
+  {
+    step: "text",
+    status: "continue",
+    at: "2026-11-24T15:03:26Z",
+    error_code: null,
+    viewer: null,
+    attempt: 1,
+    text_pages: { total: 1000, native: 612, ocr: 385, unread: 3 },
+  },
   // Step 9 (build step 6, second half): the companion file's values were stored.
   { step: "companion", status: "stored", at: "2026-11-24T15:03:30Z", error_code: null, viewer: null, attempt: 1 },
   // Who opened it: sent to tenant admins only. A long address, to check it wraps.
@@ -275,7 +286,18 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
       document_id: MASTER_ROWS[0]?.document_id,
       events: [
         // The master view never has `viewed` events.
-        ...EVENTS.filter((e) => e.step !== "viewed").map((e) => ({ step: e.step, status: e.status, at: e.at, error_code: e.error_code, error_type: null })),
+        ...EVENTS.filter((e) => e.step !== "viewed").map((e) => ({
+          step: e.step,
+          status: e.status,
+          at: e.at,
+          error_code: e.error_code,
+          error_type: null,
+          text_pages: "text_pages" in e ? e.text_pages : null,
+        })),
+        // The text step's own stops: a document over the page limit, and a page a sandbox
+        // limit stopped (the master view also shows which).
+        { step: "text", status: "failed", at: "2026-11-24T15:03:36Z", error_code: "too_many_pages", error_type: null },
+        { step: "text", status: "failed", at: "2026-11-24T15:03:38Z", error_code: "page_unreadable", error_type: "sandbox.cpu_limit" },
         // Both kinds of failure, to check both fit: a row from before step-level codes, and one after.
         { step: "failed", status: "failed", at: "2026-11-24T15:03:40Z", error_code: "pipeline_error", error_type: null },
         { step: "failed", status: "failed", at: "2026-11-24T15:04:40Z", error_code: "fingerprint_failed", error_type: "Lambda.TooManyRequestsException" },
