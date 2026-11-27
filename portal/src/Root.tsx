@@ -12,6 +12,10 @@
  * sign-in screen. Only the tab where the user signed out records the sign-out and goes to
  * Cognito's logout endpoint.
  *
+ * A session that cannot be renewed (the refresh token expired, was revoked, or was rotated out
+ * by another tab that shares it) ends on the sign-in screen with a message, whether the
+ * refusal comes while the tab is open or when it is reloaded.
+ *
  * While signed in, `idle.ts` watches for activity in every tab. After the configured idle
  * time it signs out exactly as the Sign out button does, recorded with the reason
  * `idle_timeout`, with a warning 2 minutes before.
@@ -25,7 +29,7 @@ import Header from "@cloudscape-design/components/header";
 import Modal from "@cloudscape-design/components/modal";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import Spinner from "@cloudscape-design/components/spinner";
-import type { User, UserManager } from "oidc-client-ts";
+import { ErrorResponse, type User, type UserManager } from "oidc-client-ts";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type Api, ApiError, apiClient, call, type Me } from "./api/client";
@@ -59,6 +63,16 @@ function Page({ children }: { children: React.ReactNode }) {
 }
 
 export const SIGNED_OUT_ELSEWHERE = "You signed out in another tab.";
+// A session that could not be renewed: the refresh token expired (8 hours after the sign-in),
+// was revoked, or was rotated out by another tab that shares it (a duplicated or restored
+// tab; refresh-token rotation). The tab cannot tell which, so the message does not guess.
+export const SESSION_ENDED = "Your session has ended. Sign in again to continue.";
+
+/** Whether Cognito answered the refresh and refused it, as opposed to a request that got no
+ * answer (offline, a timeout). Only a refusal means the stored tokens are dead. */
+function refusedByCognito(error: unknown): boolean {
+  return error instanceof ErrorResponse;
+}
 export const signedOutIdle = (minutes: number) =>
   `You were signed out after ${minutes} minutes without activity. Sign in again to continue.`;
 // Set just before an idle sign-out leaves for Cognito's logout, so this tab's sign-in screen
@@ -143,22 +157,60 @@ export function Root() {
             if (!cancelled()) setPhase({ kind: "signed-out", note });
           })();
         });
+        // A session that cannot be renewed ends on the sign-in screen, with the reason: never
+        // an error page, never the app left open over a dead token, and never a second try
+        // (so no loop). Tokens Cognito refused are removed; after a request that got no
+        // answer they are kept, so a reload can try again. No audit row: there is no valid
+        // token left to report with. Other tabs are not told: only this tab's session ended.
+        const endSession = async (error: unknown) => {
+          if (refusedByCognito(error)) await manager.removeUser().catch(() => undefined);
+          currentUser = null;
+          if (!cancelled()) setPhase({ kind: "signed-out", note: SESSION_ENDED });
+        };
+        // The background refresh failed (the library does not try again). If Cognito refused
+        // the refresh token, the session is over now. If the request got no answer, the
+        // access token still has about a minute: wait for the expiry below.
+        manager.events.addSilentRenewError((error) => {
+          if (refusedByCognito(error)) void endSession(error);
+        });
+        // The access token ran out and nothing renewed it: one more try, then the sign-in
+        // screen.
+        manager.events.addAccessTokenExpired(() => {
+          void manager.signinSilent().then(
+            (renewed) => (renewed ? undefined : endSession(null)),
+            (error: unknown) => endSession(error),
+          );
+        });
         setStarted({ pool: active, manager, channel });
         let user: User | null;
+        let ended = false;
         const justSignedIn = window.location.pathname === CALLBACK_PATH;
         if (justSignedIn) {
           user = await manager.signinRedirectCallback();
           window.history.replaceState(null, "", "/");
         } else {
           user = await manager.getUser();
-          if (user?.expired && user.refresh_token) {
-            user = await manager.signinSilent().catch(() => null);
+          if (user?.expired) {
+            // A tab reloaded or restored after its access token ran out: refresh once.
+            ended = true;
+            const stored = user;
+            user = null;
+            if (stored.refresh_token) {
+              try {
+                user = await manager.signinSilent();
+              } catch (error) {
+                if (refusedByCognito(error)) await manager.removeUser().catch(() => undefined);
+              }
+            } else {
+              await manager.removeUser().catch(() => undefined);
+            }
           }
         }
         if (cancelled()) return;
         if (!user || user.expired) {
           const idle = takeIdleNote();
-          setPhase(idle ? { kind: "signed-out", note: signedOutIdle(idle) } : { kind: "signed-out" });
+          const note = idle ? signedOutIdle(idle) : ended ? SESSION_ENDED : undefined;
+          setPhase(note ? { kind: "signed-out", note } : { kind: "signed-out" });
           return;
         }
         await loadMe(user, manager, justSignedIn);

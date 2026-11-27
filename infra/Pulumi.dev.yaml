@@ -23,7 +23,11 @@ config:
   # Cognito managed login prefix domains (<prefix>.auth.us-east-1.amazoncognito.com).
   assay-platform:tenantAuthDomainPrefix: assay-dev-tenant
   assay-platform:platformAuthDomainPrefix: assay-dev-admin
+  # Refresh-token rotation, per app client (owner, 2026-11-25 and 2026-11-27): "true" is
+  # ALLOW_CUSTOM_AUTH as the only flow with rotation on; "false" is the way back (rotation
+  # off, the refresh flow restored); unset leaves the client as it was.
   assay-platform:tenantRefreshTokenRotation: "true"
+  assay-platform:platformRefreshTokenRotation: "true"
   # The only principal that may assume the break-glass role: the owner's IAM Identity Center
   # AdministratorAccess role. Production needs a separate, approval-gated role instead.
   assay-platform:breakGlassPrincipalArn: arn:aws:iam::429100266783:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_AdministratorAccess_d20a664f5ea3111b

@@ -27,8 +27,11 @@ reached from the VPC.
      `USER_AUTH`) because the flow is not enabled, asked for a user that does not exist, so
      nothing is signed in and no trigger runs;
    - on the replica, whose client follows the tenant client: a refresh returns a new
-     refresh token, the old one stops working after the grace period, and the old
-     `REFRESH_TOKEN_AUTH` flow is refused;
+     refresh token; the old `REFRESH_TOKEN_AUTH` flow answers `UnsupportedOperationException`,
+     for a valid token and for one that is not valid alike; the old refresh token, used
+     again after the grace period, answers `RefreshTokenReuseException`; and that reuse
+     revokes nothing else (the new refresh token and the access token go on working). Each
+     answer is required by name: another refusal fails the check;
    - on the replica, the way back: a client with rotation on is changed in one update to
      rotation off with the refresh flow restored, which is what the stack's switch does.
 """
@@ -62,6 +65,22 @@ PROGRAMMATIC_FLOWS = ("USER_PASSWORD_AUTH", "USER_SRP_AUTH", "CUSTOM_AUTH", "USE
 # Cognito's words when a flow cannot be used with a client at all.
 FLOW_NOT_AVAILABLE = re.compile(r"not enabled|not configured", re.IGNORECASE)
 FLOW_REFUSED = "flow refused"
+# Cognito's answers on a client with rotation on, by name. Each is required exactly: any
+# other answer, another refusal included, fails its check (owner, 2026-11-27, after the first
+# run against a rotated client met both and the checks, written for a guess, failed).
+#
+# - The old refresh flow (`InitiateAuth` with `REFRESH_TOKEN_AUTH`). AWS: "You can't
+#   authenticate with REFRESH_TOKEN_AUTH in app clients with refresh token rotation enabled",
+#   and of the exception, "thrown when you attempt to perform an operation that isn't enabled
+#   for the user pool client." AWS does not say whether the token is looked at first, so a
+#   check asks with a token that is not valid and requires the same answer.
+OLD_FLOW_NOT_ENABLED = "UnsupportedOperationException"
+# - A refresh token used again after it was rotated out and its grace period is over. AWS:
+#   "thrown when your application requests token refresh with a refresh token that has been
+#   invalidated by refresh-token rotation." AWS does not say that anything else is revoked,
+#   so checks require the new refresh token and the access token to go on working.
+ROTATED_OUT = "RefreshTokenReuseException"
+ALLOWED = "allowed"
 
 
 @dataclass(frozen=True)
@@ -92,9 +111,27 @@ def _attempt(call: Callable[[], object]) -> str:
     return "allowed"
 
 
+def _answer(call: Callable[[], object]) -> str:
+    """Cognito's answer by name: `allowed`, or the error's code exactly as Cognito gives it."""
+    try:
+        call()
+    except ClientError as exc:
+        return str(exc.response.get("Error", {}).get("Code", "")) or "an error with no code"
+    return ALLOWED
+
+
+def _altered(token: str) -> str:
+    """A refresh token that is not valid: the real one with one character changed, so it has
+    the right shape and length and no longer decrypts."""
+    middle = len(token) // 2
+    other = "A" if token[middle] != "A" else "B"
+    return token[:middle] + other + token[middle + 1 :]
+
+
 def _flow_answer(call: Callable[[], Any]) -> str:
-    """`flow refused` only if Cognito said the flow cannot be used with this client. Anything
-    else means the request got as far as authentication, which a portal client never allows."""
+    """`flow refused` only if Cognito said the flow cannot be used with this client. Any other
+    error is reported by its code and fails the check: it is not known to be a refusal of the
+    flow itself, which is what a portal client must give."""
     try:
         response = call()
     except ClientError as exc:
@@ -102,7 +139,7 @@ def _flow_answer(call: Callable[[], Any]) -> str:
         code, message = str(error.get("Code", "")), str(error.get("Message", ""))
         if code == "InvalidParameterException" and FLOW_NOT_AVAILABLE.search(message):
             return FLOW_REFUSED
-        return f"reached authentication ({code})"
+        return f"not refused as a flow ({code})"
     if "AuthenticationResult" in response:
         return "ALLOWED: tokens issued"
     return f"ALLOWED: challenge {response.get('ChallengeName', 'unknown')}"
@@ -193,55 +230,85 @@ def deployed_clients(
 def refresh_checks(
     cognito: Any, as_anyone: Any, *, client_id: str, refresh_token: str
 ) -> list[Check]:
-    """On a client with rotation on: a refresh gives a new refresh token, the old one stops
-    working once the grace period is over, and the old refresh flow is not available."""
+    """On a client with rotation on, in order:
+
+    1. a refresh gives a new refresh token;
+    2. the old refresh flow answers `UnsupportedOperationException`, for the user's current
+       refresh token and, just the same, for a token that is not valid: so the answer is
+       about the client and never about the token;
+    3. once the grace period is over, the old refresh token answers
+       `RefreshTokenReuseException`;
+    4. and that reuse revoked nothing else: the new refresh token still refreshes, and the
+       access token issued before the reuse is still accepted. (Two tabs that share one
+       refresh token: the tab that refreshes second is sent to sign-in; the first stays
+       signed in.)
+
+    Every expected answer is an exact name. Any other answer fails.
+    """
     checks = []
     refreshed = as_anyone.get_tokens_from_refresh_token(
         RefreshToken=refresh_token, ClientId=client_id
-    )
-    new_token = refreshed["AuthenticationResult"].get("RefreshToken")
+    )["AuthenticationResult"]
+    new_token = refreshed.get("RefreshToken")
+    rotated = bool(new_token) and new_token != refresh_token
     checks.append(
         Check(
             "replica: a refresh returns a new refresh token",
             "a new token",
-            "a new token"
-            if new_token and new_token != refresh_token
-            else "the same token, or none",
+            "a new token" if rotated else "the same token, or none",
+        )
+    )
+    current = new_token if rotated else refresh_token
+
+    def old_flow(token: str) -> str:
+        return _answer(
+            _sign_in(as_anyone, client_id, "REFRESH_TOKEN_AUTH", {"REFRESH_TOKEN": token})
+        )
+
+    checks.append(
+        Check(
+            "replica: REFRESH_TOKEN_AUTH with the user's current refresh token",
+            OLD_FLOW_NOT_ENABLED,
+            old_flow(current),
         )
     )
     checks.append(
         Check(
-            "replica: the REFRESH_TOKEN_AUTH flow is refused",
-            FLOW_REFUSED,
-            _flow_answer(
-                _sign_in(
-                    as_anyone, client_id, "REFRESH_TOKEN_AUTH", {"REFRESH_TOKEN": refresh_token}
-                )
-            ),
+            "replica: REFRESH_TOKEN_AUTH with a token that is not valid gets the same answer",
+            OLD_FLOW_NOT_ENABLED,
+            old_flow(_altered(current)),
         )
     )
     time.sleep(ROTATION_GRACE_SECONDS + 3)
     checks.append(
         Check(
-            "replica: the old refresh token stops working after the grace period",
-            "refused",
-            _attempt(
+            "replica: the old refresh token, used again after the grace period",
+            ROTATED_OUT,
+            _answer(
                 lambda: as_anyone.get_tokens_from_refresh_token(
                     RefreshToken=refresh_token, ClientId=client_id
                 )
             ),
         )
     )
-    if new_token:
+    if rotated:
+        # After the reuse above, on purpose: what it left standing.
         checks.append(
             Check(
-                "replica: the new refresh token works",
-                "allowed",
-                _attempt(
+                "replica: after that reuse, the new refresh token still refreshes",
+                ALLOWED,
+                _answer(
                     lambda: as_anyone.get_tokens_from_refresh_token(
                         RefreshToken=new_token, ClientId=client_id
                     )
                 ),
+            )
+        )
+        checks.append(
+            Check(
+                "replica: after that reuse, the access token issued before it is still accepted",
+                ALLOWED,
+                _answer(lambda: as_anyone.get_user(AccessToken=refreshed["AccessToken"])),
             )
         )
     return checks

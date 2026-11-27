@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { ErrorResponse } from "oidc-client-ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -13,7 +14,7 @@ const manager = vi.hoisted(() => ({
   removeUser: vi.fn(),
   revokeTokens: vi.fn(),
   signinRedirect: vi.fn(),
-  events: { addUserLoaded: vi.fn() },
+  events: { addUserLoaded: vi.fn(), addSilentRenewError: vi.fn(), addAccessTokenExpired: vi.fn() },
 }));
 
 vi.mock("./api/client", async (actual) => ({
@@ -46,7 +47,7 @@ vi.mock("./App", async () => {
   };
 });
 
-import { IDLE_NOTE_KEY, Root, SIGNED_OUT_ELSEWHERE, signedOutIdle } from "./Root";
+import { IDLE_NOTE_KEY, Root, SESSION_ENDED, SIGNED_OUT_ELSEWHERE, signedOutIdle } from "./Root";
 import { SIGN_OUT_CHANNEL } from "./signout";
 
 const ME = {
@@ -220,5 +221,109 @@ describe("idle timeout", () => {
     render(<Root />);
     expect(await screen.findByText(signedOutIdle(30))).toBeInTheDocument();
     expect(window.sessionStorage.getItem(IDLE_NOTE_KEY)).toBeNull();
+  });
+});
+
+describe("a refresh that is refused", () => {
+  // What Cognito's token endpoint answers for a refresh token it will not take: one rotated
+  // out by another tab that shares it, expired after 8 hours, or revoked.
+  const refused = () => new ErrorResponse({ error: "invalid_grant", error_description: "Refresh token has been revoked" });
+  // The library's events, as it raises them.
+  const raise = (event: "addSilentRenewError" | "addAccessTokenExpired", ...args: unknown[]) => {
+    const [handler] = manager.events[event].mock.calls.at(-1) as [(...a: unknown[]) => void];
+    handler(...args);
+  };
+  // The sign-in screen with the reason, and nothing else: no app, no error page.
+  const expectSignInScreen = async () => {
+    expect(await screen.findByText(SESSION_ENDED)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByText("signed in")).toBeNull();
+    expect(screen.queryByText("Something went wrong")).toBeNull();
+    expect(screen.queryByText("Access refused")).toBeNull();
+  };
+
+  it("says in plain words that the session ended", () => {
+    expect(SESSION_ENDED).toBe("Your session has ended. Sign in again to continue.");
+  });
+
+  it("in an open tab, goes to the sign-in screen with the reason, once, and stays there", async () => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    // The background refresh, a minute before the access token expires, is refused.
+    raise("addSilentRenewError", refused());
+    await expectSignInScreen();
+    // The dead tokens are cleared; nothing is retried, recorded or redirected.
+    expect(manager.removeUser).toHaveBeenCalledOnce();
+    await settle();
+    expect(manager.signinSilent).not.toHaveBeenCalled();
+    expect(manager.signinRedirect).not.toHaveBeenCalled();
+    expect(redirectTo).not.toHaveBeenCalled();
+    expect(posts("/api/auth/signed-out")).toHaveLength(0);
+    // The portal's other tabs are not signed out: only this tab's session ended.
+    expect(heardByOtherTab).toEqual([]);
+    await expectSignInScreen();
+  });
+
+  it("signs in again from that screen with one click", async () => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    raise("addSilentRenewError", refused());
+    await userEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    expect(manager.signinRedirect).toHaveBeenCalledOnce();
+  });
+
+  it("when a tab is reloaded with an expired session, shows the same screen without loading the app", async () => {
+    manager.getUser.mockResolvedValue({ ...USER, expired: true });
+    manager.signinSilent.mockRejectedValue(refused());
+    render(<Root />);
+    await expectSignInScreen();
+    // One try, the dead tokens cleared, and the API never called with them.
+    expect(manager.signinSilent).toHaveBeenCalledOnce();
+    expect(manager.removeUser).toHaveBeenCalledOnce();
+    expect(api.GET).not.toHaveBeenCalled();
+    await settle();
+    expect(manager.signinSilent).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the app open after a refresh that got no answer, and tries once more when the token expires", async () => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    // Offline for a moment: not a refusal. The access token still has about a minute.
+    raise("addSilentRenewError", new TypeError("Failed to fetch"));
+    await settle();
+    expect(screen.getByText("signed in")).toBeInTheDocument();
+    expect(manager.removeUser).not.toHaveBeenCalled();
+    // The token expires and the one retry works: the session goes on.
+    manager.signinSilent.mockResolvedValue(USER);
+    raise("addAccessTokenExpired");
+    await settle();
+    expect(manager.signinSilent).toHaveBeenCalledOnce();
+    expect(screen.getByText("signed in")).toBeInTheDocument();
+  });
+
+  it("goes to the sign-in screen when the token expires and the retry is refused too", async () => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    manager.signinSilent.mockRejectedValue(refused());
+    raise("addAccessTokenExpired");
+    await expectSignInScreen();
+    expect(manager.signinSilent).toHaveBeenCalledOnce();
+    expect(manager.removeUser).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the stored tokens when the retry got no answer, so a reload can try again", async () => {
+    render(<Root />);
+    expect(await screen.findByText("signed in")).toBeInTheDocument();
+    manager.signinSilent.mockRejectedValue(new TypeError("Failed to fetch"));
+    raise("addAccessTokenExpired");
+    await expectSignInScreen();
+    expect(manager.removeUser).not.toHaveBeenCalled();
+  });
+
+  it("shows no message to someone who simply has no session", async () => {
+    manager.getUser.mockResolvedValue(null);
+    render(<Root />);
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByText(SESSION_ENDED)).toBeNull();
   });
 });

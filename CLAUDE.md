@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; now 1,000). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). **Part 2 deployed and verified in AWS** by the owner (2026-11-25, migration `0011`): see "Stage 1, part 2". **Built, not yet deployed** (2026-11-25): three fixes from that verification, refresh-token rotation on the tenant app client only, reserved concurrency (scan 50, TSS 300), a more reliable image build, and every image's dependencies and code as two layers. **Waiting for the owner:** the deploy, then the browser check of the tenant client's refresh before the platform client's rotation. See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; now 1,000). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). **Part 2 deployed and verified in AWS** by the owner (2026-11-25, migration `0011`): see "Stage 1, part 2". **Deployed and checked by the owner** (2026-11-27): three fixes from that verification, refresh-token rotation on the tenant app client, reserved concurrency (scan 50, TSS 300), a more reliable image build, and every image's dependencies and code as two layers. **Built, not yet deployed** (2026-11-27): rotation on the platform app client, and the rotation checks requiring Cognito's answers by name. See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -361,6 +361,32 @@ These stay as they are into step 6 unless the owner decides otherwise.
   carries neither (without threat protection). Rows the API writes take the viewer's IP
   from `CloudFront-Viewer-Address`. The portal's `session_started` row, written right after
   the sign-in, carries both; the trigger's `sign_in` row stays the record of the sign-in.
+- **Two tabs that share one refresh token: the second to refresh is signed out** (a known
+  effect of refresh-token rotation; owner, 2026-11-27). With rotation on, a refresh returns
+  a new refresh token and the old one stops working 10 seconds later.
+  - **Who it affects.** Only tabs that hold the same refresh token: a duplicated tab, or one
+    the browser restored (both copy the tab's sessionStorage). Tabs that signed in
+    separately each have their own tokens and never meet it.
+  - **What happens.** Whichever of the two refreshes second, more than 10 seconds after
+    the first, is refused (`RefreshTokenReuseException`; `invalid_grant` is what the
+    portal's tests assume `/oauth2/token` answers, which AWS does not document). The first
+    tab stays signed in: on the replica, reusing a rotated-out token revoked nothing else
+    (the isolation run checks that every time). Inside the 10 seconds both are accepted.
+  - **What the user sees in the second tab.** The sign-in screen with "Your session has
+    ended. Sign in again to continue." and a Sign in button. Not an error page, not the app
+    left open over a dead token, and no retry loop (`Root.tsx`, `SESSION_ENDED`; tested in
+    `Root.test.tsx`). If the refusal comes in the background, a minute before the access
+    token expires, the tab goes to that screen then. If the tab is reloaded later, it gets
+    there after one failed refresh. Sign in usually needs no password: managed login's own
+    session is still open, unless someone signed out.
+  - The same screen shows for the other two ways a session cannot be renewed: 8 hours after
+    the sign-in, and after an admin's disable or MFA reset. The tab cannot tell which it
+    was, so the message does not say.
+  - It writes no audit row (there is no valid token left to report with) and does not sign
+    out the portal's other tabs.
+  - A refresh that got no answer (offline, a timeout) is not a refusal: the app stays open
+    until the access token expires, the portal tries once more, and only then shows the
+    sign-in screen, keeping the stored tokens so a reload can try again.
 - **A portal tab that is closed or offline when the user signs out in another tab keeps its
   refresh token** until it expires or is revoked by an admin action (a disable or an MFA
   reset, which also ends its sessions through `sessions_revoked_at`). Sign-out signals only
@@ -2252,11 +2278,58 @@ period). It settles decision 4 below; the real clients are unchanged until the o
 client's only explicit flow, rotation on, a 10-second grace period. An empty list is
 rejected because it allows `USER_SRP_AUTH`. Two steps:
 
-1. **The tenant app client only** (built 2026-11-25; stack config
-   `tenantRefreshTokenRotation: "true"`). Not yet deployed.
-2. **The platform client** (`platformRefreshTokenRotation: "true"`), after the owner has
-   confirmed in a browser that tenant sign-in, background token refresh and sign-out still
-   work.
+1. **The tenant app client only** (stack config `tenantRefreshTokenRotation: "true"`).
+   **Deployed and verified by the owner on 2026-11-27**: tenant sign-in works in a browser
+   under rotation, and a forced refresh returned 200 from `/oauth2/token` with the session
+   continuing. So managed login does sign a user in on a client whose only explicit flow is
+   `ALLOW_CUSTOM_AUTH`. The same deploy set the reserved concurrency (`check_deployment.py`:
+   50 and 300, 650 unreserved) and the two-layer images; the isolation run passed 71, 28
+   and 68, and 24 of 26 Cognito checks (the two below).
+2. **The platform client** (`platformRefreshTokenRotation: "true"`): **built 2026-11-27,
+   not yet deployed.** Preview: 2 to update (the platform app client: its flow becomes
+   `ALLOW_CUSTOM_AUTH`, rotation `ENABLED`, 10 seconds; the isolation function, for its
+   image), 1 to replace (the isolation image's build, because the rewritten checks are in
+   `tests/isolation/`, which that image is built from), 360 unchanged. To go back: set the
+   key to `"false"` and run `pulumi up`.
+
+**What Cognito answers on a client with rotation on** (isolation run of 2026-11-27, and
+AWS's pages read the same day). The run's two failures were refusals the checks did not
+recognise: they had been written for a guess (`InvalidParameterException`,
+`NotAuthorizedException`). **Lesson: a check that expects "refused" in general hides what
+was refused and why; require the service's own answer by name.**
+
+- **`REFRESH_TOKEN_AUTH` answers `UnsupportedOperationException`.** AWS: "You can't
+  authenticate with REFRESH_TOKEN_AUTH in app clients with refresh token rotation enabled",
+  and of the exception, "thrown when you attempt to perform an operation that isn't enabled
+  for the user pool client." So it is about the client, not the token. **AWS does not say
+  whether the token is looked at first.** The check now asks twice, with the user's current
+  refresh token and with one that is not valid (one character changed), and requires the
+  same answer: if the token were judged first, the second would answer differently. Its
+  outcome against Cognito is not known until the next isolation run.
+- **A rotated-out refresh token, used after its grace period, answers
+  `RefreshTokenReuseException`.** AWS: "thrown when your application requests token refresh
+  with a refresh token that has been invalidated by refresh-token rotation." **AWS's pages
+  say nothing of revoking anything else** (no token family, no session). The run showed it
+  on the replica: the check that the new refresh token works ran straight after the reuse
+  and passed. The checks now say so in words and add one: after the reuse, the new refresh
+  token still refreshes and the access token issued before it is still accepted.
+  - **Two tabs.** Tabs that signed in separately have their own tokens and never meet
+    this. Tabs that share one refresh token (a duplicated or restored tab): whichever
+    refreshes second, more than 10 seconds after the first, is sent to sign-in; the first
+    stays signed in. Inside the 10 seconds the second tab's refresh is accepted.
+  - Not checked: the same through `/oauth2/token`, which the portal uses (the checks call
+    `GetTokensFromRefreshToken`); AWS's token endpoint page does not say which error a
+    rotated-out token gets there. The portal does not depend on which: any answer from
+    Cognito that refuses the refresh ends the session on the sign-in screen (see "Two tabs
+    that share one refresh token" under "Known limits").
+  - **Before 2026-11-27 the portal did not handle a refused refresh in an open tab.** The
+    library raises `silentRenewError` and does not try again; nothing listened. The app
+    stayed open, and a minute later, with the access token expired, every request went out
+    without a token and each page showed its own error. A reload showed the sign-in screen
+    with no reason. Both now end on the sign-in screen with the message.
+- The old label "reached authentication" for an answer a check did not recognise was wrong:
+  nothing shows that anything was authenticated. It now reads "not refused as a flow
+  (`<code>`)", and still fails.
 
 How it is built:
 
@@ -2288,7 +2361,8 @@ How it is built:
   about a minute. Sessions already open keep their tokens.
 - **Known effects of rotation:** a duplicated or restored tab shares its original's refresh
   token, and whichever refreshes second, more than 10 seconds after the first, is sent to
-  sign-in. Sessions still end 8 hours after the sign-in. The portal's own refresh goes
+  sign-in with a message; the first stays signed in (recorded under "Known limits": "Two
+  tabs that share one refresh token"). Sessions still end 8 hours after the sign-in. The portal's own refresh goes
   through `/oauth2/token`, which works with rotation on; nothing in the portal changes.
 - **Checking the refresh in a browser** (owner, after step 1's deploy). The portal refreshes
   by itself about a minute before the access token's 60 minutes are up. To see one at
