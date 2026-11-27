@@ -70,6 +70,21 @@ const SCREENS: Screen[] = [
       await page.getByRole("dialog").getByText("Fingerprint", { exact: true }).waitFor();
     },
   },
+  {
+    // The same panel, scrolled to its companion uploads. Two were rejected: their problems
+    // show in plain words, never as the stored codes (owner, 2026-11-25).
+    id: "tenant-admin-ingestion-companion-uploads",
+    persona: "tenant-admin",
+    path: "/ingestion",
+    ready: "application-package-1.pdf",
+    setup: async (page) => {
+      await page.getByRole("link", { name: "application-package-1.pdf" }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByText("LoanInterestRate must be a number").scrollIntoViewIfNeeded();
+      await dialog.getByText("The file is not valid JSON").waitFor();
+      expect(await dialog.getByText(/must_be_a_number|must_be_a_date|invalid_key|not_json/).count()).toBe(0);
+    },
+  },
   { id: "tenant-user-home", persona: "tenant-user", path: "/", ready: "Welcome, Ada Lovelace" },
   { id: "tenant-user-ingestion", persona: "tenant-user", path: "/ingestion", ready: "application-package-1.pdf", fileNames: true },
   { id: "master-admin-tenants", persona: "master-admin", path: "/tenants", ready: "Northwind Credit" },

@@ -119,7 +119,9 @@ def _one(type_token: str, name: str) -> dict[str, Any]:
 
 
 class Stack:
-    def __init__(self, prefix: str, *, with_runner: bool = True) -> None:
+    def __init__(
+        self, prefix: str, *, with_runner: bool = True, tss_reserved: int | None = None
+    ) -> None:
         self.prefix = prefix
         # Resources named after the platform prefix (the tenant role, the break-glass role,
         # the scan role, the Cognito admin Lambda) must be unique to each test's stack.
@@ -167,6 +169,7 @@ class Stack:
             break_glass_principal_arn=BREAK_GLASS_PRINCIPAL,
             alarm_topic_arn=self.alerts.topic.arn,
             callers=callers,
+            reserved_concurrency=tss_reserved,
         )
         self.provisioning = Provisioning(
             f"{prefix}-provision",
@@ -1094,6 +1097,22 @@ def test_tss_lambda_runs_in_the_vpc_as_database_role_tss() -> Any:
         assert services == {"logs", "ec2", "rds-db", "sts"}  # no S3, no KMS: it holds no data
 
     return stack.ready().apply(check)
+
+
+@pulumi.runtime.test
+def test_the_tss_keeps_a_share_of_the_accounts_concurrency_when_the_stack_says_so() -> Any:
+    """Owner decision, 2026-11-25. On that day scan functions held every slot the account
+    had, each waiting for a TSS call that could not get one. A reservation is capacity no
+    other function can take (and the most the TSS will use)."""
+    reserved = Stack("t2r", tss_reserved=300)
+    plain = Stack("t2u")
+
+    def check(_: list[Any]) -> None:
+        key = "reservedConcurrentExecutions"
+        assert _one("aws:lambda/function:Function", "t2r-tss-fn")[key] == 300
+        assert _one("aws:lambda/function:Function", "t2u-tss-fn").get(key) is None
+
+    return pulumi.Output.all(reserved.ready(), plain.ready()).apply(check)
 
 
 @pulumi.runtime.test

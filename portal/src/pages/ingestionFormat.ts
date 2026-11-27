@@ -223,6 +223,50 @@ export function reprocessSummary(statuses: string[]): { count: number; ready: nu
   return { count: statuses.length, ready: statuses.filter((s) => s === "ready").length };
 }
 
+/** One problem with a companion file: a code, and the key at fault (none for the whole file). */
+export interface CompanionProblem {
+  code: string;
+  key?: string | null;
+}
+
+// What is wrong with a companion file, by key (never its values: the API sends none).
+const COMPANION_ERRORS: Record<string, string> = {
+  tenant_mismatch: "is not this organization's ID",
+  must_be_a_uuid: "must be an ID",
+  must_be_text: "must be text",
+  too_long: "is longer than 500 characters",
+  must_be_a_date: "must be a date (YYYY-MM-DD)",
+  must_be_a_whole_number: "must be a whole number",
+  must_be_a_number: "must be a number",
+  out_of_range: "is out of range",
+  unknown_signer: "names a signer beyond Signer3",
+  invalid_key: "is not a valid key (letters, digits and _ only, starting with a letter)",
+  must_not_be_null: "must have a value",
+  nested_value: "must be text, a number or true/false",
+  duplicate_key: "appears twice",
+  too_many_custom_keys: "The file has more than 50 custom keys",
+  too_large: "The file is larger than 64 KB",
+  not_json: "The file is not valid JSON",
+  not_utf8: "The file is not UTF-8 text",
+  not_an_object: "The file must be one JSON object",
+};
+
+/**
+ * Every problem with a companion file in plain words, one line each (owner decision A2,
+ * 2026-11-24). Used wherever a companion file's problems show: the Upload screen and a
+ * document's "Companion file uploads" (owner, 2026-11-25). The stored codes are never shown.
+ */
+export function companionErrorLines(errors: CompanionProblem[]): string[] {
+  return errors.map((e) => {
+    const text = COMPANION_ERRORS[e.code] ?? e.code.replaceAll("_", " ");
+    return e.key ? `${e.key} ${text}` : text;
+  });
+}
+
+export function companionErrorText(errors: CompanionProblem[]): string {
+  return companionErrorLines(errors).join("; ");
+}
+
 /** How a companion upload of a document stands, in plain words. */
 export function companionFileText(file: { status: string; current: boolean; replacement: boolean }): string {
   if (file.current) return "In use";

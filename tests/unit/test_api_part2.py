@@ -5,6 +5,8 @@ only, no file name or content anywhere a master role can read."""
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import uuid
 from typing import Any
@@ -309,3 +311,145 @@ def test_a_pdf_is_never_an_original_twice(w: World, ready_doc: dict[str, Any]) -
     copies = [c for c in w.storage.buckets.copies if c[3] == key]
     assert len(copies) == 1
     assert minimal_pdf(text="history")  # the bytes the fixture uploaded
+
+
+# --- Duration: one definition, everywhere it shows ------------------------------------------------
+
+QUEUED_AT = "(SELECT max(at) FROM assay.document_events WHERE document_id = %s AND step = 'queued')"
+
+
+def durations(w: World, ready_doc: dict[str, Any]) -> dict[str, Any]:
+    """The document's duration in every place it shows: the tenant history's table, panel and
+    CSV export, and the master history's table and CSV export (for both master roles)."""
+    document, batch = ready_doc["id"], ready_doc["batch_id"]
+    tenant = w.db.tenants["a"]
+    shown: dict[str, Any] = {}
+
+    listed = w.req("GET", f"/api/documents?batch_id={batch}", "a-user").json()["documents"]
+    [row] = [d for d in listed if d["id"] == document]
+    shown["tenant table"] = row["duration_seconds"]
+    panel = w.req("GET", f"/api/documents/{document}", "a-user").json()
+    shown["tenant panel"] = panel["duration_seconds"]
+    exported = w.req("GET", f"/api/documents?format=csv&batch_id={batch}", "a-user").text
+    [line] = [
+        r for r in csv.DictReader(io.StringIO(exported)) if r["file_name"] == panel["file_name"]
+    ]
+    shown["tenant csv"] = line["duration_seconds"]
+
+    for sub in ("m-admin", "m-user"):
+        page = w.req("GET", f"/api/admin/ingestion?tenant_id={tenant}&batch_id={batch}", sub)
+        [master] = [d for d in page.json()["documents"] if d["document_id"] == document]
+        shown[f"master table ({sub})"] = master["duration_seconds"]
+        exported = w.req(
+            "GET", f"/api/admin/ingestion?format=csv&tenant_id={tenant}&batch_id={batch}", sub
+        ).text
+        [line] = [r for r in csv.DictReader(io.StringIO(exported)) if r["document_id"] == document]
+        shown[f"master csv ({sub})"] = line["duration_seconds"]
+    return shown
+
+
+def agreed(shown: dict[str, Any]) -> int | None:
+    """The one duration every view and export shows; fails, naming them, if they differ."""
+    values = {None if value in (None, "") else int(value) for value in shown.values()}
+    assert len(values) == 1, f"the views disagree: {shown}"
+    assert len(shown) == 7
+    return values.pop()
+
+
+def test_every_view_and_both_csv_exports_show_the_same_duration(
+    w: World, ready_doc: dict[str, Any]
+) -> None:
+    """Owner, 2026-11-25. A document uploaded the day before and processed again showed
+    55,492 seconds, the time since its upload. One definition now, for the tenant view, the
+    master view and both CSV exports: from the document's latest `queued` event to when it
+    finished; from when it was received only if it was never queued."""
+    document = ready_doc["id"]
+    previous = w.db.row(
+        "SELECT status, received_at, completed_at FROM assay.documents WHERE id = %s", document
+    )
+    assert previous is not None
+    try:
+        # A first attempt: received 20 minutes before its batch was closed (when it was
+        # queued), and finished 90 seconds after that. 90 seconds, not 21 and a half minutes.
+        w.db.execute(
+            "UPDATE assay.documents SET status = 'ready', "
+            f"received_at = {QUEUED_AT} - interval '20 minutes', "
+            f"completed_at = {QUEUED_AT} + interval '90 seconds' WHERE id = %s",
+            document,
+            document,
+            document,
+        )
+        assert agreed(durations(w, ready_doc)) == 90
+
+        settle(w, document)
+        started = w.req("POST", f"/api/documents/{document}/reprocess", "a-admin")
+        assert started.status_code == 202, started.text
+        # Under way: no duration yet, anywhere.
+        assert agreed(durations(w, ready_doc)) is None
+
+        # It finishes 42 seconds after "Process again": 42, however long ago the upload was.
+        w.db.execute(
+            "UPDATE assay.documents SET status = 'ready', received_at = now() - interval "
+            f"'15 hours', completed_at = {QUEUED_AT} + interval '42 seconds' WHERE id = %s",
+            document,
+            document,
+        )
+        assert agreed(durations(w, ready_doc)) == 42
+
+        # Never queued (held at its scan, say): timed from when it was received.
+        w.db.execute(
+            "UPDATE assay.document_events SET step = 'queued-hidden' "
+            "WHERE document_id = %s AND step = 'queued'",
+            document,
+        )
+        try:
+            w.db.execute(
+                "UPDATE assay.documents SET completed_at = received_at + interval '7 seconds' "
+                "WHERE id = %s",
+                document,
+            )
+            assert agreed(durations(w, ready_doc)) == 7
+        finally:
+            w.db.execute(
+                "UPDATE assay.document_events SET step = 'queued' "
+                "WHERE document_id = %s AND step = 'queued-hidden'",
+                document,
+            )
+
+        # Sorting by duration works in both views (it uses the same expression).
+        for order in ("duration", "-duration"):
+            batch = ready_doc["batch_id"]
+            tenant_page = w.req("GET", f"/api/documents?batch_id={batch}&sort={order}", "a-user")
+            assert tenant_page.status_code == 200, tenant_page.text
+            master_page = w.req("GET", f"/api/admin/ingestion?sort={order}", "m-user")
+            assert master_page.status_code == 200, master_page.text
+    finally:
+        w.db.execute(
+            "UPDATE assay.documents SET status = %s, received_at = %s, completed_at = %s "
+            "WHERE id = %s",
+            *previous,
+            document,
+        )
+
+
+def test_both_views_build_their_duration_from_one_definition() -> None:
+    """The two SQL expressions differ only in where they read the events from."""
+    from assay_api import ingestion_read
+
+    tenant, master = ingestion_read._STARTED, ingestion_read._MSTARTED
+    assert tenant == ingestion_read._started(
+        events="assay.document_events",
+        same_document="e.tenant_id = d.tenant_id AND e.document_id = d.id",
+        received="d.received_at",
+    )
+    assert master == ingestion_read._started(
+        events="platform.ingestion_events_v",
+        same_document="e.document_id = v.document_id",
+        received="v.received_at",
+    )
+    for expression in (tenant, master):
+        assert "max(e.at)" in expression and "e.step = 'queued'" in expression
+    # Every use of a duration goes through it: the columns, and both views' sort orders.
+    assert tenant in ingestion_read.TENANT_SELECT and master in ingestion_read.MASTER_SELECT
+    assert tenant in ingestion_read.TENANT_SORTS["duration"]
+    assert master in ingestion_read.MASTER_SORTS["duration"]

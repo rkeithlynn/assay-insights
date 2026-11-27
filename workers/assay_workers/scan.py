@@ -407,16 +407,32 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
             eligible: list[uuid.UUID] = []
         else:
             eligible = batches.record_scan(conn, file, outcome)
-            if (
-                outcome.status == "clean"
-                and file.purpose == batches.REPLACEMENT
-                and file.document_id is not None
-            ):
-                # A companion file attached or replaced after ingestion: it takes effect
-                # here, with the result that made it usable. No task runs, no model is called.
-                companion_data.apply(
-                    conn, storage, tenant_id=tenant_id, document_id=file.document_id
-                )
+            if file.purpose == batches.REPLACEMENT and file.document_id is not None:
+                # A companion file attached or replaced after ingestion. Clean and valid, it
+                # takes effect here, with the result that made it usable: no task runs, no
+                # model is called. Otherwise the document is unchanged, and the audit trail
+                # says how it ended (reason codes only; the file's content is never repeated).
+                ended, reason = outcome.status, outcome.error_code or outcome.status
+                if outcome.status == "clean":
+                    applied = companion_data.apply(
+                        conn, storage, tenant_id=tenant_id, document_id=file.document_id
+                    )
+                    # Accepted here and refused there cannot happen with one set of rules;
+                    # if it ever does, the trail still says the file was refused.
+                    ended, reason = "invalid", "companion_invalid"
+                    if applied.outcome == companion_data.STORED:
+                        ended = "clean"
+                if ended != "clean":
+                    # Rejected (checked and refused) or expired (GuardDuty could not scan it).
+                    companion_data.audit_not_applied(
+                        conn,
+                        tenant_id=tenant_id,
+                        file=file,
+                        file_status=ended,
+                        reason=reason,
+                        problems=outcome.error_detail,
+                        version_id=outcome.version_id,
+                    )
     if file.status != "registered":
         # The result was recorded by an earlier delivery; only its notice was outstanding.
         if quarantined is not None:

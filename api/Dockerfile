@@ -17,15 +17,15 @@ COPY workers/pyproject.toml workers/pyproject.toml
 # Locked, hash-checked, wheels only: nothing is compiled and nothing comes from the host.
 RUN uv export --locked --package assay-api --no-dev --no-emit-workspace --no-header \
         --format requirements-txt -o /tmp/requirements.txt \
-    && uv pip install --python /usr/local/bin/python3 --target /out \
+    && uv pip install --python /usr/local/bin/python3 --target /deps \
         --require-hashes --only-binary :all: -r /tmp/requirements.txt
-COPY db/assay_db /out/assay_db
-COPY api/assay_api /out/assay_api
-COPY schemas/assay_schemas /out/assay_schemas
+COPY db/assay_db /code/assay_db
+COPY api/assay_api /code/assay_api
+COPY schemas/assay_schemas /code/assay_schemas
 # The TSS client only (build step 6): types, object keys and the SigV4 client. Never the
 # service, the policies' users or the provisioning code.
-RUN install -d -m 0755 /out/assay_tss
-COPY tss/assay_tss/__init__.py tss/assay_tss/client.py tss/assay_tss/keys.py      tss/assay_tss/models.py tss/assay_tss/naming.py /out/assay_tss/
+RUN install -d -m 0755 /code/assay_tss
+COPY tss/assay_tss/__init__.py tss/assay_tss/client.py tss/assay_tss/keys.py      tss/assay_tss/models.py tss/assay_tss/naming.py /code/assay_tss/
 
 # RDS CA bundle for TLS verify-full, checked against the checksum pinned in db/Dockerfile.
 FROM scratch AS rds-ca
@@ -38,7 +38,12 @@ RUN groupadd --system --gid 10001 assay \
     && useradd --system --uid 10001 --gid assay --no-create-home --shell /usr/sbin/nologin assay \
     && install -d -m 0755 /opt/rds-ca /app
 COPY --from=rds-ca --chmod=0444 /global-bundle.pem /opt/rds-ca/global-bundle.pem
-COPY --from=build --chmod=a+rX,go-w /out /app
+# Two layers, in this order (owner, 2026-11-25). The dependencies change only with uv.lock;
+# the code changes with every edit. Copied as one layer, any edit pushed every dependency to
+# ECR again (26 to 53 MB an image). The files and their modes are the same as before:
+# tests/unit/test_image_layers.py holds the installed packages to what they were.
+COPY --from=build --chmod=a+rX,go-w /deps /app
+COPY --from=build --chmod=a+rX,go-w /code /app
 ENV PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

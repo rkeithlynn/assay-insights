@@ -52,6 +52,13 @@ class AuthConfig:
     # only once CloudFront serves the portal hosts.
     tenant_domain_prefix: str
     platform_domain_prefix: str
+    # Refresh-token rotation, per app client (stack config tenantRefreshTokenRotation and
+    # platformRefreshTokenRotation; owner, 2026-11-25). True: rotation on, and the client's
+    # only explicit flow is ALLOW_CUSTOM_AUTH. False: rotation explicitly off, and the
+    # refresh flow back (the way back if sign-in breaks). None (unset): the client is left
+    # as it was before rotation existed here.
+    tenant_refresh_rotation: bool | None = None
+    platform_refresh_rotation: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,15 @@ class PipelineConfig:
     # The most worker tasks one tenant's documents may have running at once (owner decision,
     # 2026-11-24). The account's Fargate vCPU quota is the ceiling across tenants.
     worker_max_per_tenant: int = 5
+    # Lambda reserved concurrency (owner decision, 2026-11-25; stack config
+    # scanReservedConcurrency and tssReservedConcurrency). Reserved concurrency is both a
+    # cap and a guarantee. The scan function is capped because uploads drive it and its
+    # overflow is safe (Lambda queues scan results and retries them). The TSS is guaranteed
+    # its share so that no burst of other functions can leave it without one. None: not
+    # set, which is the only choice in an account whose quota is still too low (Lambda
+    # keeps 100 unreserved, and a new account allows 10 in all): raise the quota first.
+    scan_reserved_concurrency: int | None = None
+    tss_reserved_concurrency: int | None = None
 
 
 @dataclass(frozen=True)
@@ -190,10 +206,27 @@ def validate_alerts(cfg: AlertsConfig) -> AlertsConfig:
 WORKER_MAX_PER_TENANT_RANGE = (1, 50)
 
 
+# A reservation of 0 would stop the function altogether; the upper end leaves Lambda's own
+# 100 unreserved in an account that allows 1,000.
+RESERVED_CONCURRENCY_RANGE = (1, 900)
+
+
 def validate_pipeline(cfg: PipelineConfig) -> PipelineConfig:
     low, high = WORKER_MAX_PER_TENANT_RANGE
     if not low <= cfg.worker_max_per_tenant <= high:
         raise ValueError(f"workerMaxPerTenant must be between {low} and {high}")
+    low, high = RESERVED_CONCURRENCY_RANGE
+    scan, tss = cfg.scan_reserved_concurrency, cfg.tss_reserved_concurrency
+    for key, value in (("scanReservedConcurrency", scan), ("tssReservedConcurrency", tss)):
+        if value is not None and not low <= value <= high:
+            raise ValueError(f"{key} must be between {low} and {high}, or unset")
+    if (scan is None) != (tss is None):
+        # The scan function's cap alone would leave the TSS unprotected, and the TSS's
+        # reservation alone would leave the scan function able to take everything else.
+        raise ValueError("set scanReservedConcurrency and tssReservedConcurrency together")
+    if scan is not None and tss is not None and tss < scan:
+        # Every running scan function may be waiting for a TSS call at the same moment.
+        raise ValueError("tssReservedConcurrency must be at least scanReservedConcurrency")
     return cfg
 
 
@@ -282,6 +315,8 @@ def load_config() -> PlatformConfig:
             AuthConfig(
                 tenant_domain_prefix=conf.require("tenantAuthDomainPrefix"),
                 platform_domain_prefix=conf.require("platformAuthDomainPrefix"),
+                tenant_refresh_rotation=conf.get_bool("tenantRefreshTokenRotation"),
+                platform_refresh_rotation=conf.get_bool("platformRefreshTokenRotation"),
             )
         ),
         tenancy=validate_tenancy(
@@ -299,7 +334,11 @@ def load_config() -> PlatformConfig:
             )
         ),
         pipeline=validate_pipeline(
-            PipelineConfig(worker_max_per_tenant=conf.require_int("workerMaxPerTenant"))
+            PipelineConfig(
+                worker_max_per_tenant=conf.require_int("workerMaxPerTenant"),
+                scan_reserved_concurrency=conf.get_int("scanReservedConcurrency"),
+                tss_reserved_concurrency=conf.get_int("tssReservedConcurrency"),
+            )
         ),
         edge=validate_edge(
             EdgeConfig(

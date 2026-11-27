@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { type ColumnChoice, defaultDisplay, restoreDisplay, WIDE_PX } from "./columns";
+import { CompanionProblems } from "./Ingestion";
 import { TENANT_COLUMNS, TenantId } from "./Tenants";
 
 const COLUMNS: readonly ColumnChoice[] = [
@@ -63,5 +64,28 @@ describe("Tenants table", () => {
     render(<TenantId id={id} short />);
     expect(screen.getByText("cfd08356")).toBeTruthy();
     expect(screen.queryByText(id)).toBeNull();
+  });
+});
+
+describe("Companion file uploads", () => {
+  it("says what is wrong in plain words, never the stored codes (owner, 2026-11-25)", () => {
+    const { container } = render(
+      <CompanionProblems
+        errors={[
+          { code: "not_json", key: null },
+          { code: "must_be_a_number", key: "LoanInterestRate" },
+        ]}
+      />,
+    );
+    expect(screen.getByText("The file is not valid JSON")).toBeTruthy();
+    expect(screen.getByText("LoanInterestRate must be a number")).toBeTruthy();
+    expect(container.textContent).not.toMatch(/not_json|must_be_a_number/);
+  });
+
+  it("puts a code it does not know into words too, and shows a dash for no problem", () => {
+    const { container, rerender } = render(<CompanionProblems errors={[{ code: "some_new_rule", key: "Branch" }]} />);
+    expect(container.textContent).toBe("Branch some new rule");
+    rerender(<CompanionProblems errors={[]} />);
+    expect(container.textContent).toBe("-");
   });
 });

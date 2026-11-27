@@ -5,7 +5,9 @@ For each tenant with work (`pipeline.tenants_with_work`), in that tenant only:
 1. **Overdue scans** (condition d). A registered file with no scan result 30 minutes after it
    was registered is looked up by its key (never by listing). If it is in the bucket, its
    scan never came: it becomes `scan_timeout`, its PDF `on_hold`, and an ERROR line raises an
-   alarm. If it is not, nothing arrived before its link expired: `not_uploaded`.
+   alarm. If it is not, nothing arrived before its link expired: `not_uploaded`. If the
+   file was a companion attached or replaced after ingestion, either ending writes its
+   `companion_replace_expired` audit row, with the reason for which.
 2. **Batches open 24 hours** (section 10) are closed (owner decision 5): problem files are
    dropped or their PDF fails, and eligible documents are queued.
 3. **Eligible documents never started** (a lost message, or a tenant that was suspended) are
@@ -25,6 +27,7 @@ from typing import Any
 from sqlalchemy import Engine
 
 from assay_db import batches
+from assay_workers import companion_data
 from assay_workers.runtime import (
     IngestQueue,
     Settings,
@@ -70,7 +73,21 @@ def sweep_tenant(tenant_id: uuid.UUID, deps: Deps, now: dt.datetime) -> TenantRe
             with tenant_tx(deps.engine, tenant_id) as conn:
                 if batches.lock_batch(conn, file.batch_id) is None:
                     continue
+                waiting = batches.lock_file(conn, file.id)
                 eligible += batches.mark_overdue(conn, file.id, uploaded=uploaded)
+                if (
+                    waiting is not None
+                    and waiting.status == "registered"
+                    and waiting.purpose == batches.REPLACEMENT
+                    and waiting.document_id is not None
+                ):
+                    # A companion file attached after ingestion that never got a scan
+                    # result: its request expires here, and the audit trail says which way
+                    # (it was never scanned, or it never arrived).
+                    ended = "scan_timeout" if uploaded else "not_uploaded"
+                    companion_data.audit_not_applied(
+                        conn, tenant_id=tenant_id, file=waiting, file_status=ended, reason=ended
+                    )
             if uploaded:
                 result.timed_out += 1
                 log.error(

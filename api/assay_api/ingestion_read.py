@@ -34,7 +34,36 @@ DISCARDED = "discarded"
 
 # Sort keys -> ORDER BY. Every order ends with the received time and ID, so pages are stable.
 _TAIL = "d.received_at DESC, d.id DESC"
-_DURATION = "(d.completed_at - d.received_at)"
+# Duration: one definition for both views and both CSV exports (owner, 2026-11-25).
+#
+# A document is timed from its latest `queued` event to `completed_at`. That event is written
+# when the document becomes eligible for the pipeline (its batch closed and its files scanned
+# clean), and again by every "Process again", so the latest one is where the current attempt
+# began: a document uploaded yesterday and processed again today took seconds, not a day. A
+# first attempt's duration therefore leaves out the upload, the scan and the time its batch
+# stayed open. A document that was never queued (held at its scan, quarantined, failed before
+# the pipeline) is timed from when it was received.
+#
+# No grant was needed: the master view reads the same events through
+# `platform.ingestion_events_v`, which `platform_reader` could already read.
+STARTED_STEP = "queued"
+
+
+def _started(*, events: str, same_document: str, received: str) -> str:
+    """When the document's current attempt began, as SQL. Every argument is fixed text from
+    this module (a relation, a join condition, a column): nothing from a request."""
+    return (
+        f"COALESCE((SELECT max(e.at) FROM {events} e "  # noqa: S608  # nosec B608
+        f"WHERE {same_document} AND e.step = '{STARTED_STEP}'), {received})"
+    )
+
+
+_STARTED = _started(
+    events="assay.document_events",
+    same_document="e.tenant_id = d.tenant_id AND e.document_id = d.id",
+    received="d.received_at",
+)
+_DURATION = f"(d.completed_at - {_STARTED})"
 TENANT_SORTS: dict[str, str] = {
     "received": "d.received_at ASC, d.id ASC",
     "-received": _TAIL,
@@ -58,7 +87,12 @@ TENANT_SORTS: dict[str, str] = {
     "-uploaded_by": f"lower(u.name) DESC, {_TAIL}",
 }
 _MTAIL = "v.received_at DESC, v.document_id DESC"
-_MDURATION = "(v.completed_at - v.received_at)"
+_MSTARTED = _started(
+    events="platform.ingestion_events_v",
+    same_document="e.document_id = v.document_id",
+    received="v.received_at",
+)
+_MDURATION = f"(v.completed_at - {_MSTARTED})"
 MASTER_SORTS: dict[str, str] = {
     "received": "v.received_at ASC, v.document_id ASC",
     "-received": _MTAIL,
@@ -132,15 +166,20 @@ TENANT_FROM = (
     "JOIN assay.batches b ON b.tenant_id = d.tenant_id AND b.id = d.batch_id "
     "JOIN assay.users u ON u.tenant_id = d.tenant_id AND u.id = d.uploaded_by "
 )
-TENANT_SELECT = (
-    "SELECT d.id, d.received_at, d.batch_id, b.name AS batch_name, d.file_name, d.page_count, "
+_TENANT_COLUMNS = (
+    "d.id, d.received_at, d.batch_id, b.name AS batch_name, d.file_name, d.page_count, "
     "d.size_bytes, d.has_companion, d.status, d.error_code, d.completed_at, "
     "u.name AS uploaded_by, (SELECT count(*) FROM assay.document_parts p "
-    "WHERE p.tenant_id = d.tenant_id AND p.document_id = d.id) AS forms_found "
+    "WHERE p.tenant_id = d.tenant_id AND p.document_id = d.id) AS forms_found"
 )
-MASTER_SELECT = (
-    "SELECT v.document_id, v.tenant_id, v.tenant_name, v.batch_id, v.status, v.error_code, "
-    "v.page_count, v.size_bytes, v.has_companion, v.part_count, v.received_at, v.completed_at "
+# Two constants of this module joined; no request value is part of either.
+TENANT_SELECT = f"SELECT {_TENANT_COLUMNS}, {_STARTED} AS started_at "
+_MASTER_COLUMNS = (
+    "v.document_id, v.tenant_id, v.tenant_name, v.batch_id, v.status, v.error_code, "
+    "v.page_count, v.size_bytes, v.has_companion, v.part_count, v.received_at, v.completed_at"
+)
+# As for the tenant view: constants of this module joined; no request value.
+MASTER_SELECT = f"SELECT {_MASTER_COLUMNS}, {_MSTARTED} AS started_at " + (
     "FROM platform.platform_ingestion_v v "
 )
 
@@ -204,9 +243,12 @@ def master_page(
 
 
 def duration_seconds(row: Row[Any]) -> int | None:
+    """How long the document's current attempt took: from `started_at` (see `_started`) to
+    when it finished. None while it is still under way. Both views' tables, panels and CSV
+    exports show this one number."""
     if row.completed_at is None:
         return None
-    return int((row.completed_at - row.received_at).total_seconds())
+    return int((row.completed_at - row.started_at).total_seconds())
 
 
 TENANT_CSV_COLUMNS = (

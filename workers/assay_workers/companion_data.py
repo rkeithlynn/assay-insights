@@ -20,7 +20,9 @@ Plain code, never the model. Used in two places, with the same function:
    is deleted (owner decision 2); readers follow `documents.companion_attempt`.
 5. A replacement that takes effect writes an audit row naming both files and their versions
    (owner decision 3), with the user who uploaded it as the actor. No file name: a file is
-   named by its ID.
+   named by its ID. One that does not take effect writes `companion_replace_rejected`
+   (checked and refused) or `companion_replace_expired` (never arrived, or never scanned),
+   with reason codes only (`audit_not_applied`, called by the scan step and the sweeper).
 
 Companion values never overwrite what the pipeline reads from the PDF: both are kept, each
 with its source.
@@ -31,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +49,10 @@ STEP = "companion"
 STORED, NONE, INVALID = "stored", "none", "invalid"
 CATEGORY = "document"
 ATTACHED, REPLACED = "companion_attached", "companion_replaced"
+REJECTED = "companion_replace_rejected"
+EXPIRED = "companion_replace_expired"
+# File statuses (`batch_files.status`) that mean the file itself was checked and refused.
+CHECKED_AND_REFUSED = frozenset({"invalid", "infected", "mismatch"})
 
 
 @dataclass(frozen=True)
@@ -134,6 +141,101 @@ def _store(
     )
 
 
+def _uploader(conn: Connection, user_id: uuid.UUID | None) -> audit.AuditActor:
+    """The user who uploaded a file, as an audit row's actor."""
+    user = conn.execute(
+        text("SELECT id, email, role FROM assay.users WHERE id = :id"), {"id": user_id}
+    ).one_or_none()
+    return audit.AuditActor(
+        role=user.role if user else "system",
+        user_id=user.id if user else None,
+        email=user.email if user else None,
+    )
+
+
+def _file_ref(conn: Connection, file_id: uuid.UUID | None) -> dict[str, str | None] | None:
+    """A companion file by its ID and inbox version; never its name."""
+    if file_id is None:
+        return None
+    version = conn.execute(
+        text("SELECT version_id FROM assay.batch_files WHERE id = :id"), {"id": file_id}
+    ).scalar_one_or_none()
+    return {"file_id": str(file_id), "version_id": version}
+
+
+def ending_action(file_status: str) -> str:
+    """Which audit action a replacement that did not take effect gets, by its file's status.
+
+    `companion_replace_rejected` only when the file was checked and refused (owner,
+    2026-11-25): it is not a valid companion file, it holds malware, or what was stored is
+    not what was registered. Every other ending is `companion_replace_expired`: the file
+    never arrived or was never scanned, so nothing was ever decided about it.
+    """
+    return REJECTED if file_status in CHECKED_AND_REFUSED else EXPIRED
+
+
+def audit_not_applied(
+    conn: Connection,
+    *,
+    tenant_id: uuid.UUID,
+    file: Any,
+    file_status: str,
+    reason: str,
+    problems: Sequence[Mapping[str, Any]] | None = None,
+    version_id: str | None = None,
+) -> str:
+    """A companion file attached or replaced after ingestion that did not take effect.
+    Returns the action written.
+
+    Every `companion_replace_requested` row is followed by exactly one row that says how it
+    ended: `companion_replaced` or `companion_attached` (it took effect),
+    `companion_replace_rejected` (checked and refused) or `companion_replace_expired` (never
+    arrived, or never scanned): see `ending_action`. The row is written in the transaction
+    that records the ending, and `reason` says which it was: `companion_invalid`,
+    `threats_found`, `size_mismatch`, `checksum_mismatch`, `version_missing`; or
+    `not_uploaded`, `scan_timeout`, and GuardDuty's own "could not scan" results
+    (`scan_unsupported`, `scan_failed`, `scan_access_denied`).
+
+    The row holds codes and IDs only (owner, 2026-11-25): the reason, each problem's code,
+    a reserved key's name, the file by its ID and version, and the file the document keeps.
+    No file name, no custom key and no value from the file.
+    """
+    action = ending_action(file_status)
+    kept = conn.execute(
+        text("SELECT companion_file_id FROM assay.documents WHERE id = :id"),
+        {"id": file.document_id},
+    ).scalar_one_or_none()
+    audit.write(
+        conn,
+        tenant_id=tenant_id,
+        actor=_uploader(conn, file.registered_by),
+        category=CATEGORY,
+        action=action,
+        target_type="document",
+        target_id=str(file.document_id),
+        target_label=None,
+        detail={
+            "reason": reason,
+            "problems": companion.audit_problems(problems),
+            "file": {"file_id": str(file.id), "version_id": version_id},
+            # The document is unchanged: this is the file its values still come from.
+            "kept": _file_ref(conn, kept),
+            "reported_by": "pipeline",
+        },
+    )
+    log.info(
+        "companion replacement did not take effect; the document is unchanged",
+        extra={
+            "tenant_id": str(tenant_id),
+            "document_id": str(file.document_id),
+            "file_id": str(file.id),
+            "action": action,
+            "reason": reason,
+        },
+    )
+    return action
+
+
 def _audit_replacement(
     conn: Connection,
     *,
@@ -144,30 +246,17 @@ def _audit_replacement(
     version: int,
     object_version: str | None,
 ) -> None:
-    user = conn.execute(
-        text("SELECT id, email, role FROM assay.users WHERE id = :id"), {"id": file.registered_by}
-    ).one_or_none()
-    before = None
-    if previous_file is not None:
-        before_version = conn.execute(
-            text("SELECT version_id FROM assay.batch_files WHERE id = :id"), {"id": previous_file}
-        ).scalar_one_or_none()
-        before = {"file_id": str(previous_file), "version_id": before_version}
     audit.write(
         conn,
         tenant_id=tenant_id,
-        actor=audit.AuditActor(
-            role=user.role if user else "system",
-            user_id=user.id if user else None,
-            email=user.email if user else None,
-        ),
+        actor=_uploader(conn, file.registered_by),
         category=CATEGORY,
         action=REPLACED if previous_file is not None else ATTACHED,
         target_type="document",
         target_id=str(document_id),
         target_label=None,
         detail={
-            "before": before,
+            "before": _file_ref(conn, previous_file),
             "after": {
                 "file_id": str(file.id),
                 "version_id": file.version_id,

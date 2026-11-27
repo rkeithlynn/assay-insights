@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { companionErrorLines, companionErrorText, matchText, pdfFor, rejectedCompanions } from "./pages/Upload";
-import { anyInProgress, errorText, formatBytes, formatDuration } from "./pages/ingestionFormat";
+import { matchText, pdfFor, rejectedCompanions } from "./pages/Upload";
+import { anyInProgress, companionErrorLines, companionErrorText, errorText, formatBytes, formatDuration } from "./pages/ingestionFormat";
 import {
   chunks,
   classify,

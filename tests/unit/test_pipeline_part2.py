@@ -453,6 +453,204 @@ def test_an_invalid_replacement_changes_nothing(
     assert {problem["key"] for problem in detail} == {"TenantID", "LoanTerm"}
 
 
+# --- A replacement that does not take effect leaves an audit row ---------------------------------
+
+# Values a rejected file may hold. None of them may reach the audit row.
+SECRET_VALUE = "SECRET-VALUE-771"
+SECRET_KEY = "PrivateBranchLabel"
+
+
+def ending(w: World, tenant_id: uuid.UUID, before: int) -> tuple[Any, ...]:
+    """The one `document` audit row written since `before`."""
+    [row] = audit_rows(w, tenant_id, "document")[before:]
+    return row
+
+
+def test_a_rejected_replacement_writes_an_audit_row_with_reason_codes_and_no_content(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """Owner, 2026-11-25: a rejected replacement left only its request in the trail."""
+    tenant = w.db.tenants["a"]
+    files = [
+        ("rej.pdf", minimal_pdf(text="rejected")),
+        ("rej.json", companion_body(tenant, **FULL)),
+    ]
+    doc_id, b = processed(w, "a", files, tmp_path, engines)
+    old = b.files["rej.json"]
+    old_version = file_row(w, old.id)[2]
+    stored = companion_rows(w, doc_id)
+    before = len(audit_rows(w, tenant, "document"))
+
+    # A reserved key with the wrong type, a custom key with a value it may not have, and a
+    # value that must never be repeated.
+    body = companion_body(
+        tenant, LoanInterestRate=SECRET_VALUE, ApplicationId=SECRET_VALUE, **{SECRET_KEY: None}
+    )
+    new = replacement(w, b, doc_id, "a-admin", "rej.json", body)
+    version = put(w, b, "rej.json")
+    assert scanned(w, b, "rej.json", version) == "invalid"
+
+    assert companion_rows(w, doc_id) == stored
+    action, role, email, target, detail = ending(w, tenant, before)
+    assert (action, role, target) == ("companion_replace_rejected", "tenant-admin", str(doc_id))
+    assert email is not None
+    assert detail["reason"] == "companion_invalid"
+    # A reserved key is named (fixed text, lower case); a custom key never is.
+    assert sorted(detail["problems"], key=lambda p: p["error_code"]) == [
+        {"error_code": "must_be_a_number", "key": "loaninterestrate"},
+        {"error_code": "must_not_be_null", "key": None},
+    ]
+    assert detail["file"] == {"file_id": str(new.id), "version_id": version}
+    assert detail["kept"] == {"file_id": str(old.id), "version_id": old_version}
+    written = json.dumps(detail)
+    for never in (SECRET_VALUE, SECRET_KEY, SECRET_KEY.lower(), "rej.json"):
+        assert never not in written
+    # Audit history shows the row as written: none of its keys is one the reader redacts.
+    from assay_api.audit_read import redact
+
+    assert redact(detail) == detail
+
+
+def test_a_replacement_that_is_not_json_is_rejected_with_its_code(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    tenant = w.db.tenants["a"]
+    doc_id, b = processed(w, "a", [("nj.pdf", minimal_pdf(text="not-json"))], tmp_path, engines)
+    before = len(audit_rows(w, tenant, "document"))
+    new = replacement(w, b, doc_id, "a-admin", "nj.json", f"{SECRET_VALUE} is not JSON".encode())
+    assert scanned(w, b, "nj.json", put(w, b, "nj.json")) == "invalid"
+
+    action, _, _, _, detail = ending(w, tenant, before)
+    assert action == "companion_replace_rejected"
+    assert detail["reason"] == "companion_invalid"
+    assert detail["problems"] == [{"error_code": "not_json", "key": None}]
+    assert detail["file"]["file_id"] == str(new.id)
+    # The document had no companion file, and still has none.
+    assert detail["kept"] is None
+    assert SECRET_VALUE not in json.dumps(detail)
+    assert companion_rows(w, doc_id)["version"] is None
+
+
+def test_a_replacement_whose_stored_bytes_differ_is_rejected(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    tenant = w.db.tenants["a"]
+    doc_id, b = processed(w, "a", [("mm.pdf", minimal_pdf(text="mismatch"))], tmp_path, engines)
+    before = len(audit_rows(w, tenant, "document"))
+    new = replacement(w, b, doc_id, "a-admin", "mm.json", companion_body(tenant))
+    # Something else was stored under the upload's key.
+    other = companion_body(tenant, Branch="East")
+    version = w.storage.buckets.put(b.bucket, new.key, other, "application/json")
+    assert scanned(w, b, "mm.json", version) == "mismatch"
+
+    # It was checked against its registration and refused: rejected, not expired.
+    action, _, _, _, detail = ending(w, tenant, before)
+    assert action == "companion_replace_rejected"
+    assert detail["reason"] in ("size_mismatch", "checksum_mismatch")
+    assert detail["problems"] == []
+
+
+def test_only_a_file_that_was_checked_and_refused_is_rejected() -> None:
+    """Owner, 2026-11-25: `rejected` only for a file that was checked and refused. A file
+    that never arrived or was never scanned `expired`."""
+    from assay_workers import companion_data
+
+    assert {
+        status: companion_data.ending_action(status)
+        for status in (
+            "invalid",
+            "infected",
+            "mismatch",
+            "unsupported",
+            "scan_timeout",
+            "not_uploaded",
+        )
+    } == {
+        "invalid": "companion_replace_rejected",
+        "infected": "companion_replace_rejected",
+        "mismatch": "companion_replace_rejected",
+        "unsupported": "companion_replace_expired",
+        "scan_timeout": "companion_replace_expired",
+        "not_uploaded": "companion_replace_expired",
+    }
+    # A new file status has to be given one of the two here before this passes again.
+    decided = {"invalid", "infected", "mismatch", "unsupported", "scan_timeout"}
+    assert set(batches.SCANNED) - {"clean"} == decided
+
+
+def test_a_replacement_guardduty_could_not_scan_expires_with_its_reason(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """GuardDuty answered, but with no verdict: the file was never scanned."""
+    tenant = w.db.tenants["a"]
+    doc_id, b = processed(w, "a", [("ns.pdf", minimal_pdf(text="no-scan"))], tmp_path, engines)
+    before = len(audit_rows(w, tenant, "document"))
+    new = replacement(w, b, doc_id, "a-admin", "ns.json", companion_body(tenant))
+    version = put(w, b, "ns.json")
+    assert scanned(w, b, "ns.json", version, "UNSUPPORTED") == "unsupported"
+
+    action, role, _, target, detail = ending(w, tenant, before)
+    assert (action, role, target) == ("companion_replace_expired", "tenant-admin", str(doc_id))
+    assert detail["reason"] == "scan_unsupported"
+    assert detail["file"] == {"file_id": str(new.id), "version_id": version}
+    assert companion_rows(w, doc_id)["version"] is None
+
+
+def test_every_companion_request_ends_in_exactly_one_row(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """Accepted or not, one row says how each attempt to attach a file ended; a repeated
+    scan result adds none."""
+    tenant = w.db.tenants["a"]
+    doc_id, b = processed(w, "a", [("each.pdf", minimal_pdf(text="each"))], tmp_path, engines)
+    before = len(audit_rows(w, tenant, "document"))
+
+    replacement(w, b, doc_id, "a-admin", "bad.json", b"[]")
+    bad = put(w, b, "bad.json")
+    assert scanned(w, b, "bad.json", bad) == "invalid"
+    assert scanned(w, b, "bad.json", bad) == "already_recorded"
+    replacement(w, b, doc_id, "a-admin", "good.json", companion_body(tenant, **FULL))
+    assert scanned(w, b, "good.json", put(w, b, "good.json")) == "clean"
+
+    actions = [row[0] for row in audit_rows(w, tenant, "document")[before:]]
+    assert actions == ["companion_replace_rejected", "companion_attached"]
+
+
+def test_a_replacement_that_never_arrives_or_is_never_scanned_expires_with_the_reason_for_which(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    from assay_workers import sweeper
+
+    tenant = w.db.tenants["a"]
+    doc_id, b = processed(w, "a", [("late.pdf", minimal_pdf(text="late"))], tmp_path, engines)
+    before = len(audit_rows(w, tenant, "document"))
+    later = now() + batches.SCAN_TIMEOUT + LATER
+
+    # Registered, and nothing was ever uploaded.
+    never = replacement(w, b, doc_id, "a-admin", "never.json", companion_body(tenant))
+    sweeper.sweep_tenant(tenant, w.sweeper_deps(), later)
+    action, role, _, target, detail = ending(w, tenant, before)
+    assert (action, role, target) == ("companion_replace_expired", "tenant-admin", str(doc_id))
+    assert detail["reason"] == "not_uploaded"
+    assert detail["file"] == {"file_id": str(never.id), "version_id": None}
+
+    # Uploaded, and its scan result never came.
+    replacement(w, b, doc_id, "a-admin", "unscanned.json", companion_body(tenant))
+    put(w, b, "unscanned.json")
+    w.db.execute(
+        "UPDATE assay.batch_files SET registered_at = registered_at - interval '1 hour' "
+        "WHERE document_id = %s AND status = 'registered'",
+        doc_id,
+    )
+    sweeper.sweep_tenant(tenant, w.sweeper_deps(), later)
+    [_, second] = audit_rows(w, tenant, "document")[before:]
+    assert (second[0], second[4]["reason"]) == ("companion_replace_expired", "scan_timeout")
+    # A second sweep finds nothing waiting and writes nothing.
+    sweeper.sweep_tenant(tenant, w.sweeper_deps(), later)
+    assert len(audit_rows(w, tenant, "document")[before:]) == 2
+    assert companion_rows(w, doc_id)["version"] is None
+
+
 def test_one_replacement_at_a_time_and_only_for_a_document_that_was_processed(
     w: World, tmp_path: Path, engines: list[Any]
 ) -> None:
@@ -625,6 +823,12 @@ def test_an_infected_replacement_is_quarantined_with_a_notice_and_changes_nothin
     assert f"Document ID: {doc_id}" in notices.sent[0][1]
     assert "a companion file" in notices.sent[0][1]
     assert file_row(w, new.id)[0] == "infected"
+    # Two rows: the security row for the quarantine, and how the request to replace ended.
+    security = audit_rows(w, tenant, "security")[-1]
+    assert (security[0], security[4]["file_id"]) == ("file_quarantined", str(new.id))
+    rejected = audit_rows(w, tenant, "document")[-1]
+    assert (rejected[0], rejected[4]["reason"]) == ("companion_replace_rejected", "threats_found")
+    assert rejected[4]["file"]["file_id"] == str(new.id)
 
 
 # --- "Mark as reviewed" -------------------------------------------------------------------------

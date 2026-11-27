@@ -28,7 +28,7 @@ import json
 import math
 import re
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -89,6 +89,36 @@ class CompanionError(Exception):
     def of(cls, errors: Sequence[CompanionError]) -> CompanionError:
         first = errors[0]
         return cls(first.code, first.key, errors=errors)
+
+
+def is_reserved_key(key: str) -> bool:
+    """Whether `key` is one of the format's own keys (fixed names), not a custom label."""
+    folded = key.lower()
+    return (
+        folded == TENANT_ID
+        or folded in TEXT_KEYS
+        or folded in DATE_KEYS
+        or folded in (LOAN_TERM, LOAN_RATE)
+        or _SIGNER_KEY.match(folded) is not None
+    )
+
+
+def audit_problems(details: Sequence[Mapping[str, Any]] | None) -> list[dict[str, str | None]]:
+    """A file's problems (`CompanionError.details()`), for an audit row.
+
+    Audit rows are read by master roles, who never see tenant content. A code is fixed text.
+    A reserved key is fixed text too, and is named in lower case. A custom key is the
+    tenant's own wording, so it is never named: its problem keeps the code alone. The name
+    `error_code` is one the audit reader does not redact (`code` is).
+    """
+    problems: list[dict[str, str | None]] = []
+    for detail in (details or [])[:MAX_ERRORS]:
+        code, key = detail.get("code"), detail.get("key")
+        if not isinstance(code, str):
+            continue
+        named = key.lower() if isinstance(key, str) and is_reserved_key(key) else None
+        problems.append({"error_code": code, "key": named})
+    return problems
 
 
 @dataclass(frozen=True)

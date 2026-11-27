@@ -9,9 +9,14 @@ Usage (PowerShell, from the repository root):
 Read-only: it describes resources and reads metrics, and changes nothing. It reads no log
 event and no object, only whether one exists.
 
-1. Lambda concurrency (a warning). The account's concurrent-executions limit must cover a
-   full batch: every file's scan result runs the scan function, which needs the TSS's
-   function at the same moment. A new account allows 10.
+1. Lambda concurrency.
+   - The account's limit (a warning). It must cover the two reservations below and what
+     stays unreserved: a full batch's pipeline steps and everything else. A new account
+     allows 10, which is too few even to set the reservations: raise the quota first.
+   - The two reserved-concurrency settings (a failure). The scan function's cap and the
+     Tenant Storage Service's guaranteed share are read from the functions themselves and
+     must equal the stack's `scanReservedConcurrency` and `tssReservedConcurrency`. A stack
+     that sets neither is warned about.
 
 2. Log destinations (a failure). For every resource with the stack's tags, the script reads
    where its logs are configured to go, from the resource itself, and then whether anything
@@ -52,16 +57,23 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from assay_db.batches import MAX_COMPANIONS_PER_BATCH, MAX_PDFS_PER_BATCH
+from assay_db.batches import MAX_PDFS_PER_BATCH
 
 INFRA_DIR = Path(__file__).resolve().parent.parent / "infra"
 DEFAULT_STACK = "pilartech/assay-platform/dev"
 
-# One scan function per uploaded file, each needing the TSS's function while it runs, for a
-# full batch of PDFs and companion files; the rest is for everything else that runs at the
-# same time (pipeline steps, the Cognito triggers, the API's admin calls).
+# Reserved concurrency (owner decision, 2026-11-25), as stack config has it. A stack that
+# sets neither is measured against these, the values the Development stack uses.
+SCAN_CONFIG_KEY = "scanReservedConcurrency"
+TSS_CONFIG_KEY = "tssReservedConcurrency"
+DECIDED = {"scan": 50, "tss": 300}
+# What has to stay unreserved beside them: one full batch's pipeline steps, which are not
+# capped (a throttled step fails its document), and everything else that runs at the same
+# time (the Cognito triggers, the API's admin calls, the sweeper, the migrations).
 OTHER_FUNCTIONS = 200
-CONCURRENCY_NEEDED = 2 * (MAX_PDFS_PER_BATCH + MAX_COMPANIONS_PER_BATCH) + OTHER_FUNCTIONS
+UNRESERVED_NEEDED = MAX_PDFS_PER_BATCH + OTHER_FUNCTIONS
+# What to ask AWS for: the usual default, and what the Development account was given.
+QUOTA_TO_REQUEST = 1000
 LAMBDA_SERVICE_CODE = "lambda"
 CONCURRENCY_QUOTA_CODE = "L-B99A9384"
 OPEN_REQUEST = frozenset({"PENDING", "CASE_OPENED"})
@@ -138,18 +150,53 @@ def pulumi(*args: str, stack: str) -> str:
 # --- Lambda concurrency -----------------------------------------------------------------------
 
 
-def concurrency_report(lambda_client: Any, quotas: Any) -> tuple[bool, list[str]]:
+def stack_values(stack: str) -> dict[str, str]:
+    """The stack's own (non-secret) config values, by key without the project's prefix."""
+    raw = json.loads(pulumi("config", "--json", stack=stack))
+    return {
+        key.split(":", 1)[-1]: str(entry["value"])
+        for key, entry in raw.items()
+        if not entry.get("secret") and "value" in entry
+    }
+
+
+def configured_reservations(values: dict[str, str]) -> dict[str, int | None]:
+    """What the stack says the scan function and the TSS reserve. None: not set."""
+
+    def value(key: str) -> int | None:
+        return int(values[key]) if values.get(key) else None
+
+    return {"scan": value(SCAN_CONFIG_KEY), "tss": value(TSS_CONFIG_KEY)}
+
+
+def concurrency_needed(reserved: dict[str, int | None]) -> int:
+    """The account limit the stack needs: its two reservations (the decided ones if it sets
+    none) and what must stay unreserved."""
+    return sum(reserved[name] or DECIDED[name] for name in DECIDED) + UNRESERVED_NEEDED
+
+
+def concurrency_report(
+    lambda_client: Any, quotas: Any, reserved: dict[str, int | None] | None = None
+) -> tuple[bool, list[str]]:
     """Whether the account's limit covers the pipeline, and the lines that say so."""
+    reserved = reserved or dict.fromkeys(DECIDED)
+    needed = concurrency_needed(reserved)
+    scan, tss = (reserved[name] or DECIDED[name] for name in ("scan", "tss"))
     limit = int(lambda_client.get_account_settings()["AccountLimit"]["ConcurrentExecutions"])
     lines = [f"Lambda concurrent executions: the account allows {limit:,}."]
-    if limit >= CONCURRENCY_NEEDED:
-        lines.append(f"  ok: the pipeline needs {CONCURRENCY_NEEDED:,}.")
+    sums = (
+        f"{scan} reserved for the scan function, {tss} for the Tenant Storage Service, and "
+        f"{UNRESERVED_NEEDED} unreserved (a full batch's {MAX_PDFS_PER_BATCH} pipeline steps "
+        f"and {OTHER_FUNCTIONS} for everything else)"
+    )
+    if limit >= needed:
+        lines.append(f"  ok: the pipeline needs {needed:,}: {sums}.")
         return True, lines
     lines.append(
-        f"  WARNING: the pipeline needs {CONCURRENCY_NEEDED:,} (a full batch is "
-        f"{MAX_PDFS_PER_BATCH} PDFs and {MAX_COMPANIONS_PER_BATCH} companion files; each "
-        "file's scan result runs the scan function and the TSS's function together). Below "
-        "that, Lambda throttles calls and good documents can end on hold."
+        f"  WARNING: the pipeline needs {needed:,}: {sums}. Below that the reservations "
+        "cannot be set (Lambda keeps 100 unreserved, so `pulumi up` is refused), and without "
+        "them Lambda throttles calls and good documents can end on hold. Leave "
+        f"{SCAN_CONFIG_KEY} and {TSS_CONFIG_KEY} unset until the quota is raised."
     )
     history = quotas.list_requested_service_quota_change_history_by_quota(
         ServiceCode=LAMBDA_SERVICE_CODE, QuotaCode=CONCURRENCY_QUOTA_CODE
@@ -166,9 +213,52 @@ def concurrency_report(lambda_client: Any, quotas: Any) -> tuple[bool, list[str]
         lines.append(
             "  Request the increase, and wait until it is granted: aws service-quotas "
             f"request-service-quota-increase --service-code {LAMBDA_SERVICE_CODE} "
-            f"--quota-code {CONCURRENCY_QUOTA_CODE} --desired-value {CONCURRENCY_NEEDED}"
+            f"--quota-code {CONCURRENCY_QUOTA_CODE} --desired-value {QUOTA_TO_REQUEST}"
         )
     return False, lines
+
+
+def reservation_report(
+    lambda_client: Any, functions: dict[str, str], reserved: dict[str, int | None]
+) -> tuple[bool, list[str]]:
+    """Whether each function's reserved concurrency in AWS is what the stack says.
+
+    `functions` names the deployed scan function and TSS function; `reserved` is what stack
+    config sets for each (None: nothing). A difference fails: the deploy did not apply the
+    setting, or someone changed it by hand. A stack that sets neither passes with a warning.
+    """
+    labels = {"scan": "the scan function", "tss": "the Tenant Storage Service"}
+    lines = ["Reserved concurrency:"]
+    passed = True
+    for name, label in labels.items():
+        answer = lambda_client.get_function_concurrency(FunctionName=functions[name])
+        actual = answer.get("ReservedConcurrentExecutions")
+        expected = reserved[name]
+        where = f"{label} ({functions[name]})"
+        if actual != expected:
+            passed = False
+            lines.append(
+                f"  FAILED: {where} reserves {actual if actual is not None else 'nothing'}; "
+                f"the stack says {expected if expected is not None else 'nothing'}."
+            )
+        elif expected is None:
+            lines.append(
+                f"  WARNING: {where} reserves nothing, and the stack sets nothing. Set "
+                f"{SCAN_CONFIG_KEY} and {TSS_CONFIG_KEY} once the account's quota allows it."
+            )
+        else:
+            lines.append(f"  ok: {where} reserves {actual}, as the stack says.")
+    unreserved = int(
+        lambda_client.get_account_settings()["AccountLimit"]["UnreservedConcurrentExecutions"]
+    )
+    if unreserved < UNRESERVED_NEEDED:
+        lines.append(
+            f"  WARNING: {unreserved} concurrent executions are left unreserved; the pipeline's "
+            f"other functions need {UNRESERVED_NEEDED}."
+        )
+    else:
+        lines.append(f"  ok: {unreserved} left unreserved for every other function.")
+    return passed, lines
 
 
 # --- Which resources belong to the stack ----------------------------------------------------
@@ -545,10 +635,19 @@ def main() -> int:
             clients[name] = session.client(name)  # type: ignore[call-overload]
         return clients[name]
 
-    enough, lines = concurrency_report(client("lambda"), client("service-quotas"))
+    reserved = configured_reservations(stack_values(args.stack))
+    enough, lines = concurrency_report(client("lambda"), client("service-quotas"), reserved)
     print("\n".join(lines), flush=True)
     if args.before_deploy:
         return 0
+
+    outputs = json.loads(pulumi("stack", "output", "--json", stack=args.stack))
+    functions = {
+        "scan": outputs["pipeline_function_names"]["scan"],
+        "tss": outputs["tss_function_name"],
+    }
+    reservations_ok, lines = reservation_report(client("lambda"), functions, reserved)
+    print("\n" + "\n".join(lines), flush=True)
 
     tags = json.loads(pulumi("config", "get", "aws:defaultTags", stack=args.stack))["tags"]
     account_id = client("sts").get_caller_identity()["Account"]
@@ -560,7 +659,9 @@ def main() -> int:
     print("\n" + "\n".join(lines))
     if not enough:
         print("\nThe Lambda concurrency warning above still stands.")
-    return 0 if passed else 1
+    if not reservations_ok:
+        print("\nFAILED: a function's reserved concurrency is not what the stack says (above).")
+    return 0 if passed and reservations_ok else 1
 
 
 if __name__ == "__main__":

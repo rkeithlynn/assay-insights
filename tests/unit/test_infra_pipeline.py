@@ -17,6 +17,7 @@ from typing import Any
 
 import pulumi
 import pulumi_aws as aws
+import pytest
 
 from assay_infra import alerts, pipeline
 from assay_infra.api import api_task_role
@@ -40,7 +41,7 @@ def _one(type_token: str, name: str) -> dict[str, Any]:
     return matches[0]
 
 
-def _stack(prefix: str) -> pipeline.Pipeline:
+def _stack(prefix: str, *, scan_reserved: int | None = None) -> pipeline.Pipeline:
     network = Network(prefix, cfg=NET, region=REGION, account_id=ACCOUNT_ID)
     database = Database(f"{prefix}-db", cfg=DB, network=network, account_id=ACCOUNT_ID)
     return pipeline.Pipeline(
@@ -58,6 +59,7 @@ def _stack(prefix: str) -> pipeline.Pipeline:
         alarm_topic_arn=TOPIC,
         security_topic_arn=NOTICES,
         notices_key_arn=NOTICES_KEY,
+        scan_reserved_concurrency=scan_reserved,
     )
 
 
@@ -183,6 +185,68 @@ def test_functions_run_in_the_vpc_as_x86_64_images() -> Any:
         assert int(variables["WORKER_GRANT_SECONDS"]) > pipeline.WORKER_TIMEOUT_SECONDS
 
     return _ready(p).apply(check)
+
+
+RESERVED = "reservedConcurrentExecutions"
+
+
+@pulumi.runtime.test
+def test_only_the_scan_function_is_capped_and_only_when_the_stack_says_so() -> Any:
+    """Owner decision, 2026-11-25. The scan function is the one whose overflow is safe:
+    Lambda queues scan results and retries them for an hour, then the dead-letter queue has
+    them. Every other function here is called synchronously, and a throttled step fails its
+    document, so none of them is ever capped."""
+    capped = _stack("plc", scan_reserved=50)
+    plain = _stack("plu")
+
+    def check(_: list[Any]) -> None:
+        for function in pipeline.FUNCTIONS:
+            fn = _one("aws:lambda/function:Function", f"plc-pipeline-{function}-fn")
+            assert fn.get(RESERVED) == (50 if function == "scan" else None), function
+            assert (
+                _one("aws:lambda/function:Function", f"plu-pipeline-{function}-fn").get(RESERVED)
+                is None
+            ), function
+        # What makes the cap safe: the scan function's events are kept an hour, then go to
+        # its dead-letter queue.
+        retries = _one(
+            "aws:lambda/functionEventInvokeConfig:FunctionEventInvokeConfig",
+            "plc-pipeline-scan-retries",
+        )
+        assert retries["maximumEventAgeInSeconds"] == 3600
+        assert retries["destinationConfig"]["onFailure"]["destination"]
+
+    return pulumi.Output.all(_ready(capped), _ready(plain)).apply(check)
+
+
+def test_the_two_reservations_are_set_together_and_the_tss_covers_the_scan_function() -> None:
+    from assay_infra.config import PipelineConfig, validate_pipeline
+
+    decided = PipelineConfig(scan_reserved_concurrency=50, tss_reserved_concurrency=300)
+    assert validate_pipeline(decided) is decided
+    # Neither: a stack in an account whose quota has not been raised yet.
+    assert validate_pipeline(PipelineConfig()).scan_reserved_concurrency is None
+    for scan, tss, message in (
+        (50, None, "together"),
+        (None, 300, "together"),
+        (0, 300, "scanReservedConcurrency"),
+        (50, 901, "tssReservedConcurrency"),
+        (300, 50, "at least scanReservedConcurrency"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            validate_pipeline(
+                PipelineConfig(scan_reserved_concurrency=scan, tss_reserved_concurrency=tss)
+            )
+
+
+def test_the_dev_stack_sets_the_decided_reservations() -> None:
+    """50 for the scan function and 300 for the TSS (owner, 2026-11-25), in stack config, and
+    the deployment check measures a stack that sets neither against the same two numbers."""
+    text = (REPO_ROOT / "infra" / "Pulumi.dev.yaml").read_text(encoding="utf-8")
+    assert 'assay-platform:scanReservedConcurrency: "50"' in text
+    assert 'assay-platform:tssReservedConcurrency: "300"' in text
+    script = (REPO_ROOT / "scripts" / "check_deployment.py").read_text(encoding="utf-8")
+    assert 'DECIDED = {"scan": 50, "tss": 300}' in script
 
 
 @pulumi.runtime.test

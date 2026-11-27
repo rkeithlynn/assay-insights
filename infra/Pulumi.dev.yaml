@@ -23,6 +23,7 @@ config:
   # Cognito managed login prefix domains (<prefix>.auth.us-east-1.amazoncognito.com).
   assay-platform:tenantAuthDomainPrefix: assay-dev-tenant
   assay-platform:platformAuthDomainPrefix: assay-dev-admin
+  assay-platform:tenantRefreshTokenRotation: "true"
   # The only principal that may assume the break-glass role: the owner's IAM Identity Center
   # AdministratorAccess role. Production needs a separate, approval-gated role instead.
   assay-platform:breakGlassPrincipalArn: arn:aws:iam::429100266783:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_AdministratorAccess_d20a664f5ea3111b
@@ -40,6 +41,13 @@ config:
   # The most worker tasks one tenant's documents may have running at once (1 to 50). A
   # document waits for a slot; it never fails for lack of one.
   assay-platform:workerMaxPerTenant: "5"
+  # Lambda reserved concurrency (owner decision, 2026-11-25): a cap of 50 on the scan
+  # function and a guaranteed 300 for the Tenant Storage Service. Set both or neither. They
+  # need an account that allows at least 750 concurrent executions (these two, a full
+  # batch's 200 steps and 200 for everything else); a new account allows 10, so raise the
+  # quota first: `uv run scripts/check_deployment.py --before-deploy`.
+  assay-platform:scanReservedConcurrency: "50"
+  assay-platform:tssReservedConcurrency: "300"
   # AWS WAF on CloudFront: requests allowed per IP address in any 5-minute window.
   assay-platform:wafRateLimit: "1000"
   # The portal signs a user out after this many minutes without activity in any of its tabs,

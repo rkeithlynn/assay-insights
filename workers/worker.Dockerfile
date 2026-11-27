@@ -30,14 +30,14 @@ COPY workers/pyproject.toml workers/pyproject.toml
 # The `worker` extra is PDFium: this image has it, the Lambda image does not.
 RUN uv export --locked --package assay-workers --extra worker --no-dev --no-emit-workspace \
         --no-header --format requirements-txt -o /tmp/requirements.txt \
-    && uv pip install --python /usr/local/bin/python3 --target /out \
+    && uv pip install --python /usr/local/bin/python3 --target /deps \
         --require-hashes --only-binary :all: -r /tmp/requirements.txt
-COPY db/assay_db /out/assay_db
-COPY schemas/assay_schemas /out/assay_schemas
-COPY workers/assay_workers /out/assay_workers
-RUN install -d -m 0755 /out/assay_tss
+COPY db/assay_db /code/assay_db
+COPY schemas/assay_schemas /code/assay_schemas
+COPY workers/assay_workers /code/assay_workers
+RUN install -d -m 0755 /code/assay_tss
 COPY tss/assay_tss/__init__.py tss/assay_tss/client.py tss/assay_tss/keys.py \
-     tss/assay_tss/models.py tss/assay_tss/naming.py /out/assay_tss/
+     tss/assay_tss/models.py tss/assay_tss/naming.py /code/assay_tss/
 
 # RDS CA bundle for TLS verify-full, checked against the checksum pinned in db/Dockerfile.
 FROM scratch AS rds-ca
@@ -53,7 +53,12 @@ RUN groupadd --system --gid 10002 sandbox \
 COPY --from=rds-ca --chmod=0444 /global-bundle.pem /opt/rds-ca/global-bundle.pem
 # Into the interpreter's own site-packages, not a PYTHONPATH directory: the sandbox child
 # runs in isolated mode with an empty environment, which ignores PYTHONPATH.
-COPY --from=build --chmod=a+rX,go-w /out /usr/local/lib/python3.14/site-packages
+# Two layers, in this order (owner, 2026-11-25). The dependencies change only with uv.lock;
+# the code changes with every edit. Copied as one layer, any edit pushed every dependency to
+# ECR again (26 to 53 MB an image). The files and their modes are the same as before:
+# tests/unit/test_image_layers.py holds the installed packages to what they were.
+COPY --from=build --chmod=a+rX,go-w /deps /usr/local/lib/python3.14/site-packages
+COPY --from=build --chmod=a+rX,go-w /code /usr/local/lib/python3.14/site-packages
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DB_CA_BUNDLE=/opt/rds-ca/global-bundle.pem \

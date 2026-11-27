@@ -471,6 +471,9 @@ class TenantStorage(pulumi.ComponentResource):
         # Service name -> the IAM role allowed to call `resolve` under that name, and the
         # accesses it may ask for.
         callers: Mapping[str, TssCaller],
+        # The function's reserved concurrency (stack config tssReservedConcurrency): its
+        # guaranteed share of the account's limit, and its cap. None: no reservation.
+        reserved_concurrency: int | None = None,
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -571,6 +574,10 @@ class TenantStorage(pulumi.ComponentResource):
             architectures=["x86_64"],
             memory_size=512,
             timeout=FUNCTION_TIMEOUT_SECONDS,
+            # Every pipeline function needs the TSS while it runs. On 2026-11-25 scan
+            # functions held every slot the account had, each waiting for a TSS call that
+            # could not get one. A reservation is capacity no other function can take.
+            reserved_concurrent_executions=reserved_concurrency,
             vpc_config=aws.lambda_.FunctionVpcConfigArgs(
                 subnet_ids=[network.workload_subnet.id],
                 security_group_ids=[network.workload_security_group.id],

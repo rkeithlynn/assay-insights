@@ -62,12 +62,110 @@ def clients(**by_name: Fake) -> Any:
 # --- Lambda concurrency -----------------------------------------------------------------------
 
 
-def settings(limit: int) -> Fake:
-    return Fake(get_account_settings={"AccountLimit": {"ConcurrentExecutions": limit}})
+def settings(limit: int, unreserved: int | None = None) -> Fake:
+    account = {"ConcurrentExecutions": limit, "UnreservedConcurrentExecutions": unreserved}
+    return Fake(get_account_settings={"AccountLimit": account})
 
 
-def test_the_pipeline_needs_a_full_batch_of_scans_each_with_a_tss_call(script: ModuleType) -> None:
-    assert script.CONCURRENCY_NEEDED == 1000
+def test_the_pipeline_needs_its_two_reservations_and_room_for_everything_else(
+    script: ModuleType,
+) -> None:
+    """Owner decision, 2026-11-25: 50 for the scan function, 300 for the TSS. Beside them, a
+    full batch's 200 pipeline steps and 200 for every other function stay unreserved."""
+    assert script.DECIDED == {"scan": 50, "tss": 300}
+    assert script.UNRESERVED_NEEDED == 400
+    assert script.concurrency_needed({"scan": 50, "tss": 300}) == 750
+    # A stack that sets neither is measured against the decided values.
+    assert script.concurrency_needed({"scan": None, "tss": None}) == 750
+    assert script.concurrency_needed({"scan": 100, "tss": 400}) == 900
+
+
+def test_a_limit_below_the_reservations_says_to_leave_them_unset(script: ModuleType) -> None:
+    """Staging and Production: the quota has to be raised before the settings can be set."""
+    quotas = Fake(list_requested_service_quota_change_history_by_quota={"RequestedQuotas": []})
+    enough, lines = script.concurrency_report(settings(10), quotas, {"scan": 50, "tss": 300})
+    text = "\n".join(lines)
+    assert not enough
+    assert "needs 750" in text
+    assert "unset until the quota is raised" in text
+    assert "--desired-value 1000" in text
+    enough, _ = script.concurrency_report(settings(749), quotas, {"scan": 50, "tss": 300})
+    assert not enough
+    enough, _ = script.concurrency_report(settings(750), quotas, {"scan": 50, "tss": 300})
+    assert enough
+
+
+def reserving(script: ModuleType, scan: int | None, tss: int | None, unreserved: int = 650) -> Fake:
+    held = {"assay-x-pipeline-scan": scan, "assay-x-tss": tss}
+
+    def concurrency(FunctionName: str) -> dict[str, int]:
+        value = held[FunctionName]
+        return {} if value is None else {"ReservedConcurrentExecutions": value}
+
+    account = {"ConcurrentExecutions": 1000, "UnreservedConcurrentExecutions": unreserved}
+    return Fake(
+        get_function_concurrency=concurrency, get_account_settings={"AccountLimit": account}
+    )
+
+
+FUNCTIONS = {"scan": "assay-x-pipeline-scan", "tss": "assay-x-tss"}
+
+
+def test_both_reservations_are_confirmed_against_the_stacks_settings(script: ModuleType) -> None:
+    client = reserving(script, 50, 300)
+    passed, lines = script.reservation_report(client, FUNCTIONS, {"scan": 50, "tss": 300})
+    text = "\n".join(lines)
+    assert passed
+    assert "the scan function (assay-x-pipeline-scan) reserves 50, as the stack says" in text
+    assert "the Tenant Storage Service (assay-x-tss) reserves 300, as the stack says" in text
+    assert "650 left unreserved" in text
+    asked = [kwargs["FunctionName"] for name, kwargs in client.calls if "function" in name]
+    assert asked == ["assay-x-pipeline-scan", "assay-x-tss"]
+
+
+@pytest.mark.parametrize(
+    ("scan", "tss", "wrong"),
+    [
+        (None, 300, "the scan function (assay-x-pipeline-scan) reserves nothing"),
+        (50, None, "the Tenant Storage Service (assay-x-tss) reserves nothing"),
+        (10, 300, "the scan function (assay-x-pipeline-scan) reserves 10"),
+        (50, 200, "the Tenant Storage Service (assay-x-tss) reserves 200"),
+    ],
+)
+def test_a_reservation_that_differs_from_the_stack_fails(
+    script: ModuleType, scan: int | None, tss: int | None, wrong: str
+) -> None:
+    passed, lines = script.reservation_report(
+        reserving(script, scan, tss), FUNCTIONS, {"scan": 50, "tss": 300}
+    )
+    text = "\n".join(lines)
+    assert not passed
+    assert f"FAILED: {wrong}" in text
+
+
+def test_a_reservation_the_stack_does_not_set_fails_too(script: ModuleType) -> None:
+    """Set by hand in the console: the stack would remove it at the next deploy."""
+    passed, lines = script.reservation_report(
+        reserving(script, 50, 300), FUNCTIONS, {"scan": None, "tss": None}
+    )
+    assert not passed
+    assert "the stack says nothing" in "\n".join(lines)
+
+
+def test_a_stack_that_sets_neither_passes_with_a_warning(script: ModuleType) -> None:
+    passed, lines = script.reservation_report(
+        reserving(script, None, None, unreserved=10), FUNCTIONS, {"scan": None, "tss": None}
+    )
+    text = "\n".join(lines)
+    assert passed
+    assert text.count("WARNING") == 3  # both functions, and too little left unreserved
+    assert "once the account's quota allows it" in text
+
+
+def test_the_stacks_settings_are_read_from_its_config(script: ModuleType) -> None:
+    values = {"scanReservedConcurrency": "50", "tssReservedConcurrency": "300", "other": "x"}
+    assert script.configured_reservations(values) == {"scan": 50, "tss": 300}
+    assert script.configured_reservations({"other": "x"}) == {"scan": None, "tss": None}
 
 
 def test_a_limit_that_covers_the_pipeline_passes_without_asking_about_requests(

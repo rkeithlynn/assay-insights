@@ -254,6 +254,9 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
         ],
       },
       companion_files: [
+        // Two rejected uploads (owner, 2026-11-25): their problems show in plain words and wrap.
+        { id: "00000000-0000-4000-8000-000000000a04", name: "smith-package-second-try.json", status: "invalid", error_code: "companion_invalid", errors: [{ code: "must_be_a_number", key: "LoanInterestRate" }, { code: "must_be_a_date", key: "LoanMaturityDate" }, { code: "invalid_key", key: "Underwriting Queue Assignment Reference" }], replacement: true, registered_at: "2026-11-24T15:30:00Z", applied_at: null, current: false },
+        { id: "00000000-0000-4000-8000-000000000a03", name: "smith-package-first-try.json", status: "invalid", error_code: "companion_invalid", errors: [{ code: "not_json", key: null }], replacement: true, registered_at: "2026-11-24T15:25:00Z", applied_at: null, current: false },
         { id: "00000000-0000-4000-8000-000000000a02", name: "smith-package-corrected.json", status: "clean", error_code: null, errors: [], replacement: true, registered_at: "2026-11-24T15:20:00Z", applied_at: "2026-11-24T15:21:00Z", current: true },
         { id: "00000000-0000-4000-8000-000000000a01", name: "smith-package.json", status: "clean", error_code: null, errors: [], replacement: false, registered_at: "2026-11-24T15:00:00Z", applied_at: "2026-11-24T15:03:30Z", current: false },
       ],

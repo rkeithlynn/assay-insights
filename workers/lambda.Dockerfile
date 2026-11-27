@@ -21,14 +21,14 @@ COPY tss/pyproject.toml tss/pyproject.toml
 COPY workers/pyproject.toml workers/pyproject.toml
 RUN uv export --locked --package assay-workers --no-dev --no-emit-workspace \
         --no-header --format requirements-txt -o /tmp/requirements.txt \
-    && uv pip install --python /var/lang/bin/python3 --target /out \
+    && uv pip install --python /var/lang/bin/python3 --target /deps \
         --require-hashes --only-binary :all: -r /tmp/requirements.txt
-COPY db/assay_db /out/assay_db
-COPY schemas/assay_schemas /out/assay_schemas
-COPY workers/assay_workers /out/assay_workers
-RUN install -d -m 0755 /out/assay_tss
+COPY db/assay_db /code/assay_db
+COPY schemas/assay_schemas /code/assay_schemas
+COPY workers/assay_workers /code/assay_workers
+RUN install -d -m 0755 /code/assay_tss
 COPY tss/assay_tss/__init__.py tss/assay_tss/client.py tss/assay_tss/keys.py \
-     tss/assay_tss/models.py tss/assay_tss/naming.py /out/assay_tss/
+     tss/assay_tss/models.py tss/assay_tss/naming.py /code/assay_tss/
 
 # RDS CA bundle for TLS verify-full, checked against the checksum pinned in db/Dockerfile.
 FROM scratch AS rds-ca
@@ -40,6 +40,11 @@ FROM public.ecr.aws/lambda/python:3.14@sha256:497df5d229e6d5c54279a6a48e7f597ff3
 # is created first, because COPY --chmod would give it the file's mode.
 RUN install -d -m 0755 /opt/rds-ca
 COPY --from=rds-ca --chmod=0444 /global-bundle.pem /opt/rds-ca/global-bundle.pem
-COPY --from=build --chmod=a+rX,go-w /out ${LAMBDA_TASK_ROOT}
+# Two layers, in this order (owner, 2026-11-25). The dependencies change only with uv.lock;
+# the code changes with every edit. Copied as one layer, any edit pushed every dependency to
+# ECR again (26 to 53 MB an image). The files and their modes are the same as before:
+# tests/unit/test_image_layers.py holds the installed packages to what they were.
+COPY --from=build --chmod=a+rX,go-w /deps ${LAMBDA_TASK_ROOT}
+COPY --from=build --chmod=a+rX,go-w /code ${LAMBDA_TASK_ROOT}
 ENV DB_CA_BUNDLE=/opt/rds-ca/global-bundle.pem
 CMD ["assay_workers.scan.handler"]

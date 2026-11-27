@@ -34,7 +34,7 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; increase to 1,000 requested). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). **Part 2 built** (2026-11-25, migration `0011`), not yet deployed: see "Stage 1, part 2". Refresh-token rotation is not switched on yet: the isolation run's probe decides how See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; now 1,000). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). **Part 2 deployed and verified in AWS** by the owner (2026-11-25, migration `0011`): see "Stage 1, part 2". **Built, not yet deployed** (2026-11-25): three fixes from that verification, refresh-token rotation on the tenant app client only, reserved concurrency (scan 50, TSS 300), a more reliable image build, and every image's dependencies and code as two layers. **Waiting for the owner:** the deploy, then the browser check of the tenant client's refresh before the platform client's rotation. See "Step 6, second half" |
 | 7–9 | Not started |
 
 Step 1 was verified on 2026-11-23:
@@ -271,11 +271,18 @@ Still open:
   "One scan result failed once" in the step 6 notes. Request 1,000, as for Development:
   `aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --profile <profile> --region us-east-1`,
   and wait until it is granted before the first `pulumi up`.
-  `uv run scripts/check_deployment.py --before-deploy --stack <stack>` reads the account's
-  limit and warns if it is below what the pipeline needs.
+  - **The two reserved-concurrency settings cannot be set before the quota is raised.**
+    `scanReservedConcurrency` (50) and `tssReservedConcurrency` (300) need an account that
+    allows at least 750: the two of them, and 400 unreserved. Lambda always keeps 100
+    unreserved, so in an account that allows 10 it refuses the setting and `pulumi up`
+    fails. Leave both keys out of a new stack's config until the quota is granted, then
+    set both (the program refuses one without the other) and deploy.
+  - `uv run scripts/check_deployment.py --before-deploy --stack <stack>` reads the account's
+    limit and warns if it is below what the stack's settings need.
 - **After every deploy's checks, run `uv run scripts/check_deployment.py`** (read-only): it
-  fails if a configured log destination has received nothing, and repeats the concurrency
-  warning. See the step 6 notes.
+  fails if a configured log destination has received nothing, or if the scan function's or
+  the TSS's reserved concurrency in AWS is not what the stack's config says, and repeats the
+  concurrency warning. See the step 6 notes.
 
 ### Reading audit_log
 
@@ -596,6 +603,105 @@ assets/     Logo and favicon SVGs
   provenance attestations by default, which pushes an OCI image index that Lambda
   rejects. The `pulumi-docker-build` provider cannot turn attestations off, so don't use it
   for Lambda images. Base images in Dockerfiles are pinned by digest.
+- **"`<repository>@sha256:...`: not found" during `pulumi up` was the build's own check, not
+  a missing image** (diagnosed 2026-11-25, read-only). It failed twice in 99 pushes:
+  `assay-dev-isolation-tests` on 2026-11-24 19:54 UTC and `assay-dev-pipeline-worker` on
+  2026-11-25 16:52 UTC (stack update 37).
+  - **What CloudTrail shows.** Both times ECR accepted the manifest (`PutImage`, tagged,
+    with the digest the error names; the image has been in the repository ever since). The
+    check (`docker buildx imagetools inspect`, on the host) came 37 and 38 seconds later,
+    and its request for the manifest never reached ECR: there is no `BatchGetImage` for the
+    digest, where every successful push has two. ECR saw only a
+    `BatchCheckLayerAvailability` for the manifest's digest, which is the registry client's
+    fallback (it asks for the digest as a layer), and a manifest is never a layer.
+  - **Why it read as "not found".** In the resolver buildx 0.38.1 ships, a manifest request
+    that fails to connect is ranked below a 404, and the fallback still runs; its 404 then
+    replaces the real error. The client gives a connection 30 seconds.
+  - **Why the connection failed.** Both were runs in which every image rebuilt: eight
+    builds push at once and fill the uplink for minutes (below). In those runs the check
+    waited 2 to 33 seconds when it passed; the two failures are the two longest waits. In
+    runs that upload little it answers in 0 to 2 seconds. **Not seen directly:** the
+    failed request's own error, which the script did not keep.
+  - **Ruled out:** a lifecycle rule expiring it (the rule expires the oldest images beyond
+    10 by push time; CloudTrail's `PolicyExecutionEvent`s show only old tagged images
+    going, and no repository holds an untagged manifest); a cache or attestation manifest
+    (attestations are off, no cache is exported, and the digest in the error is the pushed
+    image's own); a wrong reference.
+  - **The fix** (`scripts/build_image.py`): the pushed image is confirmed through ECR's own
+    API (`BatchGetImage` by digest, up to 7 tries over about 90 seconds), and a failure
+    says whether the request failed or ECR had no image. No registry client is used for
+    the check. And an image already in the repository under its tag is used as it is: the
+    tag is the hash of the sources and tags cannot be overwritten, so a run that failed
+    after its push costs nothing to repeat.
+  - **Why a full rebuild takes 6 to 7 minutes: it is the upload, not the build.** In update
+    37 all eight builds finished within 23 seconds (their layers were cached). Then 259 MB
+    went to ECR over about 7 minutes, roughly 5 Mbit/s. Each image's last layer holds every
+    Python dependency and the code together (`COPY --from=build /out ...`: 26 to 53 MB
+    compressed), so one changed source file uploads the dependencies of every image again.
+    **Done (owner decision, 2026-11-25): the dependencies and the code are two layers**
+    in every Dockerfile that installs locked dependencies (eight; the three Cognito
+    trigger images have none). The build stage installs the wheels to `/deps` and copies
+    the code to `/code`; the final stage copies `/deps`, then `/code`, to the same place
+    with the same modes. A code change now uploads the code layer only.
+  - **The owner's conditions: image contents and the pinned base image digests must not
+    change.** Checked once, by building every image from its Dockerfile as it was and as
+    it is, from the same sources, and comparing every file in them (path, type, mode,
+    owner, size, SHA-256), the installed packages, the image's settings (environment,
+    command, user, working directory, ports, volumes) and the `FROM` lines.
+    **Result (2026-11-25): identical in all eight.** The same packages (21 to 40 an
+    image), the same files (10,402 to 23,898 an image) with the same modes, owners, sizes
+    and hashes, the same settings and the same `FROM` lines; one more layer each. The one
+    path that differed in every image is `/etc/hostname`, which is not in an image: Docker
+    writes each container's own ID there when it starts.
+  - The code layers are small: all the code trees together are about 840 KB, 220 KB
+    compressed, against 26 to 53 MB for the old layer.
+  - **The lasting test** is `tests/unit/test_image_layers.py`. `tests/unit/image_packages.json`
+    records every distribution each image's interpreter could see **before** the split;
+    the test builds each image and fails if one is gained, lost or at another version. It
+    also holds every base image to the three pinned digests, and the two `COPY` lines to
+    their order. **After a deliberate change to `uv.lock` or a base image, run
+    `uv run scripts/image_packages.py --write`** and read what the record gained and lost
+    before committing it. A new Dockerfile that installs dependencies must be added to
+    `IMAGES` in that script.
+  - This changes every one of those Dockerfiles, so all eight images rebuild and upload
+    once more on the next `pulumi up` (the slow kind, for the last time for code changes).
+- **Line endings: files Git marks as LF must be LF on disk** (owner, 2026-11-27, after it
+  happened twice). On 2026-11-25, 18 files in the working tree had CRLF although Git stores
+  them with LF (`git ls-files --eol`: `i/lf w/crlf`): `.dockerignore`, `api/pyproject.toml`
+  and sources that go into images among them. Git shows no difference for such a file, but
+  an image is built from the bytes on disk and tagged with their hash, so the image holds
+  the CRLF copy under a tag no clean checkout produces.
+  - **Git did not write them, and `core.autocrlf` is not the cause.** It is `true` on the
+    owner's machine (Git for Windows' system default), but a file marked `eol=lf` is
+    checked out with LF whatever it says: a fresh clone under that setting had no such
+    file with CRLF (2026-11-27). All 18 were last saved one at a time, most on 2026-11-24
+    between 12:42 and 15:23, so an editor or a tool saved them with the platform's line
+    endings. Which one is not known. Two known ways: VS Code creates new files with CRLF
+    on Windows (`files.eol` is `auto`), and Python's `Path.write_text()` writes CRLF on
+    Windows unless it is given `newline="\n"`. **Scripted edits must pass `newline="\n"`.**
+  - What `core.autocrlf=true` does do: every file that is only `text=auto` (the portal's
+    `.ts` and `.tsx`, `.json`, `.svg`, 74 files) is checked out with CRLF. That is
+    harmless to Git; the portal build's hash and the branding SVGs then depend on the
+    machine. **Not changed:** making them LF would change the bytes of the SVGs Cognito's
+    branding is built from, which is a change to deploy on purpose.
+  - **Prevention, four layers.**
+    1. `uv run scripts/check_line_endings.py` lists the files (`--fix` rewrites them with
+       LF; line endings only, and Git sees no change). `tests/unit/test_line_endings.py`
+       runs it, so `uv run pytest` fails on the development machine, where the problem
+       arises.
+    2. CI runs the same script. A Linux checkout has no CRLF, so there it can only catch
+       CRLF that was committed.
+    3. `assay_infra.images.source_tag` refuses an image source with CRLF, so `pulumi
+       preview` and `pulumi up` stop before an image is built from one.
+    4. `.editorconfig` sets LF for exactly the patterns `.gitattributes` marks (a test keeps
+       the two lists in step). VS Code needs the EditorConfig extension for it
+       (`.vscode/extensions.json` recommends it); without the extension, set
+       `"files.eol": "\n"` in VS Code's user settings.
+  - `*.md` is now marked `eol=lf` too: `tests/isolation/README.md` goes into the isolation
+    image, and was the one image source Git could check out with CRLF. A test fails if
+    anything that goes into an image is not marked.
+  - After `--fix`, `git status` lists the rewritten files as modified until they are
+    staged once, although `git diff` shows nothing: Git's cached file sizes are stale.
 - **ECR login on Windows.** An ECR token (about 3,100 characters) is too long for the
   Windows Credential Manager ("The stub received bad data"). `scripts/build_image.py`
   logs in, builds and pushes with `DOCKER_CONFIG` pointing at a temporary directory that
@@ -1926,10 +2032,52 @@ isolation run has not been repeated on it yet):
   quota to 1,000** on 2026-11-25 12:36 UTC (request `7902077dd06644889e37c4c5dde4b612UGimylpJ`,
   `PENDING` when made; the usual default):
   `aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --profile pilar-dev --region us-east-1`.
-  Once it is granted, propose the scan function's concurrency cap and the TSS's reserved
-  concurrency to the owner, with the reasoning for the numbers. **Set neither before then**
-  (owner, 2026-11-25). Staging and Production need the same request before their first
-  deploy (see "Before deploying to Staging or Production").
+  **Granted: the account allows 1,000** (owner, `get-account-settings`, 2026-11-25).
+  Staging and Production need the same request before their first deploy (see "Before
+  deploying to Staging or Production").
+  - **Reserved concurrency: 50 for the scan function, 300 for the TSS** (owner decision,
+    2026-11-25; built, in the next deploy). Stack config `scanReservedConcurrency` and
+    `tssReservedConcurrency`, both or neither, the TSS's at least the scan function's
+    (`config.validate_pipeline`). Reserved concurrency is both a cap and a guarantee, at
+    no charge; 650 of the account's 1,000 stay unreserved.
+    - **Why the scan function is capped.** It is the only function driven by outside
+      arrivals (every uploaded file's scan result), each run holds a database connection
+      and makes a TSS call, and it is the only one whose overflow is safe. At the measured
+      3.9 seconds a result, 50 at once is about 13 results a second: a full batch of 400
+      files is about 30 seconds of work.
+    - **Why the TSS has a reservation.** Every pipeline function needs it while it runs. On
+      2026-11-25 scan functions held every slot the account had, each waiting for a TSS
+      call that could not get one. A reservation is capacity nothing else can take. 300 and
+      not 200: a cold TSS call can take 14 seconds, so one full batch's 200 fingerprint
+      steps starting together can hold 200 TSS instances at once, beside the scan
+      function's 50. The TSS client's retry (five tries over 20 seconds) absorbs a brief
+      overflow.
+    - **What happens over the scan function's cap.** The result waits in Lambda's
+      asynchronous queue and is retried with backoff, from 1 second up to 5 minutes, for the
+      function's event age (1 hour here), then goes to the scan dead-letter queue, whose
+      depth raises an alarm (AWS's page on asynchronous invocation, read 2026-11-25; it
+      does not say whether those retries count against the function's two attempts). The
+      30-minute `scan_timeout` is the limit that matters: a result that waits longer finds
+      its file already on hold, and the document stays on hold.
+    - **No other function is capped, on purpose.** Their callers are synchronous: a
+      throttled pipeline step fails its document (`fingerprint_failed ·
+      Lambda.TooManyRequestsException`, the throttle test), and a Cognito trigger has 5
+      seconds. `test_only_the_scan_function_is_capped_and_only_when_the_stack_says_so`.
+  - **Measured** (CloudWatch, three days to 2026-11-25; small numbers, mostly cold starts):
+    the scan function ran 43 times, 3.9 seconds on average and 8.7 at the 99th percentile,
+    9 at once at most; the TSS 265 times, 0.9 seconds on average on the last day, 14
+    seconds at the 99th percentile (a cold start, or Aurora resuming from 0 ACU), 7 at
+    once at most. The account's peak was 20, during the 13 documents processed again
+    together. The steps function's 8 throttles are all from the deliberate throttle test.
+    **Measure again once real batches have run**, and change the two numbers in stack
+    config if the peaks say so.
+  - **`check_deployment.py` confirms both settings.** It reads each function's reserved
+    concurrency from Lambda and fails if it differs from the stack's config (also if one
+    was set by hand that the stack does not set). A stack that sets neither passes with a
+    warning. The account's limit must cover `concurrency_needed`: the two reservations
+    and 400 unreserved (a full batch's 200 pipeline steps and 200 for everything else);
+    750 for Development. **Staging and Production: raise the quota first** (see "Before
+    deploying to Staging or Production"); until then leave both keys unset.
 - **The TSS API's access log received nothing until its role's trust policy was changed**
   (found on the way; investigated read-only on 2026-11-25). **Cause proven the same day:
   API Gateway sends no source account when it assumes the logging role to write a log
@@ -2000,10 +2148,12 @@ isolation run has not been repeated on it yet):
 - **`uv run scripts/check_deployment.py`** (owner's request, 2026-11-25; read-only). For
   every resource with the stack's tags it reads where the logs are configured to go, from
   the resource itself, and fails if a destination has received nothing. It also warns if the
-  account's Lambda concurrency limit is below what the pipeline needs (1,000: a full batch
-  is 200 PDFs and 200 companion files, each file's scan result runs the scan function and
-  the TSS's function together, plus 200 for everything else; **revisit
-  `CONCURRENCY_NEEDED` when the concurrency caps are decided**).
+  account's Lambda concurrency limit is below what the stack needs, and (since the caps
+  were decided, 2026-11-25) fails if the scan function's or the TSS's reserved concurrency
+  is not what the stack's config says: see "Reserved concurrency" above. With the caps the
+  need is 750 for Development (50, 300 and 400 unreserved), where it was 1,000 without.
+  - Run before the deploy that sets the reservations (2026-11-25), it failed on both, as
+    it should: each function reserved nothing and the stack says 50 and 300.
   - First run (2026-11-25): 25 log destinations; 23 receiving; the TSS API's access log
     `EMPTY` (fails); the break-glass log `not proven`.
   - **The break-glass log is empty because the role has never been assumed** (the rule's
@@ -2065,8 +2215,91 @@ Notes:
 
 #### Stage 1, part 2: attempts and "Process again", step 9, companion replacement, the quarantine notice, "Mark as reviewed"
 
-Built on 2026-11-25 (owner's go-ahead once the access log was settled). **Not yet deployed.**
+Built on 2026-11-25 (owner's go-ahead once the access log was settled). **Deployed the same
+day** from commit ae46223: stack update 37 failed after creating 6 resources (its error was
+not kept here; CloudTrail shows no refused AWS call for it), and update 38 finished the rest.
+`uv run scripts/migrate.py --command verify` (read-only): revision `0011`,
+`rls_verified: true`, `roles_verified: true`. The security-notice address is confirmed.
+The owner's isolation run after the deploy: 71 of 71, 28 of 28, 68 of 68, 7 of 7.
 No content goes to any AI service in this part.
+
+**The rotation probe's result** (same run; replica pool, rotation on with a 10-second grace
+period). It settles decision 4 below; the real clients are unchanged until the owner decides:
+
+| Candidate | What Cognito stored | Programmatic sign-in |
+| --- | --- | --- |
+| No explicit flows | `[]`, rotation `ENABLED` | **`USER_SRP_AUTH` allowed** (it answered with the `PASSWORD_VERIFIER` challenge). Password, custom and `USER_AUTH` refused |
+| `ALLOW_CUSTOM_AUTH` only | `['ALLOW_CUSTOM_AUTH']`, rotation `ENABLED` | **All four refused.** Custom auth: "Custom auth lambda trigger is not configured for the user pool" |
+| The refresh flow kept | Refused: "ALLOW_REFRESH_TOKEN_AUTH is not a permitted ExplicitAuthFlow when refresh token rotation is enabled" | - |
+
+- **An empty flow list is not "no flows".** Cognito stores `[]` and still lets anyone start
+  an SRP sign-in against the client, outside managed login. Never give a portal client an
+  empty list.
+- **`ALLOW_CUSTOM_AUTH` alone leaves no programmatic sign-in**, but only while the pool has
+  no custom-auth triggers (`DefineAuthChallenge`, `CreateAuthChallenge`,
+  `VerifyAuthChallengeResponse`). Neither pool has one (read 2026-11-25: the tenant pool
+  has post-confirmation, post-authentication and pre-token-generation; the platform pool
+  the first two). A rule that goes with this setting: those three triggers are never added
+  to a pool whose client lists `ALLOW_CUSTOM_AUTH`.
+- Both real clients today: `['ALLOW_REFRESH_TOKEN_AUTH']`, no rotation.
+- **Not shown by the probe** (the replica has no managed login domain): that managed login
+  still signs a user in when the client's only flow is `ALLOW_CUSTOM_AUTH`, and that the
+  portal's refresh through `/oauth2/token` returns a new refresh token. Today's clients
+  list only the refresh flow and managed login works, which suggests it does not depend on
+  the list; the first real client to change shows it.
+
+**Rotation: the owner's decision (2026-11-25) and the rollout.** `ALLOW_CUSTOM_AUTH` as a
+client's only explicit flow, rotation on, a 10-second grace period. An empty list is
+rejected because it allows `USER_SRP_AUTH`. Two steps:
+
+1. **The tenant app client only** (built 2026-11-25; stack config
+   `tenantRefreshTokenRotation: "true"`). Not yet deployed.
+2. **The platform client** (`platformRefreshTokenRotation: "true"`), after the owner has
+   confirmed in a browser that tenant sign-in, background token refresh and sign-out still
+   work.
+
+How it is built:
+
+- **A switch per client in stack config**, read into `AuthConfig`: `"true"` (rotation on,
+  `ALLOW_CUSTOM_AUTH` only), `"false"` (rotation sent as `DISABLED` and the refresh flow
+  restored: the way back), or unset (the client is not mentioned, exactly as before; the
+  platform client today). `auth.explicit_auth_flows` never returns an empty list.
+- **Rule: no pool may ever have a custom-auth trigger** (`DefineAuthChallenge`,
+  `CreateAuthChallenge`, `VerifyAuthChallengeResponse`). That is what keeps
+  `ALLOW_CUSTOM_AUTH` from being a sign-in. Held by `test_no_pool_has_a_custom_auth_trigger`,
+  by a test that the three arguments appear nowhere in `auth.py` but the forbidden list,
+  and by the isolation run on the deployed pools.
+- **The isolation run** (`tests/isolation/cognito_clients.py`, which replaced the probe)
+  now checks, against Cognito: each deployed client's flows and rotation are what the stack
+  says (stack outputs `tenant_refresh_token_rotation`, `platform_refresh_token_rotation`);
+  neither pool has a custom-auth trigger; each deployed client refuses all four programmatic
+  sign-ins as "flow not enabled", asked for a user that does not exist (nobody is signed
+  in, no trigger runs); on the replica, a refresh returns a new refresh token, the old one
+  stops working after the grace period and `REFRESH_TOKEN_AUTH` is refused; and the way
+  back is rehearsed on the replica (rotation on, then in one update rotation off with the
+  refresh flow restored). `test_cognito_client_checks.py` shows these checks fail when what
+  they guard is broken.
+- **Preview for step 1 (2026-11-25):** 2 to update (the tenant app client: its flow
+  `ALLOW_REFRESH_TOKEN_AUTH` becomes `ALLOW_CUSTOM_AUTH`, and `refreshTokenRotation`
+  `ENABLED`, 10 seconds; the isolation function, for its rebuilt image), 1 to replace (that
+  image's build), 360 unchanged. The platform client is not touched.
+- **Rolling back** (if sign-in breaks): set `tenantRefreshTokenRotation: "false"` in
+  `infra/Pulumi.dev.yaml` and run `pulumi up`. Only the app client changes, so it takes
+  about a minute. Sessions already open keep their tokens.
+- **Known effects of rotation:** a duplicated or restored tab shares its original's refresh
+  token, and whichever refreshes second, more than 10 seconds after the first, is sent to
+  sign-in. Sessions still end 8 hours after the sign-in. The portal's own refresh goes
+  through `/oauth2/token`, which works with rotation on; nothing in the portal changes.
+- **Checking the refresh in a browser** (owner, after step 1's deploy). The portal refreshes
+  by itself about a minute before the access token's 60 minutes are up. To see one at
+  once: sign in to the tenant portal, open the developer tools, and in Application,
+  Session Storage, edit the `oidc.user:...` entry's `expires_at` to `1`; then reload the
+  tab with the Network panel open. The portal finds the token expired and refreshes
+  (`Root.tsx`). What shows it works: a `POST .../oauth2/token` with
+  `grant_type=refresh_token` answers 200 and its response has a `refresh_token` (without
+  rotation it has none); the entry's `refresh_token` is now a different value; the portal
+  stays signed in. Do it twice: the second refresh uses the new token. Then sign out and
+  check that the next sign-in asks for the password.
 
 What it does:
 
@@ -2199,13 +2432,92 @@ steps, starter and sweeper role policies show as updated only because their text
 from the topic's ARN, which is unknown until the topic exists; their content is unchanged
 (tested: only the scan function's policy has the two new statements).
 
-Not yet tested in AWS (everything in this part). In particular:
+**Verified in AWS by the owner on 2026-11-25** (Infinity Loans):
 
-- that a real scan event carries `threats[0].name` (the part 2 EICAR run in CloudShell
-  shows it: the notice and the `security` row should name "EICAR-Test-File (not a virus)");
-- the notice's delivery through the new endpoint and topic;
-- a second execution of one document (`{document_id}-2`);
-- what Cognito does with rotation on (the probe).
+- "Process again", one document and 13 selected at once (so a second execution of one
+  document, `{document_id}-2`, works);
+- a companion replacement taking effect;
+- rejected replacements (a file that is not JSON, and one with a field error) leaving the
+  document unchanged;
+- an EICAR quarantine with its security notice: the threat name is in the real scan event,
+  and the notice has no file name and no content;
+- audit rows for all of them; idle-timeout sign-outs and audited ingestion exports too.
+
+**Preview for everything built on 2026-11-25** (the three fixes, rotation step 1, the
+reserved concurrency, the build change and the two-layer images): **13 to update, 12 to
+replace, 338 unchanged**, and two new outputs.
+
+- Update: the tenant app client (`ALLOW_CUSTOM_AUTH`, rotation `ENABLED`, 10 seconds);
+  `assay-dev-pipeline-scan` (`reservedConcurrentExecutions` -1 to 50, and its image);
+  `assay-dev-tss` (-1 to 300, and its image); seven more functions for their images
+  (`pipeline-steps`, `-starter`, `-sweeper`, `db-migrate`, `auth-events-consumer`, `seed`,
+  `isolation-tests`); the API service; the pipeline and provisioning state machines (each
+  definition names a task definition that is replaced).
+- Replace: eight image builds (every image that installs dependencies: `api`, `ops`,
+  `db-migrate`, `tss`, `provision`, `pipeline`, `pipeline-worker`, `isolation-tests`); the
+  API, worker and provisioning task definitions; the portal build.
+- No role, policy, endpoint, queue, topic or database change, and no migration. The
+  platform app client and the three Cognito trigger images are untouched.
+- Deploy order: `pulumi up`; `uv run scripts/run_isolation.py ...`; browser checks (the
+  tenant client's refresh among them); `uv run scripts/check_deployment.py`, which must
+  now show both reservations as the stack says.
+
+Three things the owner found, fixed the same day (built, **not yet deployed**; no migration,
+no grant, no permission change):
+
+1. **A replacement that did not take effect left only its request in the audit trail.** Now
+   every `companion_replace_requested` row is followed by exactly one row that says how it
+   ended (`companion_data.audit_not_applied` and `ending_action`; category `document`, the
+   uploading user as the actor, `reported_by: pipeline`), written in the transaction that
+   records the ending:
+   - `companion_replaced` or `companion_attached`: it took effect;
+   - **`companion_replace_rejected`: only when the file was checked and refused** (owner,
+     2026-11-25). File status `invalid` (`companion_invalid`), `infected`
+     (`threats_found`; it also has its `file_quarantined` row, category `security`) or
+     `mismatch` (what was stored is not what was registered: `size_mismatch`,
+     `checksum_mismatch`, `version_missing`);
+   - **`companion_replace_expired`: the file never arrived or was never scanned**, with the
+     reason for which: `not_uploaded`, `scan_timeout` (both from the sweeper), or
+     GuardDuty's own "could not scan" results (`scan_unsupported`, `scan_failed`,
+     `scan_access_denied`; from the scan function).
+   - Two placements the owner confirmed on 2026-11-27: `mismatch` is rejected (it was
+     checked against its registration and refused), and GuardDuty's "could not scan" is
+     expired (it was never scanned).
+   - **The row holds codes and IDs only**: `reason`, `problems` (each problem's
+     `error_code`, and its `key` only if it is one of the format's reserved keys, in lower
+     case), `file` and `kept` (file IDs and inbox versions). **A custom key is never
+     named**: it is the tenant's own wording, and master roles read audit rows
+     (`assay_schemas.companion.audit_problems`). No file name and no value.
+   - **Never name a detail key `code`**: Audit history redacts any key ending in `code`
+     except `error_code`, `status_code` and `country_code` (`audit_read.is_secret_key`). The
+     test checks that `redact()` leaves this row as written.
+   - A new file status must be given one of the two actions:
+     `test_only_a_file_that_was_checked_and_refused_is_rejected` fails until it is.
+2. **"Companion file uploads" showed stored codes** (`not_json`,
+   `LoanInterestRate: must_be_a_number`). It now uses the Upload screen's wording
+   (`companionErrorLines`, moved to `ingestionFormat.ts` so both screens share it; a code
+   with no wording has its underscores replaced, never shown raw). The rendered check has
+   a screen for it (`tenant-admin-ingestion-companion-uploads`: the panel scrolled to the
+   table, with two rejected uploads in the fixtures), which fails if a stored code shows.
+3. **Duration was measured from the upload, also for a document processed again**
+   (`06-not-a-pdf.pdf`: 55,492 seconds). **One definition now, everywhere** (owner decision,
+   2026-11-25, the one that needs no grant): from the document's latest `queued` event to
+   `completed_at` (`ingestion_read._started`).
+   - That event is written when a document becomes eligible for the pipeline (its batch
+     closed, its files scanned clean) and again by every "Process again", so the latest
+     one is where the current attempt began.
+   - **A first attempt's duration therefore leaves out the upload, the scan and the time
+     its batch stayed open.** Durations of documents already in the history get shorter by
+     that much.
+   - A document that was never queued (held at its scan, quarantined, failed before the
+     pipeline) is timed from `received_at`.
+   - The tenant view, the master view, both CSV exports and both Duration sorts use it.
+     The master view reads the events through `platform.ingestion_events_v`, which
+     `platform_reader` could already read: no migration, no grant.
+   - `test_every_view_and_both_csv_exports_show_the_same_duration` reads the number in
+     seven places (the tenant table, panel and CSV; the master table and CSV, for both
+     master roles) and fails, naming them, if any two differ.
+   - The tenant panel's label says which attempt ("Duration (attempt 2)").
 
 Portal (owner, 2026-11-25, before the deploy):
 

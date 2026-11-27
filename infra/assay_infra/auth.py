@@ -147,6 +147,42 @@ def trigger_role_policy(*, log_group: str, user_pool: str) -> str:
 # --- Components -------------------------------------------------------------------------
 
 
+# Refresh-token rotation (owner decision, 2026-11-25, after the isolation run's probe).
+# With rotation on, every refresh returns a new refresh token and the old one stops working
+# after this grace period, which allows for a retried request.
+ROTATION_GRACE_SECONDS = 10
+# Cognito refuses rotation on a client that lists ALLOW_REFRESH_TOKEN_AUTH, and a client
+# with an empty list still accepts an SRP sign-in (the probe showed both). ALLOW_CUSTOM_AUTH
+# as the only flow leaves no programmatic sign-in at all, because custom auth cannot start
+# without the three triggers below. So: no pool here may ever have one of them
+# (`test_no_pool_has_a_custom_auth_trigger`, and the isolation run checks the deployed pools).
+ROTATED_FLOWS = ("ALLOW_CUSTOM_AUTH",)
+UNROTATED_FLOWS = ("ALLOW_REFRESH_TOKEN_AUTH",)
+CUSTOM_AUTH_TRIGGERS = (
+    "define_auth_challenge",
+    "create_auth_challenge",
+    "verify_auth_challenge_response",
+)
+
+
+def explicit_auth_flows(rotation: bool | None) -> list[str]:
+    """The app client's explicit flows. Never empty: an empty list allows an SRP sign-in."""
+    return list(ROTATED_FLOWS if rotation else UNROTATED_FLOWS)
+
+
+def refresh_token_rotation(
+    rotation: bool | None,
+) -> aws.cognito.UserPoolClientRefreshTokenRotationArgs | None:
+    """On, explicitly off (the way back), or not mentioned at all (None: as before)."""
+    if rotation is None:
+        return None
+    if rotation:
+        return aws.cognito.UserPoolClientRefreshTokenRotationArgs(
+            feature="ENABLED", retry_grace_period_seconds=ROTATION_GRACE_SECONDS
+        )
+    return aws.cognito.UserPoolClientRefreshTokenRotationArgs(feature="DISABLED")
+
+
 @dataclass(frozen=True)
 class PoolSpec:
     kind: str  # "tenant" or "platform"
@@ -155,6 +191,8 @@ class PoolSpec:
     host: str
     domain_prefix: str
     tenant_attribute: bool
+    # See AuthConfig: True, False (explicitly off) or None (never set).
+    refresh_rotation: bool | None = None
 
 
 class UserPool(pulumi.ComponentResource):
@@ -279,7 +317,8 @@ class UserPool(pulumi.ComponentResource):
             supported_identity_providers=["COGNITO"],
             callback_urls=[f"https://{spec.host}{CALLBACK_PATH}"],
             logout_urls=[f"https://{spec.host}{SIGNED_OUT_PATH}"],
-            explicit_auth_flows=["ALLOW_REFRESH_TOKEN_AUTH"],
+            explicit_auth_flows=explicit_auth_flows(spec.refresh_rotation),
+            refresh_token_rotation=refresh_token_rotation(spec.refresh_rotation),
             access_token_validity=ACCESS_TOKEN_MINUTES,
             id_token_validity=ID_TOKEN_MINUTES,
             refresh_token_validity=REFRESH_TOKEN_HOURS,
@@ -444,6 +483,7 @@ class Auth(pulumi.ComponentResource):
                 host=dns.tenant_host,
                 domain_prefix=cfg.tenant_domain_prefix,
                 tenant_attribute=True,
+                refresh_rotation=cfg.tenant_refresh_rotation,
             ),
             repo_root=repo_root,
             auth_event_lambda_arn=auth_event_lambda_arn,
@@ -460,6 +500,7 @@ class Auth(pulumi.ComponentResource):
                 host=dns.admin_host,
                 domain_prefix=cfg.platform_domain_prefix,
                 tenant_attribute=False,
+                refresh_rotation=cfg.platform_refresh_rotation,
             ),
             repo_root=repo_root,
             auth_event_lambda_arn=auth_event_lambda_arn,

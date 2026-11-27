@@ -869,6 +869,11 @@ class Pipeline(pulumi.ComponentResource):
         notices_key_arn: pulumi.Input[str],
         # The cap on one tenant's concurrent worker tasks (stack config workerMaxPerTenant).
         worker_max_per_tenant: int = 5,
+        # The scan function's reserved concurrency (stack config scanReservedConcurrency):
+        # the most scan results handled at once. None: no reservation. No other function
+        # here gets one: their callers are synchronous, and a throttled step fails its
+        # document (the throttle test of 2026-11-24).
+        scan_reserved_concurrency: int | None = None,
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -990,6 +995,12 @@ class Pipeline(pulumi.ComponentResource):
                 memory_size=spec.memory,
                 timeout=spec.timeout,
                 ephemeral_storage=aws.lambda_.FunctionEphemeralStorageArgs(size=spec.ephemeral),
+                # Results over the cap wait in Lambda's asynchronous queue, are retried with
+                # backoff for the event age below (an hour), then go to the scan dead-letter
+                # queue, whose depth raises an alarm.
+                reserved_concurrent_executions=(
+                    scan_reserved_concurrency if function == "scan" else None
+                ),
                 vpc_config=aws.lambda_.FunctionVpcConfigArgs(
                     subnet_ids=[network.workload_subnet.id],
                     security_group_ids=[network.workload_security_group.id],

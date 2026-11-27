@@ -343,11 +343,13 @@ def run_worker_probe(
 
 
 def run_cognito_clients(session: boto3.Session, stack: str) -> bool:
-    print("\nChecking the portal app clients' writable attributes ...", flush=True)
-    probe: list[str] = []
+    print("\nChecking the portal app clients against Cognito ...", flush=True)
     checks = cognito_clients.run(
         session,
-        probe=probe,
+        rotated={
+            kind: pulumi("stack", "output", f"{kind}_refresh_token_rotation", stack=stack) == "true"
+            for kind in ("tenant", "platform")
+        },
         tenant=(
             pulumi("stack", "output", "tenant_user_pool_id", stack=stack),
             pulumi("stack", "output", "tenant_app_client_id", stack=stack),
@@ -363,11 +365,6 @@ def run_cognito_clients(session: boto3.Session, stack: str) -> bool:
         print(f"{mark}  {check.check} (expected {check.expected}, was {check.outcome})")
     failed = [c for c in checks if not c.ok]
     print(f"\n{len(checks) - len(failed)} passed, {len(failed)} failed")
-    if probe:
-        # For the owner's decision, before rotation is switched on for the real clients.
-        print("\nRefresh-token rotation probe (replica pool; not pass or fail):")
-        for line in probe:
-            print(f"  {line}")
     return bool(checks) and not failed
 
 

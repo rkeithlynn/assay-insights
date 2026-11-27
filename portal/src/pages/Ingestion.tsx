@@ -49,7 +49,9 @@ import {
   anyInProgress,
   canReprocess,
   COMPANION_REPLACEABLE,
+  companionErrorLines,
   companionFileText,
+  type CompanionProblem,
   DOCUMENT_STATUS,
   reprocessSummary,
   errorCodeText,
@@ -101,6 +103,20 @@ export const RELATIVE_OPTIONS: DateRangePickerProps.RelativeOption[] = [
 export const i18n: DateRangePickerProps.I18nStrings = {
   formatRelativeRange: (range) => (range.key === "today" ? "Today" : `Last ${range.amount} days`),
 };
+
+/** A companion upload's problems, one line each, in the words the Upload screen uses. */
+export function CompanionProblems({ errors }: { errors: CompanionProblem[] }) {
+  if (errors.length === 0) return <>-</>;
+  return (
+    <>
+      {companionErrorLines(errors).map((line, i) => (
+        <div key={i} style={WRAP_WORDS}>
+          {line}
+        </div>
+      ))}
+    </>
+  );
+}
 
 export function StatusCell({ status, error }: { status: DocumentStatus; error?: string | null }) {
   const s = DOCUMENT_STATUS[status];
@@ -502,7 +518,8 @@ function DocumentPanel({
                 { label: "Pages", value: detail.page_count ?? "-" },
                 { label: "Size", value: formatBytes(detail.size_bytes) },
                 { label: "Companion file", value: detail.has_companion ? "Yes" : "No" },
-                { label: "Duration", value: formatDuration(detail.duration_seconds) },
+                // The current attempt's: a document processed again is timed from then.
+                { label: detail.attempt > 1 ? `Duration (attempt ${detail.attempt})` : "Duration", value: formatDuration(detail.duration_seconds) },
               ]}
             />
             <SpaceBetween direction="horizontal" size="xs">
@@ -555,7 +572,8 @@ function DocumentPanel({
                   {
                     id: "problems",
                     header: "Problems",
-                    cell: (f) => (f.errors.length ? f.errors.map((e) => (e.key ? `${e.key}: ${e.code}` : e.code)).join("; ") : "-"),
+                    // Plain words, as on the Upload screen; never the stored codes.
+                    cell: (f) => <CompanionProblems errors={f.errors} />,
                   },
                   {
                     id: "uploaded",

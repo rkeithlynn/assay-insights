@@ -11,6 +11,7 @@ import pulumi
 import pulumi_aws as aws
 import pytest
 
+from assay_infra import auth as auth_module
 from assay_infra.api import (
     TASK_VARIABLES,
     ApiService,
@@ -170,6 +171,110 @@ def test_platform_pool_requires_mfa_and_has_no_tenant_attribute() -> Any:
         assert groups == ["master-admin", "master-user"]
 
     return _after_everything(auth, api).apply(check)
+
+
+def _auth_only(prefix: str, cfg: AuthConfig) -> Auth:
+    return Auth(
+        f"{prefix}-auth",
+        cfg=cfg,
+        dns=DNS,
+        region=REGION,
+        account_id=ACCOUNT_ID,
+        repo_root=REPO_ROOT,
+        auth_event_lambda_arn=AUTH_EVENT_TRIGGER,
+        jwks_fetcher=lambda region, pool_id: FAKE_JWKS,
+    )
+
+
+def _clients_ready(auth: Auth) -> pulumi.Output[list[Any]]:
+    return pulumi.Output.all(
+        auth.tenant.client.id, auth.platform.client.id, auth.tenant.pool.id, auth.platform.pool.id
+    )
+
+
+@pulumi.runtime.test
+def test_rotation_is_switched_on_per_client_with_custom_auth_as_its_only_flow() -> Any:
+    """Owner decision, 2026-11-25, step 1: the tenant client only. Rotation on means the
+    refresh flow is gone (Cognito refuses both together) and ALLOW_CUSTOM_AUTH is the only
+    flow: an empty list would still accept an SRP sign-in."""
+    auth = _auth_only("r1", AuthConfig("t-login", "p-login", tenant_refresh_rotation=True))
+
+    def check(_: list[Any]) -> None:
+        tenant = _one("aws:cognito/userPoolClient:UserPoolClient", "r1-auth-tenant-client")
+        assert tenant["explicitAuthFlows"] == ["ALLOW_CUSTOM_AUTH"]
+        assert tenant["refreshTokenRotation"] == {
+            "feature": "ENABLED",
+            "retryGracePeriodSeconds": 10,
+        }
+        # The platform client is not mentioned at all: exactly as it was.
+        platform = _one("aws:cognito/userPoolClient:UserPoolClient", "r1-auth-platform-client")
+        assert platform["explicitAuthFlows"] == ["ALLOW_REFRESH_TOKEN_AUTH"]
+        assert platform.get("refreshTokenRotation") is None
+        # Sessions still end 8 hours after the sign-in, and tokens can still be revoked.
+        assert (tenant["refreshTokenValidity"], tenant["enableTokenRevocation"]) == (8, True)
+
+    return _clients_ready(auth).apply(check)
+
+
+@pulumi.runtime.test
+def test_the_way_back_switches_rotation_off_explicitly_and_restores_the_refresh_flow() -> Any:
+    """`tenantRefreshTokenRotation: "false"`: rotation is sent as DISABLED, not left out, so
+    Cognito is never asked for the refresh flow while it still has rotation on."""
+    auth = _auth_only("r2", AuthConfig("t-login", "p-login", tenant_refresh_rotation=False))
+
+    def check(_: list[Any]) -> None:
+        tenant = _one("aws:cognito/userPoolClient:UserPoolClient", "r2-auth-tenant-client")
+        assert tenant["explicitAuthFlows"] == ["ALLOW_REFRESH_TOKEN_AUTH"]
+        assert tenant["refreshTokenRotation"] == {"feature": "DISABLED"}
+
+    return _clients_ready(auth).apply(check)
+
+
+def test_a_client_never_has_an_empty_flow_list() -> None:
+    """The isolation run's probe (2026-11-25): Cognito stores an empty list and still accepts
+    an SRP sign-in against the client."""
+    for rotation in (True, False, None):
+        assert auth_module.explicit_auth_flows(rotation)
+    assert auth_module.explicit_auth_flows(True) == ["ALLOW_CUSTOM_AUTH"]
+    assert auth_module.explicit_auth_flows(False) == ["ALLOW_REFRESH_TOKEN_AUTH"]
+    assert auth_module.explicit_auth_flows(None) == ["ALLOW_REFRESH_TOKEN_AUTH"]
+    assert auth_module.refresh_token_rotation(None) is None
+
+
+@pulumi.runtime.test
+def test_no_pool_has_a_custom_auth_trigger() -> Any:
+    """What keeps ALLOW_CUSTOM_AUTH safe: custom auth cannot start in a pool that has no
+    define, create or verify auth-challenge trigger. Neither pool may ever get one."""
+    auth = _auth_only(
+        "r3",
+        AuthConfig(
+            "t-login", "p-login", tenant_refresh_rotation=True, platform_refresh_rotation=True
+        ),
+    )
+    forbidden = {"defineAuthChallenge", "createAuthChallenge", "verifyAuthChallengeResponse"}
+
+    def check(_: list[Any]) -> None:
+        pools = registered("aws:cognito/userPool:UserPool", "r3-")
+        assert len(pools) == 2
+        for name, pool in pools:
+            triggers = set(pool.get("lambdaConfig") or {})
+            assert not (triggers & forbidden), name
+        # The names in the program are the same three, in the provider's spelling.
+        assert {
+            "".join(part.title() if i else part for i, part in enumerate(name.split("_")))
+            for name in auth_module.CUSTOM_AUTH_TRIGGERS
+        } == forbidden
+
+    return _clients_ready(auth).apply(check)
+
+
+def test_the_user_pool_code_never_names_a_custom_auth_trigger_argument() -> None:
+    """The same rule, read from the source: the three trigger arguments appear only in the
+    list of what is forbidden."""
+    source = (REPO_ROOT / "infra/assay_infra/auth.py").read_text(encoding="utf-8")
+    for name in auth_module.CUSTOM_AUTH_TRIGGERS:
+        assert source.count(name) == 1, name
+        assert f"{name}=" not in source
 
 
 @pulumi.runtime.test

@@ -160,6 +160,7 @@ storage = TenantStorage(
     break_glass_principal_arn=config.tenancy.break_glass_principal_arn,
     alarm_topic_arn=alerts.topic.arn,
     callers=tss_callers,
+    reserved_concurrency=config.pipeline.tss_reserved_concurrency,
     aws_profile=aws_profile,
 )
 
@@ -222,6 +223,7 @@ pipeline = Pipeline(
     security_topic_arn=security_notices.topic.arn,
     notices_key_arn=alerts.key.arn,
     worker_max_per_tenant=config.pipeline.worker_max_per_tenant,
+    scan_reserved_concurrency=config.pipeline.scan_reserved_concurrency,
     aws_profile=aws_profile,
 )
 
@@ -348,6 +350,10 @@ pulumi.export("db_master_secret_arn", database.master_secret_arn)
 pulumi.export("migrate_function_name", migrations.function.name)
 pulumi.export("tenant_user_pool_id", auth.tenant.pool.id)
 pulumi.export("tenant_app_client_id", auth.tenant.client.id)
+# Whether each app client is meant to have refresh-token rotation on (the isolation run
+# checks the deployed clients against these).
+pulumi.export("tenant_refresh_token_rotation", bool(config.auth.tenant_refresh_rotation))
+pulumi.export("platform_refresh_token_rotation", bool(config.auth.platform_refresh_rotation))
 pulumi.export("tenant_login_domain", auth.tenant.domain.domain)
 pulumi.export("platform_user_pool_id", auth.platform.pool.id)
 pulumi.export("platform_app_client_id", auth.platform.client.id)

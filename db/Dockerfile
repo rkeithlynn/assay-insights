@@ -16,9 +16,9 @@ COPY workers/pyproject.toml workers/pyproject.toml
 # Locked, hash-checked, wheels only: nothing is compiled and nothing comes from the host.
 RUN uv export --locked --package assay-db --no-dev --no-emit-workspace --no-header \
         --format requirements-txt -o /tmp/requirements.txt \
-    && uv pip install --python /var/lang/bin/python3 --target /out \
+    && uv pip install --python /var/lang/bin/python3 --target /deps \
         --require-hashes --only-binary :all: -r /tmp/requirements.txt
-COPY db/assay_db /out/assay_db
+COPY db/assay_db /code/assay_db
 
 # RDS CA bundle for TLS verify-full, fetched from AWS and checked against a pinned checksum.
 # If AWS publishes a new bundle the checksum fails the build; update it deliberately.
@@ -34,6 +34,11 @@ FROM public.ecr.aws/lambda/python:3.14@sha256:497df5d229e6d5c54279a6a48e7f597ff3
 # apply 0444 to the directory it creates, leaving it untraversable.
 RUN install -d -m 0755 /opt/rds-ca
 COPY --from=rds-ca --chmod=0444 /global-bundle.pem /opt/rds-ca/global-bundle.pem
-COPY --from=build /out ${LAMBDA_TASK_ROOT}
+# Two layers, in this order (owner, 2026-11-25). The dependencies change only with uv.lock;
+# the code changes with every edit. Copied as one layer, any edit pushed every dependency to
+# ECR again (26 to 53 MB an image). The files and their modes are the same as before:
+# tests/unit/test_image_layers.py holds the installed packages to what they were.
+COPY --from=build /deps ${LAMBDA_TASK_ROOT}
+COPY --from=build /code ${LAMBDA_TASK_ROOT}
 ENV DB_CA_BUNDLE=/opt/rds-ca/global-bundle.pem
 CMD ["assay_db.handler.handler"]
