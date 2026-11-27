@@ -27,7 +27,9 @@ from assay_infra.isolation import IsolationRunner, runner_role
 from assay_infra.network import Network
 from assay_infra.provisioning import Provisioning
 from assay_infra.tss import TenantStorage, TssCaller
+from assay_tss import keys as tss_keys
 from assay_tss import policies
+from assay_tss.provision import program
 from tests.unit.conftest import ACCOUNT_ID, REGION, registered
 from tests.unit.test_infra_auth_api import AUTH, DNS, FAKE_JWKS
 from tests.unit.test_infra_data import DB, NET
@@ -121,7 +123,12 @@ def _one(type_token: str, name: str) -> dict[str, Any]:
 
 class Stack:
     def __init__(
-        self, prefix: str, *, with_runner: bool = True, tss_reserved: int | None = None
+        self,
+        prefix: str,
+        *,
+        with_runner: bool = True,
+        tss_reserved: int | None = None,
+        scan_inbox_only: bool = False,
     ) -> None:
         self.prefix = prefix
         # Resources named after the platform prefix (the tenant role, the break-glass role,
@@ -187,6 +194,7 @@ class Stack:
             default_tags=TAGS,
             default_models=DEFAULT_MODELS,
             upload_origins=["https://example.test"],
+            scan_inbox_only=scan_inbox_only,
             platform_key_arns=[self.database.key.arn, self.alerts.key.arn],
             alarm_topic_arn=self.alerts.topic.arn,
         )
@@ -266,6 +274,7 @@ def tenancy(**changes: Any) -> TenancyConfig:
         "break_glass_principal_arn": BREAK_GLASS_PRINCIPAL,
         "vector_dimensions": 1024,
         "isolation_tests": False,
+        "scan_inbox_only": False,
         "default_tags": TAGS,
     }
     return TenancyConfig(**(values | changes))
@@ -817,6 +826,120 @@ def test_scan_role_reads_and_tags_tenant_buckets_only() -> None:
     assert put["Resource"].endswith("/malware-protection-resource-validation-object")
     key = by_sid(policy, "AllowDecryptForMalwareScan")
     assert key["Condition"]["Null"] == {"aws:ResourceTag/tenant_id": "false"}
+
+
+SCAN_OBJECT_STATEMENTS = {"AllowMalwareScan", "AllowPostScanTag"}
+SCAN_OBJECT_ACTIONS = (
+    "s3:GetObject",
+    "s3:GetObjectVersion",
+    "s3:GetObjectTagging",
+    "s3:GetObjectVersionTagging",
+    "s3:PutObjectTagging",
+    "s3:PutObjectVersionTagging",
+)
+A_TENANT_BUCKET = "arn:aws:s3:::assay-dev-t-0a1b2c3d"
+A_DOCUMENT = "955f3e3d-f39a-5962-bc37-4b37ae1a44c6"
+
+
+def scan_policy(*, inbox_only: bool) -> dict[str, Any]:
+    document: dict[str, Any] = json.loads(
+        provisioning.scan_role_policy(
+            region=REGION, account_id=ACCOUNT_ID, name_prefix=PREFIX, inbox_only=inbox_only
+        )
+    )
+    return document
+
+
+def test_the_inbox_switch_changes_exactly_the_two_statements_that_reach_objects() -> None:
+    """Owner, 2026-11-27: only `AllowMalwareScan` and `AllowPostScanTag` change. Listing the
+    bucket, the validation object, the notification settings, the managed rule and the key
+    statement are the same with the switch on and off."""
+    wide, narrow = scan_policy(inbox_only=False), scan_policy(inbox_only=True)
+    pairs = list(zip(wide["Statement"], narrow["Statement"], strict=True))
+    assert {before["Sid"] for before, after in pairs if before != after} == SCAN_OBJECT_STATEMENTS
+    for sid in SCAN_OBJECT_STATEMENTS:
+        before, after = by_sid(wide, sid), by_sid(narrow, sid)
+        assert before["Resource"] == "arn:aws:s3:::assay-dev-t-*/*"
+        assert after["Resource"] == "arn:aws:s3:::assay-dev-t-*/inbox/*"
+        # Only where it reaches changes, never what it may do there.
+        assert {k: v for k, v in before.items() if k != "Resource"} == {
+            k: v for k, v in after.items() if k != "Resource"
+        }
+    assert by_sid(narrow, "AllowCheckBucketOwnership") == {
+        "Sid": "AllowCheckBucketOwnership",
+        "Effect": "Allow",
+        "Action": "s3:ListBucket",
+        "Resource": "arn:aws:s3:::assay-dev-t-*",
+    }
+    assert by_sid(narrow, "AllowPutValidationObject") == {
+        "Sid": "AllowPutValidationObject",
+        "Effect": "Allow",
+        "Action": "s3:PutObject",
+        "Resource": "arn:aws:s3:::assay-dev-t-*/malware-protection-resource-validation-object",
+    }
+    # The default is the policy as it was: a caller that does not ask gets no narrowing.
+    assert (
+        json.loads(
+            provisioning.scan_role_policy(region=REGION, account_id=ACCOUNT_ID, name_prefix=PREFIX)
+        )
+        == wide
+    )
+
+
+def test_with_the_switch_on_the_scan_role_reaches_uploads_and_no_other_object() -> None:
+    """What the role may read and tag is what a tenant's protection plan scans: `inbox/`.
+    Originals, text objects, quarantined files and chat files are out of its reach."""
+    assert program.SCANNED_PREFIXES == (tss_keys.INBOX_PREFIX,) == ("inbox/",)
+    narrow, wide = scan_policy(inbox_only=True), scan_policy(inbox_only=False)
+    upload = f"{A_TENANT_BUCKET}/inbox/{A_DOCUMENT}/{A_DOCUMENT}"
+    elsewhere = [
+        f"{A_TENANT_BUCKET}/originals/{A_DOCUMENT}.pdf",
+        f"{A_TENANT_BUCKET}/originals/{A_DOCUMENT}.companion.json",
+        f"{A_TENANT_BUCKET}/derived/text/{A_DOCUMENT}.json",
+        f"{A_TENANT_BUCKET}/quarantine/{A_DOCUMENT}.pdf",
+        f"{A_TENANT_BUCKET}/chat/{A_DOCUMENT}",
+        # Not under the prefix, though it begins with the same letters.
+        f"{A_TENANT_BUCKET}/inbox-other/{A_DOCUMENT}",
+        f"{A_TENANT_BUCKET}/inbox",
+    ]
+    for action in SCAN_OBJECT_ACTIONS:
+        assert decide(narrow, action, upload, {}) == "allowed", action
+        for resource in elsewhere:
+            assert decide(narrow, action, resource, {}) == "implicitDeny", (action, resource)
+            # The control: with the switch off the same request is allowed.
+            assert decide(wide, action, resource, {}) == "allowed", (action, resource)
+    # Unchanged with the switch on: the bucket check and the validation object.
+    validation = f"{A_TENANT_BUCKET}/malware-protection-resource-validation-object"
+    assert decide(narrow, "s3:ListBucket", A_TENANT_BUCKET, {}) == "allowed"
+    assert decide(narrow, "s3:PutObject", validation, {}) == "allowed"
+    assert decide(narrow, "s3:PutObject", upload, {}) == "implicitDeny"
+    # Never, on or off: another account's or another project's bucket.
+    for policy in (narrow, wide):
+        other = f"arn:aws:s3:::someone-elses-bucket/inbox/{A_DOCUMENT}/{A_DOCUMENT}"
+        assert decide(policy, "s3:GetObject", other, {}) == "implicitDeny"
+
+
+@pulumi.runtime.test
+def test_the_stack_switch_decides_how_far_the_scan_role_reaches() -> Any:
+    narrowed = Stack("sr1", scan_inbox_only=True)
+    plain = Stack("sr0")
+
+    def check(_: list[Any]) -> None:
+        role_policy = "aws:iam/rolePolicy:RolePolicy"
+        on = json.loads(_one(role_policy, "assay-sr1-malware-scan-policy")["policy"])
+        off = json.loads(_one(role_policy, "assay-sr0-malware-scan-policy")["policy"])
+        for sid in SCAN_OBJECT_STATEMENTS:
+            assert by_sid(on, sid)["Resource"] == "arn:aws:s3:::assay-sr1-t-*/inbox/*"
+            assert by_sid(off, sid)["Resource"] == "arn:aws:s3:::assay-sr0-t-*/*"
+
+    return pulumi.Output.all(narrowed.ready(), plain.ready()).apply(check)
+
+
+def test_the_dev_stack_limits_the_scan_role_to_the_inbox() -> None:
+    """On in Development (owner, 2026-11-27). The way back is this one key set to "false"."""
+    text = (REPO_ROOT / "infra" / "Pulumi.dev.yaml").read_text(encoding="utf-8")
+    assert 'assay-platform:malwareScanInboxOnly: "true"' in text
+    assert tenancy(scan_inbox_only=True).scan_inbox_only is True
 
 
 def test_state_objects_are_readable_only_by_the_provisioning_role() -> None:

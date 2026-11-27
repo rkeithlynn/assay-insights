@@ -58,15 +58,20 @@ verified in dev.** Stage 3 is not started and needs its own plan first.
   - The Text line is right for the five synthetic files: 01 and 04 all from the text layer;
     08 three pages by OCR; 09 one from the text layer and two by OCR; 10 one by OCR.
   - The 1,000-page file was read in 7 minutes 48 seconds ("The 1,000-page run" below).
-- **Built after that, not deployed: the upload screen's fixes** ("Upload: files that went
-  missing" below). No migration and no permission change; the next `pulumi up` rebuilds the
-  portal.
-- **Tested (2026-11-27).** Stage 2, at commit 6f5b3bf: the whole suite with the test
-  PostgreSQL and the image tests required (`ASSAY_REQUIRE_DB_TESTS=1`,
-  `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,792 passed, none failed, none skipped, and CI passed
-  (`python`, `portal`, `portal-render`). The upload fixes: the portal's type check, lint and
-  118 unit tests pass, and the rendered check passes, 58 of 58 (the 48 layout checks and the
-  10 new upload checks).
+- **Built after that, not deployed.** One `pulumi up` carries both; neither has a
+  migration.
+  1. The upload screen's fixes ("Upload: files that went missing" below): the portal build.
+  2. The scan role's object access limited to `inbox/` ("The scan role's reach" below): one
+     role policy. **The owner tests it on Isolation Test A before anything else is
+     uploaded.**
+- **Tested (2026-11-27), with the upload fixes and the scan role's switch in.** The whole
+  suite with the test PostgreSQL and the image tests required (`ASSAY_REQUIRE_DB_TESTS=1`,
+  `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,796 passed, none failed, none skipped (1,792 at stage 2,
+  and four new tests of the scan role's policy). The portal's type check, lint and 118 unit
+  tests pass, and the rendered check passes, 58 of 58 (the 48 layout checks and the 10 new
+  upload checks). **`pulumi preview` was not run for these changes:** the owner's AWS
+  sign-in had expired for Pulumi, so run it, and read it, before `pulumi up`. What it should
+  show is under "The scan role's reach".
 - **Rule 6** (checked 2026-11-27, before stage 2 was built): the AI services opt-out policy
   in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
   UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is the
@@ -362,6 +367,115 @@ of the portal with that one fix undone, inside the container only, and failed th
 - The server's logs can show how many files a request registered, by its size, and never
   which files.
 
+### The scan role's reach: `inbox/` only, behind a switch (built 2026-11-27, not deployed)
+
+The owner's decision (2026-11-27), as its own change after stage 2.
+
+- **What changes.** Two statements of the GuardDuty scan role's IAM policy:
+  `AllowMalwareScan` (read an object and its versions) and `AllowPostScanTag` (read and
+  write an object's tags). They go from every object of every tenant bucket to the objects
+  under `inbox/`, the one prefix each tenant's protection plan scans
+  (`provisioning.scan_role_policy`, `inbox_only`). Before, the role could read originals
+  and text objects, and decrypt them through S3. Only GuardDuty can assume it.
+- **What does not change.** `s3:ListBucket`, the validation object's write, the
+  notification and managed-rule statements, and the key statement (decrypt through S3 on a
+  tenant key, which reaches only what S3 lets the role read). No tenant bucket policy
+  changes: every statement there is a Deny, so the role's own policy does the allowing and
+  narrowing it is enough. No tenant stack run, no migration, no image.
+- **The switch.** Stack config `malwareScanInboxOnly`, `"true"` in dev. `"false"`, or the
+  key left out, is the policy as it was. Either way it is one `pulumi up` that updates one
+  role policy. Stack outputs: `malware_scan_role_name`, `malware_scan_inbox_only`.
+- **One policy for every tenant.** The role is shared, so the switch narrows every tenant's
+  bucket at once. "Isolation Test A first" is the order of testing: nothing is uploaded to
+  another tenant until a clean file and EICAR have gone through Isolation Test A.
+- **Checked before the deploy** (IAM's policy simulator, read-only, 2026-11-27, one object
+  key at a time):
+
+  | Request | Switch on | Switch off |
+  | --- | --- | --- |
+  | The six read and tag actions on an `inbox/` key | allowed | allowed |
+  | The same on `originals/`, `derived/text/` and `quarantine/` keys | `implicitDeny` | allowed |
+  | The same on the validation object | `implicitDeny` | allowed |
+  | `s3:PutObject` on the validation object | allowed | allowed |
+  | `s3:ListBucket` and the two notification actions on the bucket | allowed | allowed |
+
+- **Not known, and the risk.** AWS's page for the role says that with an object prefix its
+  access should be limited to the targeted prefixes, and shows no such policy. Two things
+  are not known:
+  1. That GuardDuty reads and tags nothing outside the prefix when it scans.
+  2. Whether GuardDuty reads or tags its validation object
+     (`malware-protection-resource-validation-object`, at the bucket's root) after writing
+     it. With the switch on the role can still write that object, and can no longer read or
+     tag it: the owner's instruction was to change the two statements and nothing else.
+  Either would show as uploads that are not scanned, or as a plan that leaves `ACTIVE`.
+  Nothing is lost silently, and `"false"` undoes it.
+- **The baseline** (read 2026-11-27, before the change): all four tenants' plans are
+  `ACTIVE`, with the prefix `inbox/` and no status reason.
+
+**The test, in this order** (owner; PowerShell, one line each):
+
+1. `pulumi preview --cwd infra --stack pilartech/assay-platform/dev --diff`, and read it. It
+   was not run when this was built (the AWS sign-in had expired for Pulumi). **What it
+   should show, from the code, not from a run:** one role policy updated
+   (`assay-dev-malware-scan-policy`, the two statements' `Resource`), the portal build
+   replaced with what depends on it (the upload screen's fixes), two new stack outputs, and
+   no image, role, bucket policy, endpoint or database change. Anything else: stop and ask.
+   Then deploy when nobody is uploading: `pulumi up --cwd infra --stack pilartech/assay-platform/dev`.
+2. Read the deployed policy. Both statements must end in `/inbox/*`:
+   `aws iam get-role-policy --role-name assay-dev-malware-scan-role-cf2a8e2 --policy-name assay-dev-malware-scan-policy-4c8a356 --profile pilar-dev --query "PolicyDocument.Statement[?Sid=='AllowMalwareScan' || Sid=='AllowPostScanTag'].[Sid,Resource]" --output text`
+   (the deployed names in dev, read on 2026-11-27; the role's name is also the stack output
+   `malware_scan_role_name`).
+3. **A clean file, Isolation Test A.** `uv run scripts/make_test_files.py --fresh`, sign in
+   to the tenant portal as Isolation Test A's admin, open a batch and add `01-normal.pdf`.
+   It must show "Scanned, clean", normally within a minute or two. Close the batch: the
+   document goes to Processing and its Text step passes.
+4. **EICAR, Isolation Test A**, in AWS CloudShell:
+   `python3 ingest_check.py eicar --host dev.assayinsights.ai --tenant cfd08356-aac4-4dfe-a3f5-32a2f3294c4e`.
+   The file must end `infected` and the document `quarantined`, and the security notice
+   must arrive.
+5. Every plan still `ACTIVE`, with no status reason:
+   `(aws guardduty list-malware-protection-plans --profile pilar-dev --region us-east-1 --query "MalwareProtectionPlans[].MalwareProtectionPlanId" --output text) -split "\s+" | ForEach-Object { aws guardduty get-malware-protection-plan --malware-protection-plan-id $_ --profile pilar-dev --region us-east-1 --query "[ProtectedResource.S3Bucket.BucketName,Status,StatusReasons]" --output json }`
+   Run it again the next day: it is not known when GuardDuty next checks a plan's role.
+6. `uv run scripts/run_isolation.py --tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`,
+   then `uv run scripts/check_deployment.py`.
+7. Only then upload as another tenant.
+
+**What a failure looks like.**
+
+| What is seen | What it means |
+| --- | --- |
+| The file shows "On hold: could not be scanned", with "The malware scan could not read the stored file." (`scan_access_denied`), within a minute or two | GuardDuty's read was refused: it needs more than `inbox/` |
+| The file stays "Waiting for its scan"; after 30 minutes it is on hold (`scan_timeout`) and `assay-dev-pipeline-sweeper-errors` fires | No scan result came at all |
+| "The malware scan failed." (`scan_failed`) | GuardDuty gave up on the object; read the plan's status reasons |
+| The EICAR file shows "Scanned, clean" or is held, not quarantined | The scan did not really read the file |
+| A plan's status is `WARNING` or `ERROR`, with a status reason | GuardDuty's check of the role failed (the validation object, or tagging) |
+| Everything works and only the object tags are missing | Tagging was refused quietly. The pipeline does not use the tags; record it and decide |
+
+**Going back** (one config change and a `pulumi up`):
+
+1. `pulumi config set malwareScanInboxOnly false --cwd infra --stack pilartech/assay-platform/dev`
+   (it writes `"false"` into `infra/Pulumi.dev.yaml`; commit that).
+2. `pulumi up --cwd infra --stack pilartech/assay-platform/dev`
+3. Read the policy again with the command of step 2 above: both statements end in `/*`.
+4. A file that was put on hold is not scanned again: discard its batch and upload it anew.
+
+**The worker's read of its document's companion upload: it can be dropped. Proposed, not
+built** (the owner decides).
+
+- The task never reads that object. It reads the PDF, and the companion's `batch_files` row
+  to say whether the document has one. The `companion` step, a Lambda with its own PIPELINE
+  context, reads and stores the companion file.
+- Today the grant's row lists every clean inbox file of the document, the PDF and the
+  companion, and the session policy admits both for reading.
+- **Proposed:** the TSS admits one inbox key for a worker, `inbox/{batch}/{document ID}`.
+  A PDF's upload has the document's own ID, so the TSS can tell it from the companion's
+  without a database change, and refuses a grant row that lists anything else for the
+  worker's policy. `WORKER_MAX_INBOX_KEYS` becomes 1. The worker probe gains "reading its
+  document's companion upload is refused", by S3's own answer.
+- **What it takes:** the TSS and worker images, so one `pulumi up`. No migration, no grant,
+  no tenant stack run. The alternative, changing `pipeline.worker_grant` to list only the
+  PDF, needs a migration for the same effect.
+
 ### For stage 3 (steps 6 to 8: split, signer details, field extraction)
 
 - **Extracted text is content chosen by whoever made the PDF. It must be handled as data,
@@ -434,6 +548,7 @@ Each is recorded in full further down; this is the index.
 | A reload that erases an error | The Upload screen read the batch again after every refused action, and the reload cleared the error: a refused registration showed its reason for a moment, then nothing | "Upload: files that went missing" |
 | What the file picker hands the page | Neither the server nor a test can see it. The screen now says how many files it was handed and how many it added | "Upload: files that went missing" |
 | The 30 seconds after the Text step | Fargate stopping the task, not our code. Stage 4 moves the final status into the task | "For stage 4" |
+| The policy simulator, several resources | With more than one `--resource-arns` it gives one decision for all of them together. Simulate each resource alone | "The scan role's reach" |
 | One Textract page per isolation run | The worker probe's positive control is a real, billed call on a synthetic page, with its own `ai_usage` row | "The 1,000-page run" |
 
 ### Open items and known gaps
@@ -452,20 +567,12 @@ Decisions the owner has still to make, or things to do:
   says little about real ones.
 - **Stage 4: the final status inside the task, the companion step before or beside it**
   (owner, 2026-11-27; "For stage 4" above). Nothing changes before then.
-- **Straight after stage 2, as its own change: limit the GuardDuty scan role to `inbox/`**
-  (owner, 2026-11-27). Today that role's policy reaches every object in every tenant bucket
-  (originals, text objects) and may decrypt through S3; only GuardDuty can assume it. AWS's
-  page for the role says that with an object prefix its access should be limited to the
-  targeted prefixes, and shows no policy. The least invasive form changes two statements of
-  the role's IAM policy (`AllowMalwareScan`, `AllowPostScanTag`) from the whole bucket to
-  `inbox/*`: the platform stack only, no tenant stack run. Leave `s3:ListBucket` and the
-  validation-object write alone. **Try it first on Isolation Test A with a clean file and
-  EICAR.** The risk: it is not known that GuardDuty reads nothing outside the prefix; if it
-  does, new uploads end `on_hold` (`scan_access_denied`, or `scan_timeout` after 30 minutes
-  with an alarm). Nothing is lost silently, and restoring the policy undoes it.
-- **A further narrowing to consider with it:** the worker's session policy still lets the
-  task read its document's companion upload in the inbox (the grant's row lists every clean
-  file). The task reads only the PDF.
+- **Deploy and test the scan role's limit to `inbox/`** (built 2026-11-27 behind
+  `malwareScanInboxOnly`, on in dev; "The scan role's reach" above has the steps, what a
+  failure looks like and the way back). Try it on Isolation Test A first, with a clean file
+  and EICAR.
+- **The worker's read of its document's companion upload in the inbox: proposed, not
+  built** ("The scan role's reach" above). The task reads only the PDF.
 - **Concurrency numbers**: 50 and 300 rest on a small sample (43 scan runs, 9 at once at
   most). Measure again once real batches have run.
 - **The 74 files Git checks out with CRLF** on the owner's machine (the portal's `.ts` and

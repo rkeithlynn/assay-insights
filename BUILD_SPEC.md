@@ -860,6 +860,11 @@ owner accepted.
 - A tenant bucket's policy names two more principals besides the tenant role and the
   break-glass role, each for one job: the GuardDuty scan role (read and tag objects) and the
   provisioning role (bucket settings, never object data) (2026-11-23).
+- The GuardDuty scan role reads and tags objects under `inbox/` only, the prefix each
+  tenant's protection plan scans, when stack config `malwareScanInboxOnly` is `"true"` (on
+  in Development). `"false"` is the role as AWS's page writes it, for the whole bucket, and
+  is the way back. Listing the bucket and writing GuardDuty's validation object are the
+  same either way (2026-11-27).
 - Tags are part of the lock: only the provisioning role may tag a tenant KMS key, and
   `tenant_id` on a key is write-once (2026-11-23).
 - The break-glass role is assumable only by the owner's administrator role, and every
@@ -964,6 +969,9 @@ owner accepted.
    exactly 1,000 Textract rows for `11-scanned-1000-pages.pdf` (Infinity Loans, 2026-11-27).
 6. Every isolation run makes one real Textract call, on a page the probe draws, and records
    it in `ai_usage`.
+7. The GuardDuty scan role's object access stops at `inbox/`, behind a stack switch (the
+   tenant isolation list above). Tested first on Isolation Test A, with a clean file and
+   EICAR.
 
 **Audit and what master roles see (sections 5 and 7a)**
 

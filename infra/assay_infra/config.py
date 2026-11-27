@@ -113,6 +113,10 @@ class TenancyConfig:
     vector_dimensions: int
     # Deploy the in-VPC isolation test runner (tests/isolation). Development stacks only.
     isolation_tests: bool
+    # The GuardDuty scan role reads and tags objects under inbox/ only, the prefix each
+    # tenant's plan scans (stack config malwareScanInboxOnly; owner, 2026-11-27). False or
+    # unset: the whole bucket, as AWS's page writes the role. The way back is "false".
+    scan_inbox_only: bool
     # The provider's default tags, repeated on every tenant resource.
     default_tags: dict[str, str]
 
@@ -375,6 +379,7 @@ def load_config() -> PlatformConfig:
                 break_glass_principal_arn=conf.require("breakGlassPrincipalArn"),
                 vector_dimensions=conf.require_int("vectorDimensions"),
                 isolation_tests=conf.get_bool("isolationTests") or False,
+                scan_inbox_only=conf.get_bool("malwareScanInboxOnly") or False,
                 default_tags={str(k): str(v) for k, v in default_tags.items()},
             )
         ),

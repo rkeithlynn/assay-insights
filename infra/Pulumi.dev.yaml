@@ -35,6 +35,11 @@ config:
   assay-platform:vectorDimensions: "1024"
   # Deploys the in-VPC isolation test runner (tests/isolation). Development stacks only.
   assay-platform:isolationTests: "true"
+  # The GuardDuty malware scan role reads and tags objects under inbox/ only, the one prefix
+  # each tenant's protection plan scans (owner, 2026-11-27). "false" (or unset) is the way
+  # back: the whole bucket, as AWS's page writes the role. One pulumi up either way; no
+  # tenant stack changes.
+  assay-platform:malwareScanInboxOnly: "true"
   # Alarm notifications (break-glass use, failed tenant provisioning) are emailed here.
   # SNS sends a confirmation link first; nothing is delivered until it is followed.
   assay-platform:alarmEmail: keith.lynn@pilartech.com

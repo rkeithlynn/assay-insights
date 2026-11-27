@@ -180,6 +180,7 @@ provisioning = Provisioning(
     default_tags=config.tenancy.default_tags,
     default_models=default_models,
     upload_origins=[f"https://{config.dns.tenant_host}"],
+    scan_inbox_only=config.tenancy.scan_inbox_only,
     # Every KMS key this program creates outside the provisioning component. Add a new
     # one here: the provisioning role is denied tagging the keys in this list.
     platform_key_arns=[database.key.arn, alerts.key.arn],
@@ -387,6 +388,10 @@ pulumi.export("tenant_role_arn", storage.tenant_role.arn)
 pulumi.export("break_glass_role_arn", storage.break_glass.role.arn)
 pulumi.export("provisioning_state_machine_arn", provisioning.state_machine.arn)
 pulumi.export("provisioning_role_arn", provisioning.task_role.arn)
+# The GuardDuty scan role, and whether its object access stops at inbox/ (stack config
+# malwareScanInboxOnly): what the role's deployed policy is compared with.
+pulumi.export("malware_scan_role_name", provisioning.scan_role.name)
+pulumi.export("malware_scan_inbox_only", config.tenancy.scan_inbox_only)
 pulumi.export("tenant_state_bucket", provisioning.state_bucket.bucket)
 pulumi.export("cognito_admin_function_name", provisioning.invite_function.name)
 pulumi.export("cognito_admin_api_function_name", cognito_admin_api.function.name)

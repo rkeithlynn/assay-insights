@@ -37,7 +37,7 @@ from assay_infra.images import WORKSPACE_MANIFESTS, ContainerImage
 from assay_infra.network import Network
 from assay_infra.propagation import iam_propagation
 from assay_infra.tss import TenantStorage, _service_trust
-from assay_tss import policies
+from assay_tss import keys, policies
 from assay_tss.naming import tenant_pattern
 
 PLATFORM_WRITER_DB_USER = "platform_writer"  # assay_db.roles.PLATFORM_WRITER
@@ -398,9 +398,19 @@ def scan_role_trust_policy(account_id: str) -> str:
     return _service_trust(GUARDDUTY_PLAN_SERVICE, account_id)
 
 
-def scan_role_policy(*, region: str, account_id: str, name_prefix: str) -> str:
-    """AWS's documented role policy for Malware Protection for S3, for every tenant bucket."""
+def scan_role_policy(
+    *, region: str, account_id: str, name_prefix: str, inbox_only: bool = False
+) -> str:
+    """AWS's documented role policy for Malware Protection for S3, for every tenant bucket.
+
+    `inbox_only` (stack config `malwareScanInboxOnly`; owner, 2026-11-27) limits the two
+    statements that reach object content, reading an object and tagging it, to `inbox/`, the
+    one prefix each tenant's protection plan scans. Without it they cover the whole bucket,
+    as AWS's page writes them: originals and text objects too. Nothing else changes with it:
+    listing the bucket and writing GuardDuty's validation object stay as they are.
+    """
     bucket = f"arn:aws:s3:::{tenant_pattern(name_prefix)}"
+    scanned = f"{bucket}/{keys.INBOX_PREFIX}*" if inbox_only else f"{bucket}/*"
     rule = f"arn:aws:events:{region}:{account_id}:rule/{GUARDDUTY_RULE}"
     return _json(
         {
@@ -433,7 +443,7 @@ def scan_role_policy(*, region: str, account_id: str, name_prefix: str) -> str:
                         "s3:PutObjectVersionTagging",
                         "s3:GetObjectVersionTagging",
                     ],
-                    "Resource": f"{bucket}/*",
+                    "Resource": scanned,
                 },
                 {
                     "Sid": "AllowEnableS3EventBridgeEvents",
@@ -457,7 +467,7 @@ def scan_role_policy(*, region: str, account_id: str, name_prefix: str) -> str:
                     "Sid": "AllowMalwareScan",
                     "Effect": "Allow",
                     "Action": ["s3:GetObject", "s3:GetObjectVersion"],
-                    "Resource": f"{bucket}/*",
+                    "Resource": scanned,
                 },
                 {
                     "Sid": "AllowDecryptForMalwareScan",
@@ -808,6 +818,8 @@ class Provisioning(pulumi.ComponentResource):
         default_models: tuple[str, str],
         # Origins that may use presigned links in a tenant's bucket (build step 6).
         upload_origins: Sequence[str],
+        # The scan role reads and tags objects under inbox/ only (malwareScanInboxOnly).
+        scan_inbox_only: bool = False,
         # Every other KMS key the platform stack creates. The provisioning role is denied
         # tagging them (and the state key, which this component adds itself).
         platform_key_arns: Sequence[pulumi.Input[str]],
@@ -849,7 +861,10 @@ class Provisioning(pulumi.ComponentResource):
             role=self.scan_role.id,
             policy=account.apply(
                 lambda acct: scan_role_policy(
-                    region=region, account_id=acct, name_prefix=name_prefix
+                    region=region,
+                    account_id=acct,
+                    name_prefix=name_prefix,
+                    inbox_only=scan_inbox_only,
                 )
             ),
             opts=child,
