@@ -27,9 +27,9 @@ from assay_workers.sandbox.runner import Channel, Completed
 from assay_workers.worker import ocr, quality
 from assay_workers.worker.__main__ import text_settings
 from assay_workers.worker.context import TextSettings
-from tests.unit.stage2 import in_process, test_files
+from tests.unit.stage2 import in_process, synthetic_files
 
-make = test_files()
+make = synthetic_files()
 SOURCE = Path("/work/job/document.pdf")
 ENGLISH = (
     "This agreement is made between the borrower and the lender on the date written below. "

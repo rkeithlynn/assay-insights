@@ -6,7 +6,7 @@
   buffer is fed through `runner`'s own channel, models and checks.
   `tests/unit/test_worker_image.py` runs the real child in the task's image.
 - `FakeOcr`: Textract. It never opens a picture either; it answers from a script.
-- `test_files`: `scripts/make_test_files.py`, the same synthetic PDFs the owner uploads.
+- `synthetic_files`: `scripts/make_test_files.py`, the same synthetic PDFs the owner uploads.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ PRICE = Decimal("0.0015")
 SETTINGS = TextSettings(threshold=0.90, max_pages=1000, price_per_page=PRICE)
 
 
-def test_files() -> ModuleType:
+def synthetic_files() -> ModuleType:
     name = "make_test_files"
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")

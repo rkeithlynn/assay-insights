@@ -36,7 +36,7 @@ from tests.unit.stage2 import (
     InProcessPages,
     NoOcr,
     ocr_page,
-    test_files,
+    synthetic_files,
 )
 from tests.unit.step6 import Db, FakeQueue, FakeStorage
 from tests.unit.test_pipeline_step6 import World, doc
@@ -58,7 +58,7 @@ def engines() -> Iterator[list[Any]]:
         engine.dispose()
 
 
-make = test_files()
+make = synthetic_files()
 # In every typed page of the synthetic package, and in none of its file names or IDs.
 TYPED = "SYNTHETIC TEST DOCUMENT"
 MARKER = "ZEBRAQUARTZ"
