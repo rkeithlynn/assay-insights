@@ -7,6 +7,12 @@ phases; where the two differ, this file wins for the first deployment.
 
 Status of decisions: all confirmed by the owner (Keith Lynn) on 2026-11-21.
 
+Amended during the build, each time by an owner decision. Section 14 lists every amendment
+with its date; where it differs from an earlier section, section 14 wins. Sections 2, 3, 7,
+7a, 8, 10, 11 and 12 have been brought into line with it (last on 2026-11-27, at the end of
+stage 1 of the second half of build step 6). `CLAUDE.md` holds the reasoning, the evidence
+and the working notes.
+
 ## 1. Goal and scope
 
 Deploy a working development environment at `dev.assayinsights.ai` that supports seven
@@ -50,13 +56,13 @@ every control as if it were in scope.
 | Bedrock rule | Call models only through `us.` inference profiles from `us-east-1`. Direct model IDs in other Regions and `global.` profiles are denied by SCP |
 | Extraction and routing model | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | Answer model | `us.anthropic.claude-sonnet-4-6` |
-| Embedding model | Amazon Titan Text Embeddings V2 |
+| Embedding model | Amazon Titan Text Embeddings V2, called by model ID in `us-east-1`. It has no `us.` inference profile, so it is a named exception to the Bedrock rule (owner, 2026-11-24) |
 | Tenant portal host | `dev.assayinsights.ai` |
 | Admin portal host | `admin.dev.assayinsights.ai` |
 | DNS | Route 53 hosted zone `dev.assayinsights.ai` in the Development account. The registrar is Squarespace; the owner adds the NS records there by hand once the zone exists |
-| IaC | Pulumi in Python, state in Pulumi Cloud (organization `pilartech`), project `assay-platform`, stack `dev`, run with `pulumi up` from VS Code |
+| IaC | Pulumi in Python, state in Pulumi Cloud (organization `pilartech`, on the Free plan since 2026-11-27; nothing in the code depends on the plan), project `assay-platform`, stack `dev`, run with `pulumi up` from VS Code |
 | Already in place | Control Tower landing zone, organization CloudTrail, AWS Config, GuardDuty and Security Hub (managed by a separate `pilar-foundation` stack). Do not manage any of these here. Account Factory creates no VPC |
-| Language | Python 3.12+, `uv` for locked dependencies. Portal in React and TypeScript |
+| Language | Python 3.12+ (pinned to 3.14 in `.python-version`), `uv` for locked dependencies. Portal in React and TypeScript |
 
 ### Development environment
 
@@ -75,7 +81,10 @@ PowerShell, Docker Desktop on WSL 2, and `pulumi up` run by hand.
 - Give commands for the developer in PowerShell, one line each, not bash. Scripts the
   developer runs are Python (`uv run ...`), not shell scripts.
 - Add a `.gitattributes` that forces LF line endings for Dockerfiles, shell scripts
-  used inside containers, and Python files.
+  used inside containers, and Python files. A file it marks as LF must also be LF on disk:
+  images are built from the bytes on disk. `uv run scripts/check_line_endings.py` checks it
+  (as a unit test and in CI too), and `pulumi preview` refuses an image source with CRLF
+  (owner, 2026-11-27).
 - Use `pathlib` and forward slashes; never hard-code Windows or POSIX paths.
 
 Never put model IDs, account IDs, hostnames or email addresses in code. Read them from
@@ -97,8 +106,9 @@ tests/      Unit tests, plus tests/isolation (runs against real AWS)
 assets/     assay-insights-logo.svg, assay-insights-mark.svg
 ```
 
-GitHub Actions runs lint, type checks, unit tests, `pip-audit` and Bandit on pull
-requests. It does not deploy.
+GitHub Actions runs the line-ending check, lint, type checks, unit tests (image tests
+included), `pip-audit` and Bandit, and for the portal its type check, lint, unit tests,
+build, dependency audit and rendered layout checks, on pull requests. It does not deploy.
 
 ## 4. Infrastructure (Pulumi)
 
@@ -233,7 +243,8 @@ originals/{doc_id}.pdf                  clean PDFs, under Object Lock
 originals/{doc_id}.companion.json       the companion file, if any
 originals/{doc_id}/attachments/{attachment_id}.{ext}   stipulations, under Object Lock
 derived/faces/{face_id}.png             face crops from ID documents and live photos
-quarantine/{doc_id}.pdf                 infected files
+quarantine/{doc_id}.pdf                 infected PDFs
+quarantine/{file_id}.companion.json     infected companion files
 derived/text/{doc_id}.json              per-page text, source, quality score, word positions
 derived/fields/{doc_id}.json            extracted fields
 chat/{conversation_id}/{message_id}.json  question, retrieved passages, answer
@@ -301,7 +312,25 @@ everywhere. Every table below except `ai_models` has `tenant_id` and forced RLS.
 | `fraud_scores` | `document_id`, `attachment_id`, `kind` (identity_photo, stipulation), `score`, `reasons` (JSON list of code, text, points, page or attachment), `rules_version`, `model_version`, `scored_at`, `review_state` (open, confirmed, dismissed), `reviewed_by`, `review_note` |
 
 Document statuses: `uploaded` (batch still open), `scanning`, `processing`, `ready`,
-`needs_review`, `quarantined`, `on_hold`, `failed`, `duplicate`.
+`needs_review`, `quarantined`, `on_hold`, `failed`, `duplicate`, `discarded` (a discarded
+batch's documents and a removed file's; left out of both history views unless the status
+filter asks for it).
+
+Added during the build (the migrations' docstrings are the authority for columns, policies
+and grants; section 14 says why):
+
+- Tables: `batch_files` (every registered upload: PDF or companion file, its opaque `file_id`
+  and inbox key, size, SHA-256, scan result and the pinned `version_id`, `purpose`: a batch
+  upload or a companion file attached later) and `worker_grants` (one worker task's right to
+  one attempt of one document: only the SHA-256 of its token is stored).
+- Attempts: `documents.attempt` and `document_events.attempt`; `attempt` on `signers`,
+  `companion_loan_terms` and `document_labels`, with `documents.companion_attempt` pointing
+  at the current version of the companion data and `documents.companion_file_id` at the
+  upload it came from; `documents.content_attempt` is the same pointer for text and
+  extraction (unused until a stage writes them). Nothing is deleted on reprocessing.
+- Also: `documents.queued_at`, `users.sessions_revoked_at`, and views in schema `platform`
+  for the admin routes (among them `platform_users_v`, `ai_models_v`, `tenant_models_v`
+  and `ingestion_events_v`).
 
 Database roles:
 
@@ -315,6 +344,13 @@ Database roles:
 - `audit_writer`: used by the Cognito trigger Lambdas. `INSERT` on `audit_log` only
   (section 7a).
 - `tss`: used by the Tenant Storage Service. The only role that can read `tenant_storage`.
+- `app_worker`: used by the pipeline's worker task, never `app_tenant`. Its session is bound
+  to one attempt grant (`pipeline.bind_worker`), and its policies show it that one document
+  and nothing else. Column-level grants only; each stage's migration adds the grants and
+  policies for the tables its steps use.
+- `pipeline_lookup` and `auth_event_recorder`: cannot sign in. They own the `pipeline` and
+  `auth_events` functions (tenant for an upload, tenants with work, the worker's grant; the
+  Cognito triggers' audit rows).
 - `platform_view_owner`: cannot sign in. Owns the views that `platform_reader` reads
   (`platform_ingestion_v` and any later admin views, in schema `platform`) and can read
   only the columns those views need, so `platform_reader` needs no access to tenant tables.
@@ -336,13 +372,22 @@ row commit in the same transaction.
 | `auth` | `password_reset`, `password_changed` (by the user) | Cognito post-confirmation trigger and the change-password path |
 | `user` | `invited`, `invite_resent`, `role_changed`, `disabled`, `enabled`, `password_reset_sent`, `mfa_reset` | The API |
 | `tenant` | `created`, `provisioning_succeeded`, `provisioning_failed`, `provisioning_retried`, `suspended`, `reactivated`, `models_available_changed`, `model_selected`, `settings_changed` (identity scoring) | The API and the provisioning task |
+| `auth` | `session_started` (the sign-in's IP address and browser), `mfa_enabled` (tenant pool), `temporary_password_accepted` | `POST /auth/session-started`, `POST /auth/mfa-enabled`, the post-authentication trigger |
+| `audit` | `exported` (an Audit history or ingestion history CSV: who, the filters, the row count) | The API |
+| `security` | `file_quarantined` (tenant, uploader, batch and document IDs, GuardDuty's threat name, the quarantine key and source version; never a file name or content) | The scan Lambda, which also publishes a security notice |
+| `document` | `reprocess_requested`, `marked_reviewed`, `companion_replace_requested` | The API (tenant admins) |
+| `document` | `companion_replaced`, `companion_attached`, `companion_replace_rejected` (checked and refused: invalid, infected, or not what was registered), `companion_replace_expired` (never arrived, or never scanned) | The scan Lambda and the sweeper; every request ends in exactly one of these |
 
 - `detail` holds the values before and after. Never store passwords, tokens or codes.
 - Append-only: `app_tenant` and the trigger Lambdas' role (`audit_writer`) get `INSERT`
   only; no role used by the application has `UPDATE` or `DELETE` on `audit_log`.
   `platform_reader` gets `SELECT` on it for the audit page.
 - Trigger Lambdas run in the VPC and must never block a sign-in: on failure they log an
-  error, raise an alarm and let the sign-in proceed.
+  error, raise an alarm and let the sign-in proceed. The trigger only queues the event on
+  SQS; a consumer Lambda writes the row as `audit_writer` (Aurora at 0 ACU takes longer to
+  resume than Cognito waits for a trigger).
+- A row's `detail` never holds tenant content: master roles read audit rows. Codes, IDs and
+  counts only; a companion file's custom keys are never named.
 - Keep 13 months online in monthly partitions.
 - Failed sign-in attempts are not recorded in this deployment.
 
@@ -376,16 +421,25 @@ Trigger: a PDF starts only when its batch is closed **and** its malware scan is 
 2. **Malware scan.** GuardDuty publishes a `GuardDuty Malware Protection Object Scan
    Result` event to EventBridge. A Lambda records the result. `NO_THREATS_FOUND` makes
    the file eligible; `THREATS_FOUND` moves it to `quarantine/` and sets `quarantined`;
-   `UNSUPPORTED` and `FAILED` set `on_hold`.
+   `UNSUPPORTED`, `FAILED` and `ACCESS_DENIED` set `on_hold`. The same Lambda checks the
+   stored size and SHA-256 against the registration, pins the version that scanned clean
+   (only that version is ever used), and validates a companion file. A quarantine writes a
+   `security` audit row and publishes a security notice to its own SNS topic. A file with
+   no scan result after 30 minutes is put on hold by the sweeper, with an alarm.
 3. **Start.** When a batch closes, or a scan result arrives for a closed batch, eligible
    PDFs are queued on SQS, one Step Functions execution per PDF. A dead-letter queue
    catches repeated failures.
 4. **Fingerprint.** SHA-256. If the tenant already has a document with that hash, set
-   `duplicate`, point `duplicate_of` at it and stop. Otherwise move the PDF to
-   `originals/` and the companion file beside it. Never modify the PDF.
-5. **Text.** Read the embedded text layer with `pypdfium2` (`pdfplumber` where layout
-   matters). Score each page; pages that fail go to Textract `DetectDocumentText`. Write
-   `derived/text/{doc}.json` and the `pages` rows. Do not use PyMuPDF (AGPL).
+   `duplicate`, point `duplicate_of` at it and stop (a `failed` document is not an
+   original). A file that does not begin with `%PDF-` fails (`not_a_pdf`). The Lambda never
+   opens the PDF: no Lambda runs a PDF parser. Then the worker task's first step, **inspect**,
+   opens it in the sandbox: a password-protected PDF is put `on_hold` (`pdf_encrypted`), one
+   that cannot be opened fails (`pdf_unreadable`), and otherwise the page count is stored and
+   the PDF is copied to `originals/`. Never modify the PDF.
+5. **Text.** Read the embedded text layer with `pypdfium2`, in the sandbox. Score each page;
+   pages that fail go to Textract `DetectDocumentText`. Write `derived/text/{doc}.json` and
+   the `pages` rows. Do not use PyMuPDF (AGPL), and do not use `pdfplumber` (owner,
+   2026-11-24).
 6. **Split into forms.** Assign every page to a part. Rules first (form titles, form
    numbers, "Page 1 of 3" markers), then the extraction model for the rest. The e-sign
    audit trail, typically the last pages, is its own part.
@@ -399,14 +453,54 @@ Trigger: a PDF starts only when its batch is closed **and** its malware scan is 
    carries `value`, `page` and `confidence`. Validation failure: retry once, then
    `needs_review`. Any field with confidence below 0.7 also sets `needs_review`.
 9. **Companion file.** Validate with plain code, never the model. Store reserved keys as
-   set out below and every custom pair in `document_labels`.
+   set out below and every custom pair in `document_labels`. It runs as a Lambda step after
+   the worker task, not inside it (it is plain JSON and needs no sandbox), and copies the
+   companion file beside the PDF in `originals/`. The values are stored by version; nothing
+   is deleted.
 10. **Embed and index.** Chunk by section with page numbers and word positions, embed,
     write to the tenant's vector index with document ID and page as metadata, write
     `search_tsv`, set `ready`.
 
 Each step writes a `document_events` row and each model call an `ai_usage` row.
-Compute: Lambda (with Powertools) for steps 2 to 4 and status updates; one Fargate
-worker task for steps 5 to 10. Idempotency is keyed on tenant and hash.
+Compute: Lambda (with Powertools) for steps 2 to 4, step 9 and status updates; a Fargate
+worker task for the inspection and steps 5 to 8 and 10. Idempotency is keyed on tenant and
+hash.
+
+The worker (owner decisions, 2026-11-24; `CLAUDE.md` has the detail):
+
+- **One task per document attempt**, started by Step Functions (`ecs:runTask.sync`), at most
+  `workerMaxPerTenant` (5) at once per tenant. A document never fails for lack of a slot or
+  of capacity: it waits and tries again.
+- **Bound to one document.** The state machine's `claim` step creates an attempt grant; the
+  task gets the document ID, the attempt and the grant's token, and nothing else. It asks
+  the TSS at `/resolve-worker`, naming no tenant, and gets credentials for that document's
+  exact keys only. It signs in to the database as `app_worker`, bound to the same grant.
+- **PDFs are opened only in a sandbox child**: another user, no network, no environment, CPU,
+  memory, time and output limits, a seccomp filter. The parent holds the credentials, never
+  opens a PDF, and trusts nothing the child returns beyond a small validated result.
+- **Attempts.** "Process again" (tenant admins) starts a new attempt of a document from the
+  upload at the version that scanned clean. Every event and derived row carries its attempt;
+  a superseded attempt writes nothing; old results are kept and read through pointers.
+- **A failed step names itself**: the document's code is `{step}_failed`. Tenants see plain
+  words; master admins also see the error's type, never its message.
+- Every AI call writes an `ai_usage` row. No prompt or response content is logged anywhere.
+  Bedrock and Textract throttling is retried with backoff. Textract and Bedrock are called
+  with the worker's own role and bytes; Rekognition only with tenant credentials.
+- Before content first goes to Textract or Bedrock, re-check the AI services opt-out policy
+  and that model invocation logging is off, and show the owner the output.
+- Only `ready` documents are retrieved. "Mark as reviewed" (tenant admins) moves
+  `needs_review` to `ready`; `needs_review` documents are still indexed.
+
+Stages of steps 5 to 10 (each a deploy and the owner's checks):
+
+| Stage | Builds | Content to AI services | Status |
+| --- | --- | --- | --- |
+| 1 | The worker task, the attempt grant, the sandbox, `app_worker`; attempts and "Process again"; step 9; companion attach and replace; the quarantine notice; "Mark as reviewed" (migrations `0010`, `0011`) | None | Complete, verified 2026-11-27 |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score | Textract | Not started |
+| 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) | Not started |
+| 4 | Step 10: chunk, embed, index; final statuses; the Titan catalog row | Bedrock (Titan) | Not started |
+
+Until stage 4, a document that passes its steps stays `processing`.
 
 Treat document text as untrusted input. The model gets no tools beyond the extraction
 schema, and nothing it returns chooses a tenant, a bucket or a SQL statement.
@@ -558,10 +652,15 @@ hides what a role can't do. Generate the portal's API client from the OpenAPI sc
 | `POST /users/{id}/resend-invite`, `POST /users/{id}/reset-password` | tenant-admin | As named |
 | `POST /users/{id}/reset-mfa` | tenant-admin | Reset MFA; the target must be a tenant-user in the same tenant |
 | `POST /batches`, `GET /batches/{id}` | tenant-admin | Open a batch; read it with its files |
+| `GET /batches` | tenant-admin, tenant-user | List batches (`status`, `mine`), for the history's batch filter |
 | `POST /batches/{id}/files` | tenant-admin | Register files; return a presigned link for each |
+| `DELETE /batches/{id}/files/{file_id}` | tenant-admin | Remove a file from an open batch |
 | `POST /batches/{id}/close`, `DELETE /batches/{id}` | tenant-admin | Close and start processing; discard |
 | `GET /documents` | tenant-admin, tenant-user | Ingestion history: `from`, `to`, `status`, `batch_id`, `sort`, `page`, `format=csv` |
 | `GET /documents/{id}`, `GET /documents/{id}/pdf-url` | tenant-admin, tenant-user | Detail with events and parts; short-lived view link |
+| `POST /documents/{id}/reprocess` | tenant-admin | "Process again": a new attempt. Refused while an attempt is under way, and for a quarantined, on-hold, duplicate or discarded document |
+| `POST /documents/{id}/reviewed` | tenant-admin | "Mark as reviewed": `needs_review` becomes `ready` |
+| `POST /documents/{id}/companion` | tenant-admin | Attach or replace the companion file; returns a presigned link. It is scanned and validated like any upload and takes effect only if clean and valid |
 | `GET /chat/conversations`, `POST /chat/conversations` | tenant-admin, tenant-user | List own; start one |
 | `POST /chat/conversations/{id}/messages` | tenant-admin, tenant-user | Ask; stream answer and citations |
 | `GET /fraud-scores` | tenant-admin, tenant-user | Scored documents: `kind`, `below`, `from`, `to`, `review_state`, `sort`, `page` |
@@ -576,13 +675,23 @@ hides what a role can't do. Generate the portal's API client from the OpenAPI sc
 | `GET /settings/models`, `PUT /settings/models` | tenant-admin | Read available models and current selection; select the ingest and AI query models |
 | `GET /admin/audit` | master-admin, master-user | Audit history: `from`, `to`, `tenant_id`, `category` (auth, user, tenant), `actor_email`, `sort`, `page`, `format=csv` |
 | `POST /auth/signed-out` | All | Records a sign-out; the portal calls it before Cognito logout |
+| `POST /auth/session-started`, `POST /auth/password-changed` | All | Record the start of a session (once per sign-in) and a password change |
+| `POST /auth/mfa-enabled` | tenant-admin, tenant-user | Records MFA enrolment, after checking with Cognito that TOTP is on |
 | `GET /admin/ingestion` | master-admin, master-user | Cross-tenant history: same filters plus `tenant_id` |
+| `GET /admin/ingestion/{id}` | master-admin, master-user | One document's pipeline steps, times and error codes; no file name |
 
 Rules: an admin can't change their own role or disable themselves; a tenant always keeps
 one active admin; one open batch per user; a batch can't close while it holds an invalid
 or unmatched companion file (including one whose `TenantID` doesn't match); an open batch closes automatically after 24 hours; a
 suspended tenant's users can't sign in or upload. Limits: 100 MB per PDF, 25 MB per
-attachment, 200 primary PDFs per batch, 20 attachments per PDF. Every user and tenant change writes an `audit_log` row.
+attachment, 200 primary PDFs per batch, 20 attachments per PDF, 64 KB per companion file,
+50 files per registration request, file names up to 255 characters, `.pdf` and `.json`
+only. Every user and tenant change writes an `audit_log` row, and so does every CSV export
+and every document action (section 7a).
+
+Duration, in both history views and both CSV exports (owner, 2026-11-25): from the
+document's latest `queued` event (its batch closing, or its latest "Process again") to its
+completion; from when it was received if it was never queued.
 
 ## 11. Portal
 
@@ -629,6 +738,17 @@ and `GET /me` decides the navigation.
   ID, document ID, pages, size, companion file, status, forms found, duration. A row
   opens a panel with each pipeline step, its time and any error; tenants also see the
   forms found and can open the PDF.
+- **Document actions** (tenant admins, in the tenant's ingestion history; owner,
+  2026-11-24): "Process again" for one document or several selected, with a confirmation
+  that says how many are Ready (running the AI steps again costs money); "Mark as reviewed";
+  attach or replace the companion file. The document's panel shows the companion file's
+  values and every companion upload with its problems in plain words; from stage 3 it also
+  shows each form's extracted fields with page and confidence. Master views never show
+  extracted or companion values.
+- **Sessions.** The portal signs a user out after `portalIdleTimeoutMinutes` without
+  activity in any of its tabs, with a warning 2 minutes before. Signing out in one tab signs
+  out the portal's other tabs in that browser. A session that cannot be renewed ends on the
+  sign-in screen with "Your session has ended. Sign in again to continue."
 - **Every screen** has loading, empty and error states; destructive actions ask for
   confirmation; WCAG AA contrast and keyboard access.
 
@@ -641,7 +761,9 @@ and `GET /me` decides the navigation.
 4. Tenant Storage Service, tenant provisioning, `tests/isolation`.
 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py`.
 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history
-   for tenants and for the master tenant.
+   for tenants and for the master tenant. Built in two halves: the first (batches, uploads,
+   scan routing, fingerprint, both histories) is complete; the second (steps 5 to 10) is in
+   the four stages of section 8, of which stage 1 is complete (2026-11-27).
 7. AI questions with citations and the PDF viewer.
 8. Stipulation uploads, the two fraud scores and the Fraud review screen (section 8a).
 9. Acceptance checks below.
@@ -685,3 +807,77 @@ and `GET /me` decides the navigation.
       under two names is flagged.
 - [ ] One tenant's face collection cannot be searched with another tenant's credentials.
 - [ ] `pulumi preview` on an unchanged stack shows no changes.
+
+## 14. Amendments (owner decisions during the build)
+
+Every item is an owner decision, with its date. Where one differs from a section above, this
+section wins. `CLAUDE.md` records the reasoning, the evidence from AWS and the limits the
+owner accepted.
+
+**Tenant isolation (section 6)**
+
+- A tenant bucket's policy names two more principals besides the tenant role and the
+  break-glass role, each for one job: the GuardDuty scan role (read and tag objects) and the
+  provisioning role (bucket settings, never object data) (2026-11-23).
+- Tags are part of the lock: only the provisioning role may tag a tenant KMS key, and
+  `tenant_id` on a key is write-once (2026-11-23).
+- The break-glass role is assumable only by the owner's administrator role, and every
+  assumption raises an alarm. Production needs a separate, approval-gated role (2026-11-23).
+- Each TSS caller gets only its accesses: the API reads and signs uploads; the scan, step and
+  sweeper functions get the pipeline access; the worker task gets one document's keys through
+  `/resolve-worker`. No session may list a bucket (2026-11-24).
+- A GuardDuty scan result counts as a pipeline job message for rule 4: the tenant comes from
+  the registered upload's row, and the event's bucket must be that tenant's (2026-11-24).
+- Each tenant's malware protection plan covers `inbox/` only. Inbox objects are never
+  expired; they are never read again (2026-11-24).
+- One document ID is reserved for the isolation tests' fixture objects. It never has a
+  `documents` row, and the API and the pipeline refuse it (2026-11-23).
+- Quarantined files: `quarantine/{doc_id}.pdf` for a PDF, and
+  `quarantine/{file_id}.companion.json` for a companion file (2026-11-25).
+
+**Sign-in and sessions (sections 4 and 11)**
+
+- No Cognito VPC endpoint: the JWKS is read at `pulumi up` and Cognito admin calls run in a
+  Lambda outside the VPC (2026-11-23).
+- Refresh-token rotation on both app clients: `ALLOW_CUSTOM_AUTH` as the only explicit flow,
+  rotation on, a 10-second grace period. A client never has an empty flow list (it would
+  allow an SRP sign-in), and no pool may ever have a custom-auth trigger. Known effect: two
+  tabs that share one refresh token cannot both refresh; the second is sent to sign-in
+  (2026-11-25, both clients on by 2026-11-27).
+- An MFA reset or a disable ends the user's sessions at once (`sessions_revoked_at`), not
+  only their refresh tokens (2026-11-23).
+- Idle timeout from stack config; cross-tab sign-out (2026-11-24).
+- No custom Cognito message templates while email uses `COGNITO_DEFAULT`.
+
+**Pipeline (section 8)**
+
+- The API never reads `inbox/`. The scan Lambda validates companion files and reports every
+  problem at once; a batch may be closed without a rejected companion file (2026-11-24).
+- A batch open 24 hours is closed by the sweeper (2026-11-24).
+- A password-protected PDF is put on hold whatever GuardDuty said (2026-11-24).
+- A suspended tenant's documents get no new execution; they are queued again once the tenant
+  is active (2026-11-24).
+- The worker, attempts, the sandbox, step 9 as a Lambda step, the quarantine notice and
+  "Mark as reviewed": section 8 (2026-11-24, 2026-11-25).
+- A companion file attached or replaced after ingestion takes effect in the scan step, with
+  the result that made it usable; no task runs and no model is called (2026-11-25).
+- Lambda reserved concurrency: 50 for the scan function (a cap; results over it wait in
+  Lambda's queue for up to an hour, then go to the scan dead-letter queue) and 300 for the
+  TSS (a guarantee). Stack config, both or neither. An account must allow at least 750
+  concurrent executions before they can be set; a new account allows 10 (2026-11-25).
+
+**Audit and what master roles see (sections 5 and 7a)**
+
+- Both master roles see every audit row's actor and target, tenant users' email addresses
+  included: the audit record is not an admin list view (2026-11-23).
+- Who opened a PDF is shown to tenant admins only (2026-11-24).
+- Master admins see a failed step's code and error type; tenants see plain words
+  (2026-11-24).
+
+**Build and deploy (sections 2 and 3)**
+
+- Lambda and task images are built by `scripts/build_image.py` with attestations off, pinned
+  base images, and their dependencies and code as two layers (2026-11-25).
+- A file Git marks as LF is LF on disk (2026-11-27).
+- Staging and Production: raise the Lambda concurrency quota before the first deploy
+  (2026-11-25).

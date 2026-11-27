@@ -7,7 +7,9 @@ change. Where this file and the spec differ, the spec wins.
 
 - **AWS:** profile `pilar-dev`, Region `us-east-1`.
 - **Pulumi:** organization `pilartech`, project `assay-platform`, stack `dev`
-  (`pilartech/assay-platform/dev`). The program lives in `infra/`.
+  (`pilartech/assay-platform/dev`). The program lives in `infra/`. The organization moved
+  to Pulumi Cloud's Free plan on 2026-11-27 (its trial had ended, and previews printed a
+  notice saying so). Nothing in the code or the stack's name changed.
 - **One build step at a time.** Work on exactly one step from BUILD_SPEC.md section 12.
   Stop when it is done and report back. Do not start the next step unasked.
 - **One branch per build step.** Each step's work goes on its own branch, `build-step-N`,
@@ -34,8 +36,163 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24), deployed and verified, on `build-step-6`. **Second half:** plan approved (2026-11-24); stage 1 part 1 (worker task, attempt grant, sandbox, `app_worker`) **deployed** 2026-11-25; isolation run and browser checks passed (2026-11-25), with one throttled TSS call that Lambda's retry recovered (the account allowed 10 concurrent Lambda executions; now 1,000). The TSS API's empty access log is settled (2026-11-25: the logging role's trust policy; proven and permanent). **Part 2 deployed and verified in AWS** by the owner (2026-11-25, migration `0011`): see "Stage 1, part 2". **Deployed and checked by the owner** (2026-11-27): three fixes from that verification, refresh-token rotation on the tenant app client, reserved concurrency (scan 50, TSS 300), a more reliable image build, and every image's dependencies and code as two layers. **Built, not yet deployed** (2026-11-27): rotation on the platform app client, and the rotation checks requiring Cognito's answers by name. See "Step 6, second half" |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stages 2 to 4 not started.** Next: stage 2 (step 5, text). See "Start here" below |
 | 7–9 | Not started |
+
+## Start here: stage 2 of the second half of step 6 (state on 2026-11-27)
+
+A new session can begin stage 2 from this section and BUILD_SPEC.md section 8. Everything
+below it is the record: read the part a task touches.
+
+### Where things stand
+
+- **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
+  against `main`, with CI green. `main` has not been fast-forwarded yet (the owner does
+  that). Stage 2 continues on `build-step-6`.
+- **Deployed.** Stack update 40 (2026-11-27). `pulumi preview` shows 363 unchanged. Aurora
+  is at migration `0011`. All 20 alarms are `OK` (read 2026-11-27 16:48 UTC).
+- **Verified by the owner on 2026-11-27**: the isolation suite passes in all four sections
+  (71 in the isolation Lambda, 28 in the provisioning role's probe, 68 in the worker probe,
+  28 Cognito client checks); refresh-token rotation is on for both portal clients; a forced
+  refresh returns 200 from `/oauth2/token` on both portals; a stale tab shows "Your session
+  has ended. Sign in again to continue."; `check_deployment.py` passes on both reservations
+  (50 and 300, 650 unreserved) and 24 of 25 logs (the break-glass log is not proven: nobody
+  has assumed the role).
+- **What the pipeline does today.** Upload, scan, close, fingerprint (Lambda), claim, the
+  worker task's `inspect` step, release, `companion` (Lambda). Then the execution ends and
+  the document stays `processing`: steps 5 to 8 and 10 do not exist yet, and the portal's
+  steps panel says so (`laterStepsPending`). No content has gone to any AI service.
+
+### Stage 2: what it is, and what must happen first
+
+Step 5 of BUILD_SPEC.md section 8: read each page's text layer with `pypdfium2`, score it,
+send the pages that fail to Textract `DetectDocumentText`, and write
+`derived/text/{doc}.json` and the `pages` rows. **It is the first stage that sends tenant
+content to an AI service.** The plan for all four stages was approved on 2026-11-24 ("Step
+6, second half" below has every decision); stage 2's own design has not been written. Work
+on this one stage, stop when it is done, and report.
+
+Before building, propose to the owner what the plan left open:
+
+1. **How page text leaves the sandbox.** A sandbox child may write no file and may return
+   only one JSON object of at most 64 KB, validated against a model of numbers and codes
+   (`assay_workers.sandbox`). Page text is neither small nor a code. The parent must still
+   never open a PDF and must still distrust the child. This is a design decision for the
+   owner (owner decision B and condition d).
+2. **What an `ai_usage` row holds for Textract** (decision C: every AI call writes one,
+   with tenant, model, tokens and document). Textract is billed by the page, has no tokens,
+   and is not in `ai_models`.
+3. **The quality score**: what makes a page fail and go to Textract.
+4. **Every new permission**, for approval before it is built and listed in the pull
+   request: the worker task role's `textract:DetectDocumentText` (approved in principle,
+   decision 5, for this stage only); a policy for the `textract` interface endpoint, which
+   exists since step 2 with the default policy (the `sqs` and `sns` endpoints name their
+   role, action and resource); `app_worker`'s grants and policies on `pages` and
+   `ai_usage`.
+
+Before stage 2's deploy (decision E, and rule 6): run both checks and **show the owner the
+output**. Last run 2026-11-25 03:58 UTC: `optOut` for every service; no invocation logging
+configuration.
+
+- `aws organizations describe-effective-policy --policy-type AISERVICES_OPT_OUT_POLICY --profile pilar-dev`
+- `aws bedrock get-model-invocation-logging-configuration --profile pilar-dev --region us-east-1`
+
+Rules stage 2 must follow, each already decided (the detail is where the pointer says):
+
+- **A PDF is opened only in a sandbox child**, never by the task's main process and never in
+  a Lambda ("The sandbox"). `pypdfium2` is the `worker` extra of `assay-workers`, capped
+  below 5.16. No `pdfplumber`, no PyMuPDF.
+- **The worker is bound to one document.** It has that document's keys only; its session
+  policy already names the text object (`derived/text/{doc}.json`) for reading and writing.
+  It signs in as `app_worker`, which sees one document ("Binding the worker").
+- **Migration `0012`** is stage 2's: `pages` gets an `attempt` column and is read through
+  `documents.content_attempt` (the pointer exists, unused); nothing is deleted on
+  reprocessing. `app_worker` gets column-level grants and policies for what the step uses.
+  Keep the SQL inline; update `EXPECTED_PRIVILEGES` in `test_db_security.py` in the same
+  change; test as each role, never only as a superuser. (The plan's table gave `0012` to
+  stage 4's Titan row; that takes the next free number when it comes.)
+- **Steps name themselves.** Add the step to `progress.WORKER_STEPS` (which puts it in
+  `PIPELINE_STEPS`), and to the portal's `STEP_TEXT` and `RESULT_TEXT` in plain words. A step
+  that asks "did I already run?" asks about its own attempt's events; a superseded attempt
+  writes nothing.
+- **Textract** is called with the worker's own role and the page's bytes (decision 18),
+  through the VPC endpoint. Throttling is retried with backoff. No page text, prompt or
+  response is logged anywhere; document text is untrusted input.
+- **Master roles never see page text.** No master view or audit row may hold it; add a test.
+- **Tests.** Database tests against a real PostgreSQL signed in as each role; the worker
+  image test in the task's image; the worker probe (`run_isolation.py`) for any new access.
+  A check requires the service's own answer by name, never "refused" in general.
+- **Deploy order.** Deploy when no document is in progress. `pulumi up`; then
+  `uv run scripts/migrate.py` straight away; `uv run scripts/run_isolation.py --tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`;
+  browser checks; `uv run scripts/check_deployment.py`.
+- **Still for stage 4, not stage 2:** where the final status is set (step 9 now runs after
+  the task), removing `laterStepsPending`, and the Titan catalog row with its price blank
+  for the owner.
+
+### What a new session would otherwise rediscover
+
+Each is recorded in full further down; this is the index.
+
+| What | In one line | Where |
+| --- | --- | --- |
+| Cognito's refusals with rotation on | The old refresh flow answers `UnsupportedOperationException`, for a valid token and an invalid one alike; a rotated-out token answers `RefreshTokenReuseException` and revokes nothing else. Never give a client an empty flow list; no pool may have a custom-auth trigger | "Stage 1, part 2", "What Cognito answers on a client with rotation on" |
+| Lambda concurrency | A new account allows 10 concurrent executions. Development has 1,000, with 50 reserved for the scan function (a cap) and 300 for the TSS (a guarantee). Never cap a function whose caller is synchronous | "One scan result failed once" |
+| The TSS API's access log | The API Gateway logging role must admit a call with no source account (`StringEqualsIfExists`). Never change it to `StringEquals`: the log goes silent with no error | "The TSS API's access log received nothing" |
+| IAM propagation | A resource policy that names a role created in the same run as a principal can be refused for some seconds. Such a policy depends on `iam_propagation` (a 30-second wait) | "Policies that name a new role" |
+| Line endings | A file Git marks as LF must be LF on disk; images are built from the bytes on disk. `uv run scripts/check_line_endings.py --fix`. Scripted edits pass `newline="\n"` | "Line endings: files Git marks as LF" |
+| Image builds | "`<repository>@sha256:...`: not found" was the build's own check, not a missing image. Images are confirmed through ECR's API; dependencies and code are two layers | "not found" under "Step 2" |
+| Checks by name | A check that expects "refused" in general hides what was refused. Give each mechanism a case only it can end, and require the service's own answer | "First isolation run after the deploy", the rotation notes |
+| Write a resource as AWS stores it | Otherwise every preview shows a difference (ECS container definitions, API policies, bucket encryption) | Steps 3 and 4 |
+| Deployed names | They are not Pulumi resource names (`assay-dev-pipeline-scan`, not `...-fn`). List before writing a command | "Deployed names are not Pulumi resource names" |
+| Reading the database | Aurora is private. `uv run scripts/migrate.py --command verify` is the read-only way in; Audit history is the way to read `audit_log` | Step 2, "Reading audit_log" |
+| AWS sign-in | The owner's SSO session expires during a long session; `pulumi preview` then fails. The owner runs `aws sso login --profile pilar-dev` | - |
+
+### Open items and known gaps
+
+Decisions the owner has still to make, or things to do:
+
+- **`main`**: fast-forward to `build-step-6` (pull request #5, CI green).
+- **Stage 2's four open design points** (above).
+- **Concurrency numbers**: 50 and 300 rest on a small sample (43 scan runs, 9 at once at
+  most). Measure again once real batches have run.
+- **The 74 files Git checks out with CRLF** on the owner's machine (the portal's `.ts` and
+  `.tsx`, `.json`, `.svg`; `text=auto` under `core.autocrlf=true`). Making them LF would
+  change the bytes of the SVGs Cognito's branding is built from, so it is a change to
+  deploy on purpose.
+- **Dependencies**: ESLint 10.15.0 and `typescript-eslint` 8.74.0 after 2026-12-07; the
+  `fastapi`, `pydantic`, `aws-lambda-powertools` and `pypdfium2` caps, deliberately.
+- **Before production**: VPC flow logs to the Log Archive account; an approval-gated
+  break-glass role; exercise the break-glass rule, log and alarm once; a Cognito signing-key
+  rotation needs a `pulumi up`. **Before Staging or Production**: raise the Lambda quota
+  first, then set the two reservations.
+
+Known gaps: things not proven, or proven only in part:
+
+- **The image build's "not found" failure.** The cause is inferred, not seen: CloudTrail
+  shows the check's request never reached ECR, and the registry client's source shows how
+  a failed request reads as "not found", but the failed request's own error was never kept.
+  The fix is deployed. On 2026-11-27 eight images were pushed together (update 39) and each
+  was confirmed by the first call to ECR's API, within a second. But that day their layers
+  uploaded in seconds, not minutes, so the condition behind both failures did not recur and
+  **the retry path has never run in AWS**. If it happens again the message now says whether
+  the request failed or ECR had no image; record which.
+- **`/oauth2/token`'s answer for a rotated-out refresh token** is not documented by AWS and
+  was not captured. The portal's tests assume `invalid_grant`. In a browser the stale tab
+  did show the session-ended message (owner, 2026-11-27).
+- **The worker's own password check has never been reached by an upload.** GuardDuty held
+  both protected PDFs tried (40-bit and 128-bit RC4) at the scan. AES-encrypted PDFs were
+  not tried. The probe runs the check on Fargate.
+- **The IAM propagation wait** has not been shown to work: only a run that creates a role
+  and such a policy together can show it, and the next one is a new stack.
+- **A RunTask refused for the vCPU quota**: how it reaches Step Functions is not known. The
+  design does not depend on it.
+- **The scan event's `versionId`**: not verified directly that it names the version scanned.
+- **Platform-pool MFA enrolment** is not recorded, and **failed sign-ins** are not audited
+  (both owner decisions; "Known limits").
+- **Cognito's `amr` claim**: whether it shows MFA has still not been checked.
+- **The worker's session policy** still names the companion key for writing; the task no
+  longer writes it.
+- **The break-glass log** is empty because the role has never been assumed.
 
 Step 1 was verified on 2026-11-23:
 
@@ -212,41 +369,24 @@ queue in the SQS endpoint's policy; bucket CORS and the "update every tenant" co
 
 Still open:
 
-- **Rule 6, before the second half:** re-check the AI services opt-out policy and that Bedrock
-  invocation logging is off before any content first goes to Bedrock or Textract (checked on
-  2026-11-24 for the plan: `optOut` for every service, logging off). The first half sends no
-  content to any AI service.
+- **Rule 6, before stage 2's deploy:** re-check the AI services opt-out policy and that
+  Bedrock invocation logging is off, and show the owner the output, before any content first
+  goes to Textract or Bedrock (last checked 2026-11-25 03:58 UTC: `optOut` for every
+  service, logging off). Nothing built so far sends content to any AI service. The commands
+  are under "Start here".
 - **The second-half plan** (owner, 2026-11-24) is approved; its decisions are under "Step 6,
-  second half". What it had to include, for the record:
-  - **The worker (owner decision 8, deferred):** compare the always-on worker with Step
-    Functions starting one ECS task per document (`runTask.sync`): cost, start-up delay,
-    complexity and every permission each needs. Do not build it before the owner chooses.
-  - **Reprocessing:** how a document is processed again (for extraction changes, and for a
-    `failed` document, which today can only be uploaded again; execution names are document
-    IDs and Step Functions keeps them 90 days), with attempt numbers.
-  - **Attaching or replacing a companion file after ingestion** (A4), as part of
-    reprocessing.
-  - **Quarantine notice.** When a file is quarantined, send a security notice to the
-    platform alert topic and write an audit row. The notice names the tenant, the uploading
-    user, the time, the batch and document IDs and GuardDuty's threat name. It never carries
-    the file name or any content. Word it as a security notice, not a system failure, and
-    keep it apart from the pipeline failure alarms (its own sender, subject and wording; no
-    `ERROR` line, so the `-errors` alarms stay quiet). The threat name is not in the scan
-    result event the scan Lambda receives today; the plan must say where it comes from (the
-    GuardDuty finding, for example) and what permission that needs. Also log, and keep in
-    the audit row, the quarantine key and the source version ID, so the copy can be
-    confirmed from logs (today it cannot; see "Quarantine evidence").
-  - **Cognito refresh-token rotation** on both app clients, as assessed (see "Cognito
-    refresh-token rotation" in the step 6 notes). It removes `ALLOW_REFRESH_TOKEN_AUTH` from
-    both clients (`explicit_auth_flows` in `infra/assay_infra/auth.py`). The replica client in
-    `tests/isolation/cognito_clients.py` sets `ExplicitAuthFlows` itself and must follow.
+  second half". What it had to include is all built in stage 1: one worker task per document
+  (owner decision 1), reprocessing with attempt numbers, attaching or replacing a companion
+  file after ingestion, the quarantine notice (the threat name comes from the scan event
+  itself: `detail.scanResultDetails.threats[0].name`, with no GuardDuty permission), and
+  refresh-token rotation on both app clients.
 - **Titan Text Embeddings V2 (owner decisions 1 and 2):** called by model ID in us-east-1 (it
   has no `us.` profile; a named exception to section 2), with an `ai_models` row (job
-  `embed`, migration `0010`; `0009` is the master view's `error_type`) and its price left blank for the owner. Arrives with the second
-  half, when the catalog changes; `seed.py` refuses a catalog with a blank price.
+  `embed`) and its price left blank for the owner. It arrives with stage 4, in that stage's
+  migration; `seed.py` refuses a catalog with a blank price.
 - **Remove the "later steps are not available yet" note** (`laterStepsPending` in
   `portal/src/pages/ingestionFormat.ts` and its Alert in `Steps`, both marked
-  `TODO(build step 6, second half)`) once steps 5 to 10 exist. Until then a document that
+  `TODO(build step 6, second half)`) once steps 5 to 10 exist (stage 4). Until then a document that
   passed fingerprint stays Processing, and the steps panel says why. Add each new step's
   results to `RESULT_TEXT` (plain words; the stored codes are never shown).
 - **Portal:** add every new screen to `SCREENS` in `portal/e2e/layout.e2e.ts` (and its data
@@ -659,6 +799,14 @@ assets/     Logo and favicon SVGs
     the check. And an image already in the repository under its tag is used as it is: the
     tag is the hash of the sources and tags cannot be overwritten, so a run that failed
     after its push costs nothing to repeat.
+  - **What the next full rebuild showed (stack update 39, 2026-11-27 14:41 UTC; CloudTrail,
+    read-only).** Eight images were pushed within four seconds of each other, and each was
+    confirmed by the first `BatchGetImage` from the build script, 0 to 1 second after its
+    `PutImage`. The update succeeded first time. **It does not prove the fix**: that day
+    the layers uploaded in 2 to 6 seconds, not minutes, so the connection was never full
+    and no confirmation had to be retried. Why the upload was so much faster than on
+    2026-11-25 (about 5 Mbit/s then) is not known. The retry path is covered by unit tests
+    only.
   - **Why a full rebuild takes 6 to 7 minutes: it is the upload, not the build.** In update
     37 all eight builds finished within 23 seconds (their layers were cached). Then 259 MB
     went to ECR over about 7 minutes, roughly 5 Mbit/s. Each image's last layer holds every
@@ -1704,13 +1852,13 @@ Plan approved by the owner on 2026-11-24. Every later stage follows these.
 Stages, each one `pulumi up`, then `uv run scripts/migrate.py` if it has a migration, then the
 owner's checks:
 
-| Stage | Builds | Content to AI services |
-| --- | --- | --- |
-| 1, part 1 | The worker task, the attempt grant, the PDF sandbox, `app_worker`, migration `0010` | None |
-| 1, part 2 | Attempts and "Process again", step 9 (companion), companion attach and replace, the quarantine notice, refresh-token rotation, migration `0011` | None |
-| 2 | Step 5: text layer, Textract for pages that fail the quality score | Textract |
-| 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) |
-| 4 | Step 10: chunk, embed, index; final statuses; Titan catalog row (migration `0012`) | Bedrock (Titan) |
+| Stage | Builds | Content to AI services | Status |
+| --- | --- | --- | --- |
+| 1, part 1 | The worker task, the attempt grant, the PDF sandbox, `app_worker`, migration `0010` | None | Complete (2026-11-25) |
+| 1, part 2 | Attempts and "Process again", step 9 (companion), companion attach and replace, the quarantine notice, refresh-token rotation, migration `0011` | None | Complete, verified 2026-11-27 |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Not started. See "Start here" |
+| 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) | Not started |
+| 4 | Step 10: chunk, embed, index; final statuses; Titan catalog row | Bedrock (Titan) | Not started |
 
 Owner decisions (2026-11-24):
 
@@ -2242,8 +2390,10 @@ Notes:
 #### Stage 1, part 2: attempts and "Process again", step 9, companion replacement, the quarantine notice, "Mark as reviewed"
 
 Built on 2026-11-25 (owner's go-ahead once the access log was settled). **Deployed the same
-day** from commit ae46223: stack update 37 failed after creating 6 resources (its error was
-not kept here; CloudTrail shows no refused AWS call for it), and update 38 finished the rest.
+day** from commit ae46223: stack update 37 failed after creating 6 resources, on the worker
+image's build: "`<registry>/assay-dev-pipeline-worker@sha256:24069468...`: not found" (the
+owner kept the message; it was the build's own check, not a missing image: see "not found"
+under "Step 2"). Update 38 finished the rest.
 `uv run scripts/migrate.py --command verify` (read-only): revision `0011`,
 `rls_verified: true`, `roles_verified: true`. The security-notice address is confirmed.
 The owner's isolation run after the deploy: 71 of 71, 28 of 28, 68 of 68, 7 of 7.
@@ -2267,7 +2417,8 @@ period). It settles decision 4 below; the real clients are unchanged until the o
   has post-confirmation, post-authentication and pre-token-generation; the platform pool
   the first two). A rule that goes with this setting: those three triggers are never added
   to a pool whose client lists `ALLOW_CUSTOM_AUTH`.
-- Both real clients today: `['ALLOW_REFRESH_TOKEN_AUTH']`, no rotation.
+- Both real clients at the time of the probe: `['ALLOW_REFRESH_TOKEN_AUTH']`, no rotation.
+  (Since 2026-11-27 both have `['ALLOW_CUSTOM_AUTH']` with rotation on.)
 - **Not shown by the probe** (the replica has no managed login domain): that managed login
   still signs a user in when the client's only flow is `ALLOW_CUSTOM_AUTH`, and that the
   portal's refresh through `/oauth2/token` returns a new refresh token. Today's clients
@@ -2285,12 +2436,10 @@ rejected because it allows `USER_SRP_AUTH`. Two steps:
    `ALLOW_CUSTOM_AUTH`. The same deploy set the reserved concurrency (`check_deployment.py`:
    50 and 300, 650 unreserved) and the two-layer images; the isolation run passed 71, 28
    and 68, and 24 of 26 Cognito checks (the two below).
-2. **The platform client** (`platformRefreshTokenRotation: "true"`): **built 2026-11-27,
-   not yet deployed.** Preview: 2 to update (the platform app client: its flow becomes
-   `ALLOW_CUSTOM_AUTH`, rotation `ENABLED`, 10 seconds; the isolation function, for its
-   image), 1 to replace (the isolation image's build, because the rewritten checks are in
-   `tests/isolation/`, which that image is built from), 360 unchanged. To go back: set the
-   key to `"false"` and run `pulumi up`.
+2. **The platform client** (`platformRefreshTokenRotation: "true"`). **Deployed and
+   verified by the owner on 2026-11-27** (stack update 40): a forced refresh returns 200 on
+   both portals, and the Cognito section of the isolation run passes 28 of 28. To go back
+   on either client: set its key to `"false"` and run `pulumi up`.
 
 **What Cognito answers on a client with rotation on** (isolation run of 2026-11-27, and
 AWS's pages read the same day). The run's two failures were refusals the checks did not
@@ -2304,8 +2453,10 @@ was refused and why; require the service's own answer by name.**
   for the user pool client." So it is about the client, not the token. **AWS does not say
   whether the token is looked at first.** The check now asks twice, with the user's current
   refresh token and with one that is not valid (one character changed), and requires the
-  same answer: if the token were judged first, the second would answer differently. Its
-  outcome against Cognito is not known until the next isolation run.
+  same answer: if the token were judged first, the second would answer differently.
+  **Settled by the owner's run of 2026-11-27 (28 of 28): Cognito gives the same
+  `UnsupportedOperationException` for a token that is not valid.** So the flow is refused
+  for the client, whatever the token: nothing about the token is judged.
 - **A rotated-out refresh token, used after its grace period, answers
   `RefreshTokenReuseException`.** AWS: "thrown when your application requests token refresh
   with a refresh token that has been invalidated by refresh-token rotation." **AWS's pages
@@ -2335,8 +2486,9 @@ How it is built:
 
 - **A switch per client in stack config**, read into `AuthConfig`: `"true"` (rotation on,
   `ALLOW_CUSTOM_AUTH` only), `"false"` (rotation sent as `DISABLED` and the refresh flow
-  restored: the way back), or unset (the client is not mentioned, exactly as before; the
-  platform client today). `auth.explicit_auth_flows` never returns an empty list.
+  restored: the way back), or unset (the client is not mentioned, exactly as before
+  rotation existed here). Both keys are `"true"` in the dev stack since 2026-11-27.
+  `auth.explicit_auth_flows` never returns an empty list.
 - **Rule: no pool may ever have a custom-auth trigger** (`DefineAuthChallenge`,
   `CreateAuthChallenge`, `VerifyAuthChallengeResponse`). That is what keeps
   `ALLOW_CUSTOM_AUTH` from being a sign-in. Held by `test_no_pool_has_a_custom_auth_trigger`,
@@ -2451,7 +2603,8 @@ that rotation (4) stays off on the real clients until they have read the probe's
    rule; a failure is retried with the scan event and then alarmed by its dead-letter queue.
 3. **Audit category `document`** is new (the plan named only `security`). Audit history's
    category filter has both.
-4. **Refresh-token rotation is not switched on for the real app clients yet.** AWS's pages
+4. **Refresh-token rotation was not switched on with part 2** (superseded: it is on for
+   both clients since 2026-11-27; see "Rotation: the owner's decision" above). AWS's pages
    (read 2026-11-25) say rotation "isn't compatible with" `REFRESH_TOKEN_AUTH` and that a
    client with no explicit flows gets `ALLOW_REFRESH_TOKEN_AUTH`, `ALLOW_USER_SRP_AUTH` and
    `ALLOW_CUSTOM_AUTH` by default; they do not say what a client with rotation on and an
@@ -2517,9 +2670,10 @@ from the topic's ARN, which is unknown until the topic exists; their content is 
   and the notice has no file name and no content;
 - audit rows for all of them; idle-timeout sign-outs and audited ingestion exports too.
 
-**Preview for everything built on 2026-11-25** (the three fixes, rotation step 1, the
-reserved concurrency, the build change and the two-layer images): **13 to update, 12 to
-replace, 338 unchanged**, and two new outputs.
+**Deployed by the owner on 2026-11-27 as stack update 39** (commit 3f2a073), in 1 minute 7
+seconds, first time: the three fixes, rotation step 1, the reserved concurrency, the build
+change and the two-layer images. Its preview: **13 to update, 12 to replace, 338
+unchanged**, and two new outputs.
 
 - Update: the tenant app client (`ALLOW_CUSTOM_AUTH`, rotation `ENABLED`, 10 seconds);
   `assay-dev-pipeline-scan` (`reservedConcurrentExecutions` -1 to 50, and its image);
@@ -2536,8 +2690,8 @@ replace, 338 unchanged**, and two new outputs.
   tenant client's refresh among them); `uv run scripts/check_deployment.py`, which must
   now show both reservations as the stack says.
 
-Three things the owner found, fixed the same day (built, **not yet deployed**; no migration,
-no grant, no permission change):
+Three things the owner found, fixed the same day (deployed 2026-11-27; no migration, no
+grant, no permission change):
 
 1. **A replacement that did not take effect left only its request in the audit trail.** Now
    every `companion_replace_requested` row is followed by exactly one row that says how it
