@@ -36,43 +36,48 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) built on 2026-11-27, not deployed.** Stages 3 and 4 not started. Next: the owner's deploy and checks of stage 2. See "Start here" below |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) complete and verified in dev** (2026-11-27). Stages 3 and 4 not started. Next: stage 3, which needs its plan first. See "Start here" below |
 | 7–9 | Not started |
 
-## Start here: stage 2 of the second half of step 6 is built and waits for its deploy (state on 2026-11-27)
+## Start here: stage 2 of the second half of step 6 is deployed and verified; stage 3 needs its plan (state on 2026-11-27)
 
 A new session starts from this section and BUILD_SPEC.md section 8. Everything below it is
-the record: read the part a task touches. **Stage 2 (step 5, text) is built and tested, and
-not deployed.** The next things are the owner's: the deploy, the checks under "Deploying
-stage 2", and the 1,000-page run. Stage 3 is not started and needs its own plan first.
+the record: read the part a task touches. **Stage 2 (step 5, text) is built, deployed and
+verified in dev.** Stage 3 is not started and needs its own plan first.
 
 ### Where things stand
 
 - **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
   against `main`. `main` has not been fast-forwarded yet (the owner does that). Stage 3
   continues on `build-step-6`.
-- **Tested (2026-11-27, commit 6f5b3bf).** The whole suite with the test PostgreSQL and the
-  image tests required (`ASSAY_REQUIRE_DB_TESTS=1`, `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,792
-  passed, none failed, none skipped. CI passed on the same commit (`python`, `portal`,
-  `portal-render`). CI had failed once, on commit 6ed9c55: one test, which showed that a
-  Textract call that succeeded after its neighbour failed was billed and not recorded; fixed
-  in 6f5b3bf. The rendered portal check passed (48 of 48), and the step panel's Text line was
-  looked at in both views.
-- **Deployed.** Still stack update 40 (2026-11-27), Aurora at migration `0011`: stage 2 is
-  not in AWS yet. The preview for stage 2 (2026-11-27): 2 to create (the Textract
-  endpoint's policy and the spend alarm), 14 to update, 12 to replace (eight image builds,
-  the three task definitions, the portal build), 337 unchanged.
-- **Rule 6, checked before stage 2 was built** (2026-11-27): the AI services opt-out policy
+- **Deployed: stage 2, as stack update 41** (2026-11-27, commit 524a0aa), with Aurora at
+  migration `0012` (owner).
+- **Verified in dev by the owner (2026-11-27).**
+  - The isolation suite passes: 73 in the isolation Lambda, 28 in the provisioning role's
+    probe, 101 in the worker probe, 28 Cognito checks.
+  - The Text line is right for the five synthetic files: 01 and 04 all from the text layer;
+    08 three pages by OCR; 09 one from the text layer and two by OCR; 10 one by OCR.
+  - The 1,000-page file was read in 7 minutes 48 seconds ("The 1,000-page run" below).
+- **Built after that, not deployed: the upload screen's fixes** ("Upload: files that went
+  missing" below). No migration and no permission change; the next `pulumi up` rebuilds the
+  portal.
+- **Tested (2026-11-27).** Stage 2, at commit 6f5b3bf: the whole suite with the test
+  PostgreSQL and the image tests required (`ASSAY_REQUIRE_DB_TESTS=1`,
+  `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,792 passed, none failed, none skipped, and CI passed
+  (`python`, `portal`, `portal-render`). The upload fixes: the portal's type check, lint and
+  118 unit tests pass, and the rendered check passes, 58 of 58 (the 48 layout checks and the
+  10 new upload checks).
+- **Rule 6** (checked 2026-11-27, before stage 2 was built): the AI services opt-out policy
   in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
-  UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is now
-  the first part of `uv run scripts/check_deployment.py` in every mode;
-  `uv run scripts/check_deployment.py --ai-services` runs it alone. Run it again, and read
-  it, before the deploy.
-- **What the pipeline does once stage 2 is deployed.** Upload, scan, close, fingerprint
-  (Lambda), claim, the worker task's `inspect` and `text` steps, release, `companion`
-  (Lambda). Then the execution ends and the document stays `processing`: steps 6 to 8 and 10
-  do not exist yet, and the steps panel says so (`laterStepsPending`, now keyed on the text
-  step's result). **Textract is the first AI service that gets tenant content.**
+  UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is the
+  first part of `uv run scripts/check_deployment.py` in every mode;
+  `uv run scripts/check_deployment.py --ai-services` runs it alone. **Run it again, and read
+  it, before stage 3's deploy:** Bedrock is the next service to get tenant content.
+- **What the pipeline does now.** Upload, scan, close, fingerprint (Lambda), claim, the
+  worker task's `inspect` and `text` steps, release, `companion` (Lambda). Then the
+  execution ends and the document stays `processing`: steps 6 to 8 and 10 do not exist yet,
+  and the steps panel says so (`laterStepsPending`, keyed on the text step's result).
+  **Textract is the first AI service that gets tenant content**, since 2026-11-27.
 
 ### Stage 2: what was built
 
@@ -204,7 +209,10 @@ document goes on. The Text line of both step panels shows the count.
   grant, security groups, the set of endpoints, queues, topics, the state machine's role or
   any Lambda's role. No `update_tenants.py` run: no tenant stack resource changes.
 
-### Deploying stage 2 (the owner)
+### How stage 2 was deployed and checked (the owner, 2026-11-27)
+
+Done in this order on 2026-11-27, and every check passed. Kept as the order for a later
+stage.
 
 Stack config, all four required (a stack without one fails `pulumi preview`):
 `textractPricePerPage` (set by the owner: `0.0015`), `textQualityThreshold` (`0.90`),
@@ -219,6 +227,7 @@ Stack config, all four required (a stack without one fails `pulumi preview`):
    **If "textract: reads a synthetic page (the task's role)" is refused with
    `AccessDeniedException`, stop and tell the owner:** it would mean Textract does not
    honour the `aws:SourceVpce` condition, and removing it is the owner's decision.
+   (2026-11-27: allowed in both runs. Textract honours the condition.)
 5. `uv run scripts/make_test_files.py --fresh`, upload as Infinity Loans, and read each
    document's Text line: 01 and 04 all from the text layer; 08 three read by OCR; 09 one
    from the text layer and two by OCR; 10 one by OCR.
@@ -230,29 +239,128 @@ Stack config, all four required (a stack without one fails `pulumi preview`):
    `11-scanned-1000-pages.pdf` alone, and compare with the figures below. It sends 1,000
    pages to Textract, half the spend alarm's threshold.
 
-### What the 1,000-page run is compared with (estimates, not measured)
+### The 1,000-page run (measured 2026-11-27)
 
-- **Time:** 12 to 17 minutes for the text step, inside the task's 30 minutes.
-- **Memory:** the task has 4,096 MB and 1 vCPU. Expected peak near 0.5 GB: about 250 MB in
-  the parent (one record in hand, two Textract calls in flight) and 200 to 400 MB in the
-  child. The caps bound the worst case near 2.3 GB (the child's address space stops at
-  2 GiB). Read the task's peak from Container Insights (`MemoryUtilized`, cluster
-  `assay-dev-pipeline-worker`).
-- **Disk:** the parent keeps at most 8 pictures (40 MB) and the pages' text in its private
-  directory on the task volume.
+`11-scanned-1000-pages.pdf`, uploaded alone as Infinity Loans (owner). 1,000 pages read by
+OCR, none unread. Read from AWS afterwards, read-only. The estimates made before the run are
+kept beside each figure.
+
+| What | Measured | The estimate |
+| --- | --- | --- |
+| The text step | **7 minutes 48 seconds** (the task's log: `inspected` 20:50:25.9 UTC, `text read` 20:58:13.7 UTC). About 2.1 pages a second; Textract answered 133 to 142 pages in each full minute | 12 to 17 minutes; the task's limit is 30 |
+| The task's memory | **Peak 102 MB of 4,096 MB**. Container Insights, one sample a minute: 57, 96, 102, 102, 101, 96, 98, 97 MB | Near 0.5 GB; worst case near 2.3 GB |
+| CPU | 280 to 330 of the task's 1,024 units (461 in the first minute) | - |
+| Task storage in use | 0.3 GB | 40 MB of pictures, and the text |
+| Textract calls | **1,000 successful** (`AWS/Textract` `SuccessfulRequestCount`, `Operation` `DetectDocumentText`; per minute 20, 133, 137, 136, 140, 138, 138, 142, 16). Response time 600 ms on average, 1,352 ms at most | 1,000 |
+| Throttling | **None.** `ThrottledCount`, `ServerErrorCount` and `UserErrorCount` have no data point in the run's minutes | - |
+| The spend alarm | `OK`. The day's total was 1,008 successful calls, accounted for below | Half the threshold |
+
+- **The day's 1,008 successful calls, all accounted for** (2026-11-27 UTC, by the minute;
+  CloudTrail names the caller of each):
+  - 1,000 for this file (20:50 to 20:58 UTC).
+  - 6 for the first batch's 08, 09 and 10 (3, 2 and 1 pages; 20:29 UTC).
+  - 2 that no document accounts for: the worker probe's positive control, "textract: reads
+    a synthetic page (the task's role)", once in each of the day's two isolation runs
+    (20:14:25 UTC, task `77ae943c…`, and 20:25:58 UTC, task `26f0e421…`). Both came from the
+    worker task's role through the Textract endpoint. The page is one the probe draws, never
+    a tenant's. Each call wrote its `ai_usage` row for the probe's fixture document in
+    Isolation Test A, at no price (the probe does not know the price), and AWS bills the
+    page all the same. **Every isolation run costs one Textract page.**
+  - The 8 user errors are the probes' deliberate refusals, four in each run.
+- **Retries: none that reached Textract.** The task tries a call again only after throttling,
+  a server error or no answer, and Textract counted no throttling and no server error. A
+  call that Textract completed and the task then repeated would have been counted twice, and
+  the count is exactly 1,000. **Not visible:** a connection that failed before it reached
+  Textract. The task does not log a retry, so nothing else can show one.
+- **`ai_usage` rows: not counted.** No read path reaches `ai_usage` from outside the VPC
+  (the migration Lambda's `verify` reads no rows; `platform_reader` has no view over it).
+  The evidence is indirect: 1,000 successful calls, one row written for each success, and a
+  failed insert fails the step, which ended well. Counting them needs a new read path.
+- **What the memory figure does not show.** One sample a minute, so a spike between two
+  samples is not seen. And the synthetic scans are small one-bit pictures: a real scan's
+  page picture is larger (up to the 5,000,000-byte cap), so real documents will use more.
+  The caps still bound the worst case near 2.3 GB.
+- Where to read these again: Container Insights' performance log group
+  `/aws/ecs/containerinsights/assay-dev-pipeline-worker/performance` (filter on the task's
+  ID), and CloudWatch's `AWS/Textract` metrics.
 
 ### Not verified, and how and when each gets settled
 
 | What | Settled by | When |
 | --- | --- | --- |
-| `aws:SourceVpce` on the worker's Textract permission: whether Textract honours it | The worker probe's "textract: reads a synthetic page (the task's role)". Allowed: it works. `refused:AccessDeniedException`: stop and ask the owner | The first isolation run after the deploy |
-| The words of the endpoint policy's refusal ("VPC endpoint policy" in the message) | The isolation Lambda's `test_textract.py`. If the code is `AccessDeniedException` and the message says something else, record the message and correct the test | The first isolation run |
-| Textract's answer when it is pointed at an object the caller cannot read. The probe expects `InvalidS3ObjectException`; that is from memory | The worker probe's two "textract: pointed at ..." checks print the code. If it differs, record it here and require that one. `allowed` would be a real failure | The first isolation run |
+| `aws:SourceVpce` on the worker's Textract permission: whether Textract honours it | **Settled 2026-11-27: it does.** The worker probe's "textract: reads a synthetic page (the task's role)" was allowed in both isolation runs, and CloudTrail shows both calls coming through the Textract endpoint | Done |
+| The words of the endpoint policy's refusal ("VPC endpoint policy" in the message) | **Settled 2026-11-27:** the isolation Lambda's suite passed (73 of 73, `test_textract.py` included), so the message is as the test requires | Done |
+| Textract's answer when it is pointed at an object the caller cannot read | **Settled 2026-11-27: `InvalidS3ObjectException`**, for the task's own document and for another tenant's alike (the worker probe's log, both runs) | Done |
 | Textract's size limit for one picture (5 MB or 10 MB) | Not needed: pictures stay under 5,000,000 bytes | - |
 | PDFium: greyscale drawing without an image library, form fields, image coverage | **Settled 2026-11-27:** `tests/unit/test_worker_image.py`, with the real child in the task's image (the four synthetic files) | Done |
-| That Textract reads the dot-matrix letters of the synthetic scans well | The owner's browser check of 08, 09 and 10. A poor read shows as low `ocr_confidence`, not as a failure | The browser checks |
-| 1,000 scanned pages inside 30 minutes, and the memory figures | The 1,000-page run | Before the stage closes |
+| That Textract reads the dot-matrix letters of the synthetic scans well | **In part (2026-11-27):** the owner's check of 08, 09 and 10 shows every scanned page read by OCR and none unread. How well is not known: `ocr_confidence` is in `pages`, which has no read path yet | With the first screen that shows a page's text |
+| 1,000 scanned pages inside 30 minutes, and the memory figures | **Settled 2026-11-27:** 7 minutes 48 seconds, peak memory 102 MB ("The 1,000-page run" above) | Done |
 | How soon the spend alarm fires | **Settled 2026-11-27** from AWS's alarm evaluation page: with no evaluation window set, an alarm slides. It is checked every minute against the 24 hours before it, so it fires within minutes of the 2,001st page, and stays in ALARM until those 24 hours hold 2,000 or fewer. It notifies on the change of state only. Not seen firing | Read |
+
+### Upload: files that went missing on 2026-11-27, and what the screen does now
+
+**What happened** (owner, as Infinity Loans, four additions between 15:28 and 15:42
+Eastern). Twice, fewer files appeared in the batch than were selected, with nothing on the
+screen to say so: six selected and three listed, then three selected and two listed.
+
+**What the server saw** (the load balancer's access log and the API's own log, read-only).
+One registration request per batch, each answered 201, none failed and none repeated. By
+their sizes (about 123 bytes a file in the request, about 2,075 in the answer) the two short
+batches registered three files and two. So the missing files were never sent to the API:
+never registered, never given an upload link, never uploaded. Request bodies are not logged,
+so no file name can be seen, and nothing shows what the browser was handed.
+
+**Verdict: unproven, and the evidence points away from the portal.**
+
+- No path in the code registers fewer files than the page is handed without saying so.
+- A rendered test adds the same six files 60 times at each of two widths (chosen 40 times,
+  dropped 20), in a different order each time, against a stand-in API that answers after
+  varying delays. All six were registered and listed every time, on that day's code too.
+- What no test and no log can show is what the Windows file picker handed the page. In both
+  short batches the missing files are the first in name order, which is what a click
+  without Ctrl partway through a selection leaves. That fits. It is not proof.
+
+**One real defect was found on the way. It was not the cause** (no registration was refused
+that day). A refused action's reason vanished: the screen read the batch again after a
+refused registration or close, and that reload cleared the error. "The batch already has a
+file with that name." showed for a moment and then nothing, with the files not added. The
+first reading of the code missed it; the test written for it fails on the old code.
+
+**What the screen does now** (owner's decisions, 2026-11-27; `portal/src/pages/Upload.tsx`,
+`portal/src/upload.ts`):
+
+1. **The line.** Every addition says how many files the page was handed and how many are
+   now in the batch: "6 files chosen: 6 added." or "6 files chosen: 4 added, 2 not added."
+   The number chosen shows at once ("6 files chosen: adding them."), before the API has
+   answered. The line stays until the next addition or until it is dismissed. A short
+   selection is seen the moment it happens.
+2. **"Not added" keeps every entry until it is dismissed.** A later addition adds to the
+   list and never clears it.
+3. **No picker while an addition runs.** The file input has no disabled state in this
+   Cloudscape version, so a disabled button stands in its place. A drop made then is not
+   queued and not ignored: each of its files is listed under "Not added" ("Other files were
+   still being added. Add it again.").
+4. **Each file goes to the link registered under its own name**, never by its position in
+   the answer (`matchRegistered`). The API stores a name without surrounding spaces, so
+   names are compared that way. A file the answer left out is listed under "Not added".
+5. **No silent return.** Adding files with no batch loaded shows an error.
+6. **A refused action's reason stays** until it is dismissed or the next action succeeds.
+   Reading the batch again clears only an error that reading it raised.
+
+**The tests** (`portal/e2e/upload.e2e.ts`, part of the `portal-render` job, about a minute
+more): the additions above, the line, "Not added", an addition made while another runs, and
+a refused registration. Each fix was shown to be guarded: the tests were run against a copy
+of the portal with that one fix undone, inside the container only, and failed there.
+`portal/src/upload.test.ts` covers the two helpers.
+
+**Lessons.**
+
+- A reload after an action must not erase what the action reported. Look for "set the
+  error, then read again" where the read clears errors.
+- Playwright's `getByText` matches a substring and ignores case: "Not added" also matched
+  "1 not added." Give an element a test ID when its words can appear elsewhere.
+- The server's logs can show how many files a request registered, by its size, and never
+  which files.
 
 ### For stage 3 (steps 6 to 8: split, signer details, field extraction)
 
@@ -273,6 +381,31 @@ Stack config, all four required (a stack without one fails `pulumi preview`):
   tenant, document and attempt (`pipeline.bound_attempt()` exists now). A SQL check passes on
   NULL: require each value outright (`units IS NOT NULL AND units >= 1`).
 - Add each step to `progress.WORKER_STEPS`, the portal's `STEP_TEXT` and `RESULT_TEXT`.
+
+### For stage 4: the 30 seconds after a task's last step (owner's decision, 2026-11-27)
+
+Every document shows about 30 seconds between the Text step's result and the Companion
+step's, with or without a companion file. None of it is our code working. It is Fargate
+stopping the task, inside the `Worker` state, which waits until the task is `STOPPED`
+(`ecs:runTask.sync`). Measured on 2026-11-27, seven tasks:
+
+| From | To | Seconds |
+| --- | --- | --- |
+| The task's last write | The process exits | about 0.4 |
+| The process exits | ECS begins stopping the task | 10.0 (10.04 to 10.06 every time) |
+| Stopping | The task is `STOPPED` | 13 to 18 |
+| `STOPPED` | Step Functions hears of it | about 1.2 |
+| `release` | Done | 0.13 warm, 3.2 after nine idle minutes |
+| `companion` | Done | 0.3 to 0.4 |
+
+- **The plan for stage 4:** the final status is set inside the task, at its last write, and
+  the companion step runs before the task or beside it. The document then shows finished
+  when the work is finished, and the teardown happens out of sight. No new permission.
+- **Rejected by the owner:** a task-token callback (`.waitForTaskToken`). It would give the
+  worker task's role, the least trusted one, a Step Functions permission.
+- **Only if batch throughput ever matters:** a state machine that polls for the task's
+  result and releases the tenant's worker slot before the teardown ends.
+- **Change nothing before stage 4.**
 
 ### What a new session would otherwise rediscover
 
@@ -298,13 +431,27 @@ Each is recorded in full further down; this is the index.
 | Shell edits with backslashes | A bash heredoc halves them and can hang on `python`. Write the script with the Write tool, then run it with `uv run python` | - |
 | One test session at a time | Each pytest session resets the test PostgreSQL when it starts (it drops every `assay_test_*` database and the roles). A second session started meanwhile destroys the first one's databases: 62 failures and 31 errors, all "does not exist", on 2026-11-27 | `tests/unit/pgtest.py` |
 | Two calls in flight | Answers from two threads do not arrive in page order. A test that assumes they do passes on one machine and fails on another (CI found it); and a page that succeeded after its neighbour failed was still billed | `worker/text.py`, `_send_to_textract` |
+| A reload that erases an error | The Upload screen read the batch again after every refused action, and the reload cleared the error: a refused registration showed its reason for a moment, then nothing | "Upload: files that went missing" |
+| What the file picker hands the page | Neither the server nor a test can see it. The screen now says how many files it was handed and how many it added | "Upload: files that went missing" |
+| The 30 seconds after the Text step | Fargate stopping the task, not our code. Stage 4 moves the final status into the task | "For stage 4" |
+| One Textract page per isolation run | The worker probe's positive control is a real, billed call on a synthetic page, with its own `ai_usage` row | "The 1,000-page run" |
 
 ### Open items and known gaps
 
 Decisions the owner has still to make, or things to do:
 
 - **`main`**: fast-forward to `build-step-6` (pull request #5, CI green).
-- **Stage 2's deploy, checks and 1,000-page run** ("Deploying stage 2" above).
+- **Deploy the upload fixes** (the next `pulumi up`; the portal build), and look at the
+  line after an addition in a browser.
+- **When the usage and cost view is built: verify that `11-scanned-1000-pages.pdf`
+  (Infinity Loans, 2026-11-27) shows exactly 1,000 Textract rows** (owner, 2026-11-27). No
+  read path reaches `ai_usage` today, and none is to be added for this. The evidence so far
+  is indirect: 1,000 successful calls, one row written for each, and a step that ended well.
+- **Right-size the worker task only after real scanned documents have been measured**
+  (owner, 2026-11-27). It peaked at 102 MB of 4,096 MB on synthetic one-bit scans, which
+  says little about real ones.
+- **Stage 4: the final status inside the task, the companion step before or beside it**
+  (owner, 2026-11-27; "For stage 4" above). Nothing changes before then.
 - **Straight after stage 2, as its own change: limit the GuardDuty scan role to `inbox/`**
   (owner, 2026-11-27). Today that role's policy reaches every object in every tenant bucket
   (originals, text objects) and may decrypt through S3; only GuardDuty can assume it. AWS's
@@ -540,11 +687,11 @@ queue in the SQS endpoint's policy; bucket CORS and the "update every tenant" co
 
 Still open:
 
-- **Rule 6, before stage 2's deploy:** re-check the AI services opt-out policy and that
+- **Rule 6, before stage 3's deploy:** re-check the AI services opt-out policy and that
   Bedrock invocation logging is off, and show the owner the output, before any content first
-  goes to Textract or Bedrock (last checked 2026-11-27: `optOut` for every service, logging
-  off). The check is `uv run scripts/check_deployment.py --ai-services`, and it runs first in
-  every mode of that script. Stage 2, once deployed, sends page pictures to Textract.
+  goes to Bedrock (last checked 2026-11-27: `optOut` for every service, logging off). The
+  check is `uv run scripts/check_deployment.py --ai-services`, and it runs first in every
+  mode of that script. Stage 2 sends page pictures to Textract since 2026-11-27.
 - **The second-half plan** (owner, 2026-11-24) is approved; its decisions are under "Step 6,
   second half". What it had to include is all built in stage 1: one worker task per document
   (owner decision 1), reprocessing with attempt numbers, attaching or replacing a companion
@@ -2027,7 +2174,7 @@ owner's checks:
 | --- | --- | --- | --- |
 | 1, part 1 | The worker task, the attempt grant, the PDF sandbox, `app_worker`, migration `0010` | None | Complete (2026-11-25) |
 | 1, part 2 | Attempts and "Process again", step 9 (companion), companion attach and replace, the quarantine notice, refresh-token rotation, migration `0011` | None | Complete, verified 2026-11-27 |
-| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Built 2026-11-27, not deployed. See "Start here" |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Complete, verified in dev 2026-11-27. See "Start here" |
 | 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) | Not started |
 | 4 | Step 10: chunk, embed, index; final statuses; Titan catalog row | Bedrock (Titan) | Not started |
 
@@ -2064,7 +2211,7 @@ Owner decisions (2026-11-24):
 - **D.** Document text is untrusted input to the model: forced tool choice and schema
   validation stay, and a test uses a document that contains instructions.
 - **E.** Before stage 2's deploy: re-run the opt-out and invocation-logging checks and show
-  the owner the output. (Run on 2026-11-25 03:58 UTC for the plan: `optOut` for every
+  the owner the output (done on 2026-11-27; the same again before stage 3's deploy). (Run on 2026-11-25 03:58 UTC for the plan: `optOut` for every
   service, last updated 2026-11-24 04:37:58 UTC; no invocation logging configuration.)
 - **Conditions on part 1** (a to f): the token's visibility recorded as a known limit; the
   isolation tests below, run in AWS; the sandbox image tests below; the parent distrusts the

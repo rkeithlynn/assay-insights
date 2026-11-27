@@ -9,8 +9,8 @@ Status of decisions: all confirmed by the owner (Keith Lynn) on 2026-11-21.
 
 Amended during the build, each time by an owner decision. Section 14 lists every amendment
 with its date; where it differs from an earlier section, section 14 wins. Sections 2, 3, 7,
-7a, 8, 10, 11 and 12 have been brought into line with it (last on 2026-11-27, when stage 2
-of the second half of build step 6 was built). `CLAUDE.md` holds the reasoning, the evidence
+7a, 8, 10, 11 and 12 have been brought into line with it (last on 2026-11-27, after stage 2
+of the second half of build step 6 was deployed and verified in dev). `CLAUDE.md` holds the reasoning, the evidence
 and the working notes.
 
 ## 1. Goal and scope
@@ -528,11 +528,14 @@ Stages of steps 5 to 10 (each a deploy and the owner's checks):
 | Stage | Builds | Content to AI services | Status |
 | --- | --- | --- | --- |
 | 1 | The worker task, the attempt grant, the sandbox, `app_worker`; attempts and "Process again"; step 9; companion attach and replace; the quarantine notice; "Mark as reviewed" (migrations `0010`, `0011`) | None | Complete, verified 2026-11-27 |
-| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Built 2026-11-27, not deployed |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Complete, verified in dev 2026-11-27 |
 | 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) | Not started |
 | 4 | Step 10: chunk, embed, index; final statuses; the Titan catalog row | Bedrock (Titan) | Not started |
 
-Until stage 4, a document that passes its steps stays `processing`.
+Until stage 4, a document that passes its steps stays `processing`. In stage 4 the final
+status is set inside the worker task, at its last write, and the companion step runs before
+the task or beside it: Fargate takes about 30 seconds to stop a task, and nothing should wait
+for that (owner, 2026-11-27).
 
 Treat document text as untrusted input. The model gets no tools beyond the extraction
 schema, and nothing it returns chooses a tenant, a bucket or a SQL statement.
@@ -758,7 +761,11 @@ and `GET /me` decides the navigation.
   price per million tokens.
 - **Upload.** New batch (optional name), drop zone, file list with size, progress and
   "companion file matched" or "no companion file", inline validation errors, Close batch
-  and Discard batch. Closing switches to that batch's ingestion history.
+  and Discard batch. Closing switches to that batch's ingestion history. No file goes
+  missing without a word: every addition shows how many files were chosen and how many were
+  added, until the next addition or until it is dismissed; files left out stay listed under
+  "Not added" until dismissed; files cannot be chosen while an addition runs; and the reason
+  an addition or a close was refused stays on the screen.
 - **Ask.** Own conversations on the left, the conversation in the middle, a PDF.js
   viewer on the right. Answers stream; each citation chip shows file name and page and
   opens the PDF at that page with the passage highlighted. Empty state when no document
@@ -936,6 +943,27 @@ owner accepted.
 12. The AI services check (the opt-out policy in effect, and Bedrock invocation logging off)
     is part of `scripts/check_deployment.py` in every mode, and must pass before any content
     goes to an AI service.
+
+**After stage 2 (all 2026-11-27)**
+
+1. Stage 2 is deployed and verified in dev: migration `0012`; the isolation suite passes (73,
+   28, 101 and 28 checks); the step panel's Text line is right for the five synthetic files;
+   1,000 scanned pages were read in 7 minutes 48 seconds, with a peak of 102 MB of the task's
+   4,096 MB and no throttling.
+2. The Upload screen states, after every addition, how many files were chosen and how many
+   were added, until the next addition or until dismissed. "Not added" entries stay until
+   dismissed. Nothing can be chosen while an addition runs, and a drop made then is listed by
+   name. Each file goes to the upload link registered under its own name. A refused
+   addition's or close's reason stays on the screen (section 11).
+3. Stage 4 sets the final status inside the worker task and runs the companion step before
+   the task or beside it (section 8). A task-token callback is rejected: it would give the
+   worker task's role a Step Functions permission. Nothing changes before stage 4.
+4. The worker task is right-sized only after real scanned documents have been measured: the
+   102 MB peak is from synthetic one-bit scans.
+5. `ai_usage` gets no read path for now. When the usage and cost view is built, it must show
+   exactly 1,000 Textract rows for `11-scanned-1000-pages.pdf` (Infinity Loans, 2026-11-27).
+6. Every isolation run makes one real Textract call, on a page the probe draws, and records
+   it in `ai_usage`.
 
 **Audit and what master roles see (sections 5 and 7a)**
 
