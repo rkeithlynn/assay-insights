@@ -51,10 +51,17 @@ stage 2", and the 1,000-page run. Stage 3 is not started and needs its own plan 
 - **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
   against `main`. `main` has not been fast-forwarded yet (the owner does that). Stage 3
   continues on `build-step-6`.
+- **Tested (2026-11-27, commit 6f5b3bf).** The whole suite with the test PostgreSQL and the
+  image tests required (`ASSAY_REQUIRE_DB_TESTS=1`, `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,792
+  passed, none failed, none skipped. CI passed on the same commit (`python`, `portal`,
+  `portal-render`). CI had failed once, on commit 6ed9c55: one test, which showed that a
+  Textract call that succeeded after its neighbour failed was billed and not recorded; fixed
+  in 6f5b3bf. The rendered portal check passed (48 of 48), and the step panel's Text line was
+  looked at in both views.
 - **Deployed.** Still stack update 40 (2026-11-27), Aurora at migration `0011`: stage 2 is
-  not in AWS yet. The preview for stage 2 creates 2 resources (the Textract endpoint's
-  policy and the spend alarm), replaces every image and the three task definitions, and
-  updates what names them.
+  not in AWS yet. The preview for stage 2 (2026-11-27): 2 to create (the Textract
+  endpoint's policy and the spend alarm), 14 to update, 12 to replace (eight image builds,
+  the three task definitions, the portal build), 337 unchanged.
 - **Rule 6, checked before stage 2 was built** (2026-11-27): the AI services opt-out policy
   in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
   UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is now
@@ -78,7 +85,9 @@ Step 5 of BUILD_SPEC.md section 8, in the worker task, after `inspect`
 2. **Textract.** Pages that fail the score are drawn by sandbox children as greyscale PNGs,
    8 pages a child, and the task's main process sends each to `DetectDocumentText`, as
    bytes, two calls at a time (`worker/ocr.py`). One `ai_usage` row per successful call,
-   written at once.
+   written at once: every call that succeeded is recorded before the step fails, also a
+   page that succeeded after its neighbour had failed. Once a call has failed the step, no
+   page that was not yet under way is sent.
 3. **The text object.** `derived/text/{doc}.json`, uploaded from a file with fresh
    credentials for that one document. Its S3 version ID goes into the step's event and into
    `documents.text_version_id`.
@@ -287,6 +296,8 @@ Each is recorded in full further down; this is the index.
 | `SET col = col` proves nothing about UPDATE | It is refused for the missing SELECT alone. The probe sets a column to its default and rolls back | The worker probe, stage 2 |
 | The spend alarm slides | An alarm with a one-day period is checked every minute against the last 24 hours, not at midnight | "Not verified, and how and when" |
 | Shell edits with backslashes | A bash heredoc halves them and can hang on `python`. Write the script with the Write tool, then run it with `uv run python` | - |
+| One test session at a time | Each pytest session resets the test PostgreSQL when it starts (it drops every `assay_test_*` database and the roles). A second session started meanwhile destroys the first one's databases: 62 failures and 31 errors, all "does not exist", on 2026-11-27 | `tests/unit/pgtest.py` |
+| Two calls in flight | Answers from two threads do not arrive in page order. A test that assumes they do passes on one machine and fails on another (CI found it); and a page that succeeded after its neighbour failed was still billed | `worker/text.py`, `_send_to_textract` |
 
 ### Open items and known gaps
 
