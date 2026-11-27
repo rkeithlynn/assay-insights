@@ -1,0 +1,23 @@
+# Editor settings for this repository (https://editorconfig.org).
+#
+# The files Git stores with LF (.gitattributes, `eol=lf`) are saved with LF, whatever the
+# machine. Container images are built from the bytes on disk and tagged with their hash, so a
+# source saved with CRLF ends up in an image and changes its tag, while `git status` shows
+# nothing. It happened twice. The check is `uv run scripts/check_line_endings.py` (`--fix`
+# rewrites the files); it also runs as a unit test and in CI, and `pulumi preview` refuses an
+# image source with CRLF.
+#
+# The list below is the `eol=lf` list of .gitattributes; tests/unit/test_line_endings.py fails
+# if one has a pattern the other lacks. Other files are left as the machine has them.
+#
+# VS Code reads this file only with the EditorConfig extension (.vscode/extensions.json
+# recommends it). Without it, set "files.eol": "\n" in VS Code's user settings.
+root = true
+
+[{*.py,*.pyi,*.sh,*.toml,*.yaml,*.yml,*.md,*.mako,*.ini,Dockerfile,Dockerfile.*,*.dockerfile,*.Dockerfile,.dockerignore,.editorconfig,.python-version,uv.lock}]
+end_of_line = lf
+charset = utf-8
+
+[*.{py,pyi}]
+indent_style = space
+indent_size = 4

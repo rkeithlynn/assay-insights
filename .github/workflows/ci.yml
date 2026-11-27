@@ -52,6 +52,12 @@ jobs:
       - name: Install (locked)
         run: uv sync --locked
 
+      # Files .gitattributes marks as LF must not have CRLF. A Linux checkout has none, so
+      # here this catches only CRLF that was committed; on the Windows development machine
+      # the same check runs as a unit test, and `pulumi preview` refuses a CRLF image source.
+      - name: Line endings
+        run: uv run scripts/check_line_endings.py
+
       - name: Lint
         run: uv run ruff check .
 

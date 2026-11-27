@@ -15,6 +15,10 @@ Dockerfile.*    text eol=lf
 *.yml           text eol=lf
 uv.lock         text eol=lf
 .python-version text eol=lf
+# Markdown too: tests/isolation/README.md goes into the isolation image, and an image's tag is
+# the hash of its sources' bytes on disk, which must not depend on a machine's core.autocrlf.
+*.md            text eol=lf
+.editorconfig   text eol=lf
 
 # Binary
 *.png  binary

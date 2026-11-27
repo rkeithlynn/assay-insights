@@ -43,14 +43,37 @@ def _source_files(repo_root: Path, files: Sequence[str], trees: Sequence[str]) -
                 yield path
 
 
+class CrlfSources(ValueError):
+    """An image's source files have CRLF line endings on disk."""
+
+
 def source_tag(repo_root: Path, files: Sequence[str], trees: Sequence[str] = ()) -> str:
-    """A tag that changes exactly when one of the image's source files changes."""
+    """A tag that changes exactly when one of the image's source files changes.
+
+    Refuses a source file saved with CRLF line endings (owner, 2026-11-27, after it happened
+    twice). Git stores every one of these files with LF and shows no difference for a CRLF
+    copy, but the image is built from the bytes on disk and this tag is their hash: the image
+    would hold the CRLF copy under a tag no clean checkout produces. So `pulumi preview` and
+    `pulumi up` stop here, before anything is built.
+    """
     digest = hashlib.sha256()
+    crlf: list[str] = []
     for path in _source_files(repo_root, files, trees):
-        digest.update(path.relative_to(repo_root).as_posix().encode())
+        name = path.relative_to(repo_root).as_posix()
+        data = path.read_bytes()
+        # Every source here is text (a binary file would hold a NUL byte).
+        if b"\r\n" in data and b"\0" not in data:
+            crlf.append(name)
+        digest.update(name.encode())
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(data)
         digest.update(b"\0")
+    if crlf:
+        raise CrlfSources(
+            f"{len(crlf)} image source file(s) have CRLF line endings on disk "
+            f"({', '.join(crlf[:5])}{', ...' if len(crlf) > 5 else ''}). "
+            "Rewrite them with LF: uv run scripts/check_line_endings.py --fix"
+        )
     return f"src-{digest.hexdigest()[:16]}"
 
 
