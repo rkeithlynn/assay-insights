@@ -17,9 +17,11 @@ import os
 import sys
 import uuid
 from collections.abc import Mapping
+from decimal import Decimal
 from pathlib import Path
 
 from assay_workers.worker import logs
+from assay_workers.worker.context import TextSettings
 from assay_workers.worker.db import GrantRefused, Job
 
 log = logging.getLogger("assay.worker")
@@ -38,6 +40,16 @@ def job_from_env(env: Mapping[str, str]) -> Job:
     )
 
 
+def text_settings(env: Mapping[str, str]) -> TextSettings:
+    """Step 5's settings, from the task definition (stack config). There is no default: a
+    task without them does not run."""
+    return TextSettings(
+        threshold=float(env["TEXT_QUALITY_THRESHOLD"]),
+        max_pages=int(env["TEXT_MAX_PAGES"]),
+        price_per_page=Decimal(env["TEXTRACT_PRICE_PER_PAGE"]),
+    )
+
+
 def harden() -> None:
     """Not dumpable: no core dump, and no other user's process may read this one's memory
     or environment, whatever else changes. (The sandbox child is another user already.)"""
@@ -50,7 +62,8 @@ def run_job(env: Mapping[str, str]) -> int:
     from assay_workers.runtime import S3Objects, TenantStorage
     from assay_workers.sandbox import runner
     from assay_workers.worker import db
-    from assay_workers.worker.run import Deps, Refused, run
+    from assay_workers.worker.ocr import TextractOcr
+    from assay_workers.worker.run import Deps, Refused, error_name, run
 
     try:
         job = job_from_env(env)
@@ -58,6 +71,11 @@ def run_job(env: Mapping[str, str]) -> int:
         log.error("the task was started without a document, attempt and token")
         return EXIT_FAILED
     fields = {"document_id": str(job.document_id), "attempt": job.attempt}
+    try:
+        settings = text_settings(env)
+    except KeyError, ValueError, ArithmeticError:
+        log.error("the task was started without usable settings for the text step", extra=fields)
+        return EXIT_FAILED
     tss = TssClient(env["TSS_ENDPOINT_URL"], region=env["AWS_REGION"])
 
     def storage() -> TenantStorage:
@@ -73,6 +91,10 @@ def run_job(env: Mapping[str, str]) -> int:
                 storage=storage,
                 inspect=runner.inspect,
                 work_dir=Path(env.get("WORK_DIR", DEFAULT_WORK_DIR)),
+                # `runner.read_text` and `runner.render`: each call is one sandbox child.
+                pages=runner,
+                ocr=TextractOcr.for_region(env["AWS_REGION"]),
+                text=settings,
             ),
         )
     except GrantRefused, Refused:
@@ -82,8 +104,9 @@ def run_job(env: Mapping[str, str]) -> int:
         if isinstance(exc.__cause__, GrantRefused) or isinstance(exc.__context__, GrantRefused):
             log.error("no live grant for this task; nothing done", extra=fields)
             return EXIT_REFUSED
-        # The type only: a message can quote what a library was handed.
-        log.error("worker failed", extra=fields | {"error_type": type(exc).__name__})
+        # A name only (the type, or a service's error code): a message can quote what a
+        # library was handed.
+        log.error("worker failed", extra=fields | {"error_type": error_name(exc)})
         return EXIT_FAILED
     finally:
         engine.dispose()

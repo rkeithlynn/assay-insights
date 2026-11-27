@@ -16,6 +16,20 @@ are written by hand (no PDF library), so the script needs nothing beyond Python.
     05-invalid-companion.pdf/.json   a PDF and a companion file that blocks the batch
     06-not-a-pdf.pdf                 plain text named .pdf (failed, not_a_pdf)
     07-password-protected-128.pdf    needs a password to open (128-bit RC4)
+    08-scanned.pdf                   three pages that are pictures only: no text layer
+    09-mixed.pdf                     a typed page, a typed page with a pasted picture, and a
+                                     scan with a typed header stamped on it
+    10-filled-form.pdf               a typed form whose answers are in form fields
+
+    uv run scripts/make_test_files.py --fresh --pages-1000
+
+also writes `11-scanned-1000-pages.pdf`: 1,000 pages of pictures, to time one run of the text
+step against the worker task's 30-minute limit. Every one of its pages goes to Textract, so
+one upload of it costs 1,000 Textract pages.
+
+Files 08 to 11 are for the text step (build step 6, second half, stage 2). A page that is a
+picture has no text layer, so Textract reads it. Their "scans" are drawn here, from a small
+dot-matrix letter table in this file, in capitals: no image library, and no real document.
 
 With `--tenant-id` (the tenant you upload as), the valid companion carries that `TenantID`;
 the invalid one always carries another tenant's ID, a text loan term and a nested value.
@@ -45,6 +59,7 @@ import json
 import secrets
 import sys
 import uuid
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -179,7 +194,12 @@ def pdf(
         number = max(objects) + 1
         objects[number] = encryption.dictionary().encode()
         trailer_extra = f" /Encrypt {number} 0 R"
+    return assemble(objects, file_id, trailer_extra)
 
+
+def assemble(objects: dict[int, bytes], file_id: bytes, trailer_extra: str = "") -> bytes:
+    """The file: header, the numbered objects, the cross-reference table and the trailer.
+    Object 1 is the catalog."""
     out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     offsets = {}
     for number in sorted(objects):
@@ -195,6 +215,206 @@ def pdf(
         f"{trailer_extra} >>\nstartxref\n{xref}\n%%EOF\n"
     ).encode()
     return bytes(out)
+
+
+# --- Pages that are pictures (for the text step) ---------------------------------------------
+
+# A 5 by 7 dot-matrix letter table: capitals, digits and a little punctuation. Every "scan"
+# here is drawn from it, so no file holds a picture of anything real.
+GLYPHS = {
+    "A": ".###. #...# #...# ##### #...# #...# #...#",
+    "B": "####. #...# #...# ####. #...# #...# ####.",
+    "C": ".###. #...# #.... #.... #.... #...# .###.",
+    "D": "####. #...# #...# #...# #...# #...# ####.",
+    "E": "##### #.... #.... ####. #.... #.... #####",
+    "F": "##### #.... #.... ####. #.... #.... #....",
+    "G": ".###. #...# #.... #.### #...# #...# .###.",
+    "H": "#...# #...# #...# ##### #...# #...# #...#",
+    "I": ".###. ..#.. ..#.. ..#.. ..#.. ..#.. .###.",
+    "J": "..### ...#. ...#. ...#. ...#. #..#. .##..",
+    "K": "#...# #..#. #.#.. ##... #.#.. #..#. #...#",
+    "L": "#.... #.... #.... #.... #.... #.... #####",
+    "M": "#...# ##.## #.#.# #.#.# #...# #...# #...#",
+    "N": "#...# ##..# #.#.# #..## #...# #...# #...#",
+    "O": ".###. #...# #...# #...# #...# #...# .###.",
+    "P": "####. #...# #...# ####. #.... #.... #....",
+    "Q": ".###. #...# #...# #...# #.#.# #..#. .##.#",
+    "R": "####. #...# #...# ####. #.#.. #..#. #...#",
+    "S": ".#### #.... #.... .###. ....# ....# ####.",
+    "T": "##### ..#.. ..#.. ..#.. ..#.. ..#.. ..#..",
+    "U": "#...# #...# #...# #...# #...# #...# .###.",
+    "V": "#...# #...# #...# #...# #...# .#.#. ..#..",
+    "W": "#...# #...# #...# #.#.# #.#.# ##.## #...#",
+    "X": "#...# #...# .#.#. ..#.. .#.#. #...# #...#",
+    "Y": "#...# #...# .#.#. ..#.. ..#.. ..#.. ..#..",
+    "Z": "##### ....# ...#. ..#.. .#... #.... #####",
+    "0": ".###. #...# #..## #.#.# ##..# #...# .###.",
+    "1": "..#.. .##.. ..#.. ..#.. ..#.. ..#.. .###.",
+    "2": ".###. #...# ....# ...#. ..#.. .#... #####",
+    "3": "####. ....# ....# .###. ....# ....# ####.",
+    "4": "...#. ..##. .#.#. #..#. ##### ...#. ...#.",
+    "5": "##### #.... ####. ....# ....# #...# .###.",
+    "6": "..##. .#... #.... ####. #...# #...# .###.",
+    "7": "##### ....# ...#. ..#.. .#... .#... .#...",
+    "8": ".###. #...# #...# .###. #...# #...# .###.",
+    "9": ".###. #...# #...# .#### ....# ...#. .##..",
+    " ": "..... ..... ..... ..... ..... ..... .....",
+    "-": "..... ..... ..... ##### ..... ..... .....",
+    ".": "..... ..... ..... ..... ..... .##.. .##..",
+    ":": "..... .##.. .##.. ..... .##.. .##.. .....",
+    "/": "....# ....# ...#. ..#.. .#... #.... #....",
+    ",": "..... ..... ..... ..... .##.. ..#.. .#...",
+    "$": "..#.. .#### #.#.. .###. ..#.# ####. ..#..",
+}
+GLYPH_ROWS = 7
+# Each dot is this many pixels a side: letters 35 pixels high, well above what Textract needs
+# (15) on a page drawn at 200 dots an inch.
+DOT = 5
+# One column of dots between letters, three rows between lines.
+ADVANCE = (5 + 1) * DOT
+LINE_HEIGHT = (GLYPH_ROWS + 3) * DOT
+SCAN_WIDTH, SCAN_HEIGHT = 1700, 2200  # US Letter at 200 dots an inch
+SCAN_MARGIN = 150
+
+
+def _glyph_rows(character: str) -> list[str]:
+    """One letter as seven strings of pixels ("1" is ink), each dot widened to `DOT`."""
+    rows = GLYPHS.get(character.upper(), GLYPHS[" "]).split()
+    return ["".join(("1" if dot == "#" else "0") * DOT for dot in row + ".") for row in rows]
+
+
+def picture(lines: list[str], width: int = SCAN_WIDTH, height: int = SCAN_HEIGHT) -> bytes:
+    """A black-on-white picture of the lines, one bit a pixel, as a PDF image's data. Lines
+    too long for the picture are cut; lines that do not fit below are left out."""
+    row_bytes = (width + 7) // 8
+    blank = b"\xff" * row_bytes  # in DeviceGray, a set bit is white
+    rows: list[bytes] = [blank] * SCAN_MARGIN
+    room = (width - 2 * SCAN_MARGIN) // ADVANCE
+    for line in lines:
+        if len(rows) + LINE_HEIGHT + SCAN_MARGIN > height:
+            break
+        letters = [_glyph_rows(character) for character in line[:room]]
+        for index in range(GLYPH_ROWS):
+            ink = "0" * SCAN_MARGIN + "".join(letter[index] for letter in letters)
+            bits = ink.ljust(row_bytes * 8, "0")
+            # Ink is 1 in `bits`; the picture wants 0 for ink.
+            value = int(bits, 2) ^ ((1 << (row_bytes * 8)) - 1)
+            rows += [value.to_bytes(row_bytes, "big")] * DOT
+        rows += [blank] * (LINE_HEIGHT - GLYPH_ROWS * DOT)
+    rows += [blank] * (height - len(rows))
+    return zlib.compress(b"".join(rows[:height]), 6)
+
+
+def _stream(dictionary: str, data: bytes) -> bytes:
+    return f"<< {dictionary} /Length {len(data)} >>\nstream\n".encode() + data + b"\nendstream"
+
+
+def _image(data: bytes, width: int, height: int) -> bytes:
+    return _stream(
+        f"/Type /XObject /Subtype /Image /Width {width} /Height {height} "
+        "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /FlateDecode",
+        data,
+    )
+
+
+def _typed(lines: list[str], top: int = 720) -> str:
+    """Page content that sets the lines in Helvetica: a text layer."""
+    ops = ["BT", "/F1 12 Tf", f"72 {top} Td", "16 TL"]
+    ops += [f"({_text(line)}) Tj T*" for line in lines]
+    return "\n".join([*ops, "ET"])
+
+
+class Pages:
+    """A PDF built page by page: typed lines, pictures, and form fields. Object 1 is the
+    catalog, 2 the page tree, 3 Helvetica."""
+
+    def __init__(self, seed: str) -> None:
+        self.file_id = hashlib.sha256(f"assay-test:{seed}".encode()).digest()[:16]
+        self.objects: dict[int, bytes] = {
+            3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+        }
+        self.kids: list[int] = []
+        self.fields: list[int] = []
+        self._next = 4
+
+    def add(self, body: bytes) -> int:
+        number = self._next
+        self._next += 1
+        self.objects[number] = body
+        return number
+
+    def page(
+        self,
+        *,
+        typed: list[str] | None = None,
+        scan: list[str] | None = None,
+        # The part of the page the picture covers: (left, bottom, width, height) in points.
+        scan_box: tuple[float, float, float, float] = (0, 0, 612, 792),
+        # Form fields: (name, value, left, bottom, width, height).
+        fields: list[tuple[str, str, float, float, float, float]] | None = None,
+    ) -> None:
+        content: list[str] = []
+        resources = "/Font << /F1 3 0 R >>"
+        if scan is not None:
+            left, bottom, width, height = scan_box
+            pixels = (round(SCAN_WIDTH * width / 612), round(SCAN_HEIGHT * height / 792))
+            image = self.add(_image(picture(scan, *pixels), *pixels))
+            resources += f" /XObject << /Im1 {image} 0 R >>"
+            content.append(f"q {width} 0 0 {height} {left} {bottom} cm /Im1 Do Q")
+        if typed is not None:
+            content.append(_typed(typed))
+        contents = self.add(_stream("", "\n".join(content).encode("latin-1")))
+        # The page's number is taken first: its fields point back at it.
+        number = self._next
+        self._next += 1
+        annotations = [self._field(number, *field) for field in fields or []]
+        annots = f" /Annots [{' '.join(f'{a} 0 R' for a in annotations)}]" if annotations else ""
+        self.objects[number] = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << {resources} >> /Contents {contents} 0 R{annots} >>"
+        ).encode()
+        self.kids.append(number)
+
+    def _field(
+        self,
+        page: int,
+        name: str,
+        value: str,
+        left: float,
+        bottom: float,
+        width: float,
+        height: float,
+    ) -> int:
+        """A text field with a value and the appearance a viewer draws for it. The value is
+        in the field only: it is not part of the page's text layer."""
+        appearance = self.add(
+            _stream(
+                f"/Type /XObject /Subtype /Form /BBox [0 0 {width} {height}] "
+                "/Resources << /Font << /F1 3 0 R >> >>",
+                f"/Tx BMC q BT /F1 12 Tf 0 g 2 5 Td ({_text(value)}) Tj ET Q EMC".encode("latin-1"),
+            )
+        )
+        field = self.add(
+            (
+                f"<< /Type /Annot /Subtype /Widget /FT /Tx /T ({_text(name)}) /V ({_text(value)}) "
+                f"/Rect [{left} {bottom} {left + width} {bottom + height}] /P {page} 0 R /F 4 "
+                f"/DA (/F1 12 Tf 0 g) /AP << /N {appearance} 0 R >> >>"
+            ).encode("latin-1")
+        )
+        self.fields.append(field)
+        return field
+
+    def build(self) -> bytes:
+        form = ""
+        if self.fields:
+            form = (
+                f" /AcroForm << /Fields [{' '.join(f'{f} 0 R' for f in self.fields)}] "
+                "/DA (/F1 12 Tf 0 g) /DR << /Font << /F1 3 0 R >> >> >>"
+            )
+        self.objects[1] = f"<< /Type /Catalog /Pages 2 0 R{form} >>".encode()
+        kids = " ".join(f"{kid} 0 R" for kid in self.kids)
+        self.objects[2] = f"<< /Type /Pages /Kids [{kids}] /Count {len(self.kids)} >>".encode()
+        return assemble(self.objects, self.file_id)
 
 
 def package(title: str, applicant: str, loan: str, run: str | None = None) -> list[list[str]]:
@@ -286,6 +506,87 @@ def files(tenant_id: uuid.UUID | None, run: str | None = None) -> dict[str, byte
         "07-password-protected-128.pdf": document(
             "Package 007", "Kim Testperson", "TEST-007", "locked-128", password=PASSWORD, bits=128
         ),
+        # For the text step: pages that are pictures, pages that are partly pictures, and a
+        # form whose answers are in its fields.
+        "08-scanned.pdf": scanned("Package 008", "Ann Testperson", "TEST-008", run),
+        "09-mixed.pdf": mixed("Package 009", "Ray Testperson", "TEST-009", run),
+        "10-filled-form.pdf": filled_form("Package 010", "Joy Testperson", "TEST-010", run),
+    }
+
+
+LARGE_NAME = "11-scanned-1000-pages.pdf"
+LARGE_PAGES = 1000
+
+
+def scanned(
+    title: str, applicant: str, loan: str, run: str | None = None, *, pages: int | None = None
+) -> bytes:
+    """Pages that are pictures only: no text layer at all, so every page goes to Textract.
+    With `pages`, the three pages are repeated up to that many, each with its own number."""
+    source = package(title, applicant, loan, run)
+    total = len(source) if pages is None else pages
+    builder = Pages(f"scanned:{loan}:{run}:{total}")
+    for number in range(1, total + 1):
+        lines = [*source[(number - 1) % len(source)], "", f"PAGE {number} OF {total}"]
+        builder.page(scan=lines)
+    return builder.build()
+
+
+def mixed(title: str, applicant: str, loan: str, run: str | None = None) -> bytes:
+    """Three kinds of page in one document:
+
+    1. typed only: its text layer is all there is (stays `native`);
+    2. typed, with a picture pasted over the lower two fifths of the page: the picture's words
+       are not in the text layer (goes to Textract; the text layer's text is kept beside it);
+    3. a picture of a whole page with one typed line stamped on it, as an e-signing service
+       stamps an envelope ID on a scan (goes to Textract; the stamped line is kept beside it).
+    """
+    first, second, third = package(title, applicant, loan, run)
+    builder = Pages(f"mixed:{loan}:{run}")
+    builder.page(typed=first)
+    builder.page(
+        typed=second,
+        scan=["ATTACHED COPY OF IDENTITY DOCUMENT", "NAME: " + applicant, "NUMBER: T 000 111 222"],
+        scan_box=(0, 60, 612, 316.8),
+    )
+    stamp = f"Envelope ID: {uuid.uuid5(uuid.NAMESPACE_URL, loan)}"
+    builder.page(typed=[stamp], scan=["", "", *third])
+    return builder.build()
+
+
+def filled_form(title: str, applicant: str, loan: str, run: str | None = None) -> bytes:
+    """A typed form whose answers are in form fields. The questions are in the text layer;
+    the answers are not, so the page goes to Textract, which reads both from its picture."""
+    note, *_ = package(title, applicant, loan, run)[0]
+    labels = [
+        note,
+        *([f"Test run: {run}"] if run is not None else []),
+        "",
+        f"LOAN APPLICATION FORM - {title}",
+        "",
+        "Borrower name:",
+        "",
+        "Loan number:",
+        "",
+        "Amount requested:",
+    ]
+    # Each answer sits to the right of its question: lines are 16 points apart from 720.
+    row = len(labels) - 5
+    fields = [
+        ("borrower", applicant, 200.0, 715.0 - 16 * row, 300.0, 18.0),
+        ("loan_number", loan, 200.0, 715.0 - 16 * (row + 2), 300.0, 18.0),
+        ("amount", "$250,000.00", 200.0, 715.0 - 16 * (row + 4), 300.0, 18.0),
+    ]
+    builder = Pages(f"form:{loan}:{run}")
+    builder.page(typed=labels, fields=fields)
+    return builder.build()
+
+
+def large(run: str | None = None) -> dict[str, bytes]:
+    """The 1,000-page scanned file (`--pages-1000`): one run of it measures the text step
+    against the worker task's time limit, and costs 1,000 Textract pages."""
+    return {
+        LARGE_NAME: scanned("Package 011", "Max Testperson", "TEST-011", run, pages=LARGE_PAGES)
     }
 
 
@@ -305,12 +606,21 @@ def main() -> int:
         help="add a new run ID to every page of every PDF, so none is a duplicate of an "
         "earlier upload",
     )
+    parser.add_argument(
+        "--pages-1000",
+        action="store_true",
+        help=f"also write {LARGE_NAME}: {LARGE_PAGES} scanned pages, to time one run of the "
+        f"text step. Uploading it sends {LARGE_PAGES} pages to Textract",
+    )
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     run = new_run_id() if args.fresh else None
     if run is not None:
         print(f"Test run {run}: these PDFs are unlike any written before.")
-    for name, body in files(args.tenant_id, run).items():
+    written = files(args.tenant_id, run)
+    if args.pages_1000:
+        written |= large(run)
+    for name, body in written.items():
         (args.out / name).write_bytes(body)
         digest = hashlib.sha256(body).hexdigest()[:16]
         print(f"{args.out / name}  {len(body)} bytes  sha256 {digest}")

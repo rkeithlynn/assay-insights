@@ -359,6 +359,10 @@ CHILD_MODULES = ("child.py", "jobs.py", "confine.py", "__init__.py")
 CHILD_MAY_IMPORT = (
     "__future__",
     "assay_workers.sandbox",
+    # Stage 2: a page's picture is written as a PNG with `zlib`, and sent in base64. Both are
+    # the standard library; there is still no image library and nothing of the parent's.
+    "base64",
+    "zlib",
     "collections",
     "ctypes",
     "dataclasses",

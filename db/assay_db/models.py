@@ -55,6 +55,8 @@ TENANT_STATUSES = ("provisioning", "active", "suspended", "failed")
 STORAGE_MODES = ("dedicated",)
 STORAGE_STATUSES = ("active", "offboarded")
 JOBS = ("ingest", "query")
+# Who made an AI call (ai_usage.service). Textract is billed by the page and has no tokens.
+AI_SERVICES = ("bedrock", "textract")
 USER_ROLES = ("master-admin", "master-user", "tenant-admin", "tenant-user")
 USER_STATUSES = ("invited", "active", "disabled")
 BATCH_STATUSES = ("open", "closed", "discarded")
@@ -350,6 +352,9 @@ class Document(Base):
     companion_attempt: Mapped[int | None]
     # Text and extraction results. NULL until the stages that write them.
     content_attempt: Mapped[int | None]
+    # The S3 version of `derived/text/{doc}.json` that `content_attempt` stands for. Readers
+    # use this version, never the latest: every version is kept (migration 0012).
+    text_version_id: Mapped[str | None]
     # The upload (`batch_files.id`) the current companion data came from.
     companion_file_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
@@ -517,14 +522,17 @@ class Page(Base):
     __table_args__ = (
         one_of("text_source", TEXT_SOURCES),
         CheckConstraint("page_no >= 1", name="page_no"),
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
-        UniqueConstraint("tenant_id", "document_id", "page_no"),
+        UniqueConstraint("tenant_id", "document_id", "attempt", "page_no"),
         Index("ix_pages_search_tsv", "search_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[uuid_pk]
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     document_id: Mapped[uuid_col]
+    # Which attempt read the page (documents.content_attempt points at the current one).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
     page_no: Mapped[int]
     text_source: Mapped[str]
     quality_score: Mapped[float | None]
@@ -666,12 +674,29 @@ class ChatAudit(Base):
 
 
 class AiUsage(Base):
-    """One row per model call. Cost is frozen at call time."""
+    """One row per call to an AI service. Cost is frozen at call time.
+
+    A Bedrock call names its catalog model and counts tokens. A Textract call (migration
+    0012) has neither: it says which operation it was, the service's own model version, and
+    what it was billed by (`units` of `unit` at `unit_price`).
+    """
 
     __tablename__ = "ai_usage"
     __table_args__ = (
         one_of("job", JOBS),
+        one_of("service", AI_SERVICES),
         CheckConstraint("input_tokens >= 0 AND output_tokens >= 0", name="tokens"),
+        CheckConstraint(
+            "(service = 'bedrock' AND model_id IS NOT NULL) OR "
+            "(service = 'textract' AND model_id IS NULL AND operation IS NOT NULL "
+            "AND units IS NOT NULL AND units >= 1 AND unit IS NOT NULL AND unit = 'page' "
+            "AND unit_price IS NOT NULL AND unit_price >= 0)",
+            name="service_shape",
+        ),
+        CheckConstraint(
+            "(attempt IS NULL OR attempt >= 1) AND (page_no IS NULL OR page_no >= 1)",
+            name="usage_for",
+        ),
         child_of("documents", "document_id"),
         child_of("chat_audit", "chat_audit_id"),
         Index("ix_ai_usage_tenant_id_document_id", "tenant_id", "document_id"),
@@ -680,13 +705,22 @@ class AiUsage(Base):
     id: Mapped[uuid_pk]
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     job: Mapped[str]
-    model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey(f"{SCHEMA}.ai_models.id"))
+    model_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey(f"{SCHEMA}.ai_models.id"))
     document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     chat_audit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     input_tokens: Mapped[int]
     output_tokens: Mapped[int]
     cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     request_id: Mapped[str | None]
+    service: Mapped[str] = mapped_column(server_default="bedrock")
+    operation: Mapped[str | None]
+    model_version: Mapped[str | None]
+    # The document's attempt and page the call was for, when it was for one.
+    attempt: Mapped[int | None]
+    page_no: Mapped[int | None]
+    units: Mapped[int | None]
+    unit: Mapped[str | None]
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
 
 
 # --- Audit trail (section 7a) ----------------------------------------------------------

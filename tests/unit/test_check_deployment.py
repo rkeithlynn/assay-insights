@@ -59,6 +59,163 @@ def clients(**by_name: Fake) -> Any:
     return lambda name: by_name[name]
 
 
+# --- AI services: opt-out policy and model invocation logging ---------------------------------
+
+
+def effective(services: Any) -> Fake:
+    import json
+
+    content = services if isinstance(services, str) else json.dumps({"services": services})
+    return Fake(
+        describe_effective_policy={
+            "EffectivePolicy": {
+                "PolicyContent": content,
+                "LastUpdatedTimestamp": dt.datetime(2026, 11, 24, 4, 37, 58, tzinfo=dt.UTC),
+                "PolicyType": "AISERVICES_OPT_OUT_POLICY",
+            }
+        }
+    )
+
+
+OUT = {"opt_out_policy": "optOut"}
+IN = {"opt_out_policy": "optIn"}
+LOGGING_OFF = Fake(get_model_invocation_logging_configuration={"ResponseMetadata": {}})
+
+
+def test_a_default_of_opt_out_covers_textract_and_rekognition_by_name(script: ModuleType) -> None:
+    """What the Development account has: one default, no service of its own."""
+    organizations = effective({"default": OUT})
+    passed, lines = script.opt_out_report(organizations)
+    text = "\n".join(lines)
+    assert passed
+    assert "last updated 2026-11-24 04:37:58 UTC" in text
+    assert "ok: default: optOut" in text
+    assert "ok: textract: optOut (the default applies" in text
+    assert "ok: rekognition: optOut (the default applies" in text
+    assert organizations.calls == [
+        ("describe_effective_policy", {"PolicyType": "AISERVICES_OPT_OUT_POLICY"})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("services", "wrong"),
+    [
+        # The service this stage sends content to is opted in.
+        ({"default": OUT, "textract": IN}, "FAILED: textract: optIn"),
+        # Any service opted in fails, whichever it is.
+        ({"default": OUT, "lex": IN}, "FAILED: lex: optIn"),
+        # The default is in, and Textract has no setting of its own.
+        ({"default": IN}, "FAILED: textract: no setting of its own, and the default is optIn"),
+        # No default at all: a service the policy does not name is in.
+        ({"textract": OUT}, "FAILED: the policy sets no default"),
+        ({"textract": OUT}, "FAILED: rekognition: no setting of its own"),
+        # A value that is not the exact word.
+        ({"default": {"opt_out_policy": "optout"}}, "FAILED: default: optout"),
+    ],
+)
+def test_any_service_that_is_not_opted_out_fails(
+    script: ModuleType, services: dict[str, Any], wrong: str
+) -> None:
+    passed, lines = script.opt_out_report(effective(services))
+    assert not passed
+    assert wrong in "\n".join(lines)
+
+
+def test_a_service_with_its_own_opt_out_is_reported_by_that_setting(script: ModuleType) -> None:
+    passed, lines = script.opt_out_report(effective({"default": OUT, "Textract": OUT}))
+    text = "\n".join(lines)
+    assert passed
+    assert "ok: textract: optOut" in text
+    assert "textract: optOut (the default applies" not in text
+
+
+def test_no_policy_in_effect_fails(script: ModuleType) -> None:
+    organizations = Fake(describe_effective_policy=not_found("EffectivePolicyNotFoundException"))
+    passed, lines = script.opt_out_report(organizations)
+    assert not passed
+    assert "no AI services opt-out policy is in effect" in "\n".join(lines)
+
+
+@pytest.mark.parametrize("content", ["not json", "{}", '{"services": {"default": "optOut"}}'])
+def test_a_policy_the_check_cannot_read_fails(script: ModuleType, content: str) -> None:
+    passed, lines = script.opt_out_report(effective(content))
+    assert not passed
+    assert "not in the form this check reads" in "\n".join(lines)
+
+
+def test_an_error_reading_the_policy_is_not_taken_for_an_answer(script: ModuleType) -> None:
+    organizations = Fake(describe_effective_policy=not_found("AccessDeniedException"))
+    with pytest.raises(ClientError):
+        script.opt_out_report(organizations)
+
+
+def test_no_invocation_logging_configuration_is_off(script: ModuleType) -> None:
+    passed, lines = script.invocation_logging_report(LOGGING_OFF, "us-east-1")
+    assert passed
+    assert lines[0] == "Bedrock model invocation logging (us-east-1):"
+    assert "ok: off" in lines[1]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {
+            "cloudWatchConfig": {"logGroupName": "g", "roleArn": "r"},
+            "textDataDeliveryEnabled": True,
+        },
+        {"s3Config": {"bucketName": "b"}},
+        # Every kind of data switched off is still a configuration: one setting from logging.
+        {"textDataDeliveryEnabled": False, "imageDataDeliveryEnabled": False},
+    ],
+)
+def test_any_invocation_logging_configuration_fails_and_shows_no_value(
+    script: ModuleType, config: dict[str, Any]
+) -> None:
+    bedrock = Fake(get_model_invocation_logging_configuration={"loggingConfig": config})
+    passed, lines = script.invocation_logging_report(bedrock, "us-east-1")
+    text = "\n".join(lines)
+    assert not passed
+    assert "FAILED: a logging configuration exists" in text
+    for name in config:
+        assert name in text
+    # Names only: no bucket, log group or role is printed.
+    assert "logGroupName" not in text and "bucketName" not in text
+
+
+@pytest.mark.parametrize(
+    ("services", "logging", "expected"),
+    [
+        ({"default": OUT}, {}, True),
+        ({"default": IN}, {}, False),
+        ({"default": OUT}, {"loggingConfig": {"s3Config": {}}}, False),
+        ({"default": IN}, {"loggingConfig": {"s3Config": {}}}, False),
+    ],
+)
+def test_both_settings_must_hold_and_both_are_always_reported(
+    script: ModuleType, services: dict[str, Any], logging: dict[str, Any], expected: bool
+) -> None:
+    bedrock = Fake(get_model_invocation_logging_configuration=logging)
+    passed, lines = script.ai_services_report(effective(services), bedrock, "us-east-1")
+    text = "\n".join(lines)
+    assert passed is expected
+    # One failure never hides the other: both sections are there either way.
+    assert "AI services opt-out policy" in text and "Bedrock model invocation logging" in text
+    assert ("AI services: ok." in text) is expected
+    assert ("No document content may go to Textract" in text) is not expected
+
+
+def test_the_ai_services_check_runs_first_and_fails_every_mode() -> None:
+    """It gates content going to an AI service, so no mode of the script may skip it or pass
+    without it: `--ai-services`, `--before-deploy` and the full run."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    main = source[source.index("def main() -> int:") :]
+    check = main.index("ai_services_report(")
+    assert check < main.index("concurrency_report(") < main.index("reservation_report(")
+    assert "return 0 if ai_ok else 1" in main[check : main.index("outputs = json.loads")]
+    assert main.count("return 0 if ai_ok else 1") == 2  # --ai-services and --before-deploy
+    assert "return 0 if passed and reservations_ok and ai_ok else 1" in main
+
+
 # --- Lambda concurrency -----------------------------------------------------------------------
 
 

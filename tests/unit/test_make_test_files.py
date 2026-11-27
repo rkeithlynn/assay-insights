@@ -138,7 +138,8 @@ def test_fresh_pdfs_are_new_documents_every_run(script: ModuleType) -> None:
     plain = script.files(TENANT)
     first, second = script.files(TENANT, "run-a"), script.files(TENANT, "run-b")
     pdfs = [name for name in plain if name.endswith(".pdf") and name != "06-not-a-pdf.pdf"]
-    assert len(pdfs) == 6
+    # Six since build step 6's first half; 08 to 10 (scanned, mixed, filled form) since stage 2.
+    assert len(pdfs) == 9
     for name in pdfs:
         assert len({plain[name], first[name], second[name]}) == 3, name
     assert first["01-normal.pdf"] == first["02-normal-again.pdf"]

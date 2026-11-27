@@ -27,6 +27,7 @@ from assay_tss.models import StorageAccess
 from assay_workers import scan
 from tests.unit.fakes import FakeCognito, FakeProvisioning
 from tests.unit.pgtest import requires_db
+from tests.unit.stage2 import SETTINGS, InProcessPages, NoOcr
 from tests.unit.step6 import (
     PREFIX,
     USERS,
@@ -297,6 +298,10 @@ def ready_doc(w: World, tmp_path_factory: pytest.TempPathFactory) -> dict[str, A
                 storage=lambda: w.storage.worker(tenant, document),
                 inspect=lambda path: InspectResult.model_validate(jobs.inspect(path)),
                 work_dir=tmp_path_factory.mktemp("worker"),
+                # The text step (stage 2): the page jobs in this process, and no Textract.
+                pages=InProcessPages(),
+                ocr=NoOcr(),
+                text=SETTINGS,
             ),
         )
     finally:

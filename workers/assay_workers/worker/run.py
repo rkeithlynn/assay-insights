@@ -1,12 +1,18 @@
 """One document's attempt, in the worker task's parent process.
 
-Part 1 (build step 6, second half): the `inspect` step.
+The steps, in order (`assay_workers.progress.WORKER_STEPS`):
+
+- **`inspect`** (build step 6, second half, part 1), below.
+- **`text`** (stage 2, step 5 of BUILD_SPEC.md section 8), in `assay_workers.worker.text`.
+
+How the attempt runs:
 
 1. The session is already bound to the attempt grant (`db.bound_engine`), so every query
    below sees this one document. The document must be `processing` at this attempt.
-2. The PDF is downloaded at exactly the version that scanned clean, into the task's work
-   directory, and its SHA-256 is checked against the registration once more.
-3. A sandbox child opens it (`sandbox.runner.inspect`). The parent never does.
+2. The PDF is downloaded once, at exactly the version that scanned clean, into the task's
+   work directory, and its SHA-256 is checked against the registration once more
+   (`context.Source`). Every step that needs it uses that one copy.
+3. `inspect`: a sandbox child opens it (`sandbox.runner.inspect`). The parent never does.
    - needs a password: the document is held (`on_hold`, `pdf_encrypted`);
    - not a PDF that opens: the document fails (`not_a_pdf`);
    - the child did not end well: the document fails (`pdf_unreadable`, which is all a tenant
@@ -19,9 +25,12 @@ Part 1 (build step 6, second half): the `inspect` step.
      like;
    - the child could not be started at all: that is the task's fault, not the file's, so the
      step fails (`inspect_failed`) and the document is not blamed.
-   - otherwise the PDF, and its companion file at its own clean version, are copied to
-     `originals/`, and the document gets its key and page count.
-4. Steps 5 to 10 follow in the later stages. Until then the document stays `processing`.
+   - otherwise the PDF is copied to `originals/`, and the document gets its key and page
+     count.
+4. `text`: the text layer, Textract for the pages that fail the quality score, the text
+   object and the `pages` rows.
+5. Steps 6 to 8 and 10 follow in the later stages. Until then the document stays
+   `processing`.
 
 Each step writes a `running` mark before it starts and its result when it ends
 (`assay_workers.progress`). A repeat of the task finds the result and does nothing again.
@@ -32,85 +41,76 @@ logs anything from a file.
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
-import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from sqlalchemy import Connection, Engine, text
+from sqlalchemy import Connection, text
 
 from assay_db import batches
 from assay_tss import keys
 from assay_workers import progress
-from assay_workers.runtime import TenantStorage
-from assay_workers.sandbox.runner import (
-    InspectResult,
-    SandboxError,
-    SandboxLimit,
-    SandboxNotStarted,
+from assay_workers.sandbox.runner import SandboxError, SandboxLimit, SandboxNotStarted
+from assay_workers.worker import text as text_step
+from assay_workers.worker.context import (
+    CHECKSUM_MISMATCH,
+    CONTINUE,
+    FAILED,
+    NOT_ELIGIBLE,
+    ON_HOLD,
+    SANDBOX,
+    ChecksumMismatch,
+    Deps,
+    Document,
+    Pages,
+    Source,
+    TextSettings,
+    checksum_mismatch,
+    event,
+    finish,
 )
 from assay_workers.worker.db import Job
 
 log = logging.getLogger("assay.worker")
 
-CONTINUE, ON_HOLD, FAILED, NOT_ELIGIBLE = "continue", "on_hold", "failed", "not_eligible"
 INSPECT = "inspect"
 PDF_UNREADABLE = "pdf_unreadable"
 # The two log messages for a sandbox child that did not end well. They differ on purpose: a
 # limit that did its job is not the same event as a child that died some other way.
 STOPPED_AT_A_LIMIT = "the PDF check was stopped at a sandbox limit"
 ENDED_UNEXPECTEDLY = "the PDF check ended unexpectedly"
-# The prefix of an event's error type that names a sandbox ending: `sandbox.cpu_limit`.
-SANDBOX = "sandbox"
-CHECKSUM_MISMATCH = "checksum_mismatch"
+# An error's name as the failure handler accepts it (assay_workers.steps.ERROR_TYPE).
+ERROR_NAME = re.compile(r"[A-Za-z0-9_.]{1,64}")
+
+__all__ = [
+    "CHECKSUM_MISMATCH",
+    "CONTINUE",
+    "FAILED",
+    "INSPECT",
+    "NOT_ELIGIBLE",
+    "ON_HOLD",
+    "PDF_UNREADABLE",
+    "SANDBOX",
+    "STEPS",
+    "Deps",
+    "Document",
+    "Pages",
+    "Refused",
+    "Source",
+    "TextSettings",
+    "inspect",
+    "load",
+    "run",
+]
+
+
+# The name this module's own code and its tests knew the event writer by.
+_event = event
 
 
 class Refused(Exception):
     """This document must not be processed (the reserved ID). Never retried."""
-
-
-@dataclass(frozen=True)
-class Deps:
-    # Bound to the job's grant: it sees one document of one tenant.
-    engine: Engine
-    # The document's storage, from the TSS's /resolve-worker. Asked for once, when needed.
-    storage: Callable[[], TenantStorage]
-    # Opens the PDF in a sandbox child.
-    inspect: Callable[[Path], InspectResult]
-    # The task's writable directory.
-    work_dir: Path
-
-
-@dataclass(frozen=True)
-class Document:
-    tenant_id: uuid.UUID
-    document_id: uuid.UUID
-    files: tuple[Any, ...]
-    attempt: int = 1
-    # Where the document's PDF is now: its `originals/` key once an attempt has copied it.
-    s3_key: str | None = None
-
-    def file(self, kind: str) -> Any | None:
-        return next((f for f in self.files if f.kind == kind), None)
-
-    @property
-    def fields(self) -> dict[str, str]:
-        return {"tenant_id": str(self.tenant_id), "document_id": str(self.document_id)}
-
-
-def _event(
-    conn: Connection, doc: Document, step: str, status: str, detail: dict[str, Any] | None = None
-) -> None:
-    batches.document_event(
-        conn,
-        tenant_id=doc.tenant_id,
-        document_id=doc.document_id,
-        step=step,
-        status=status,
-        detail=detail,
-    )
 
 
 def _result(conn: Connection, doc: Document, step: str) -> str | None:
@@ -158,89 +158,53 @@ def load(conn: Connection, job: Job) -> Document | None:
     )
 
 
-def _finish(
-    deps: Deps,
-    doc: Document,
-    *,
-    status: str,
-    outcome: str,
-    code: str,
-    error_type: str | None = None,
-    level: int = logging.INFO,
-) -> str:
-    """The document stops here: held or failed, with its code. `error_type` is a name for
-    master admins (how a sandbox child ended); a tenant user sees the code's words only."""
-    detail = {"error": code} if error_type is None else {"error": code, "error_type": error_type}
-    with deps.engine.begin() as conn:
-        _event(conn, doc, INSPECT, outcome, detail)
-        conn.execute(
-            text(
-                "UPDATE assay.documents SET status = :status, error_code = :code, "
-                "completed_at = now() WHERE id = :id AND status = 'processing'"
-            ),
-            {"id": doc.document_id, "status": status, "code": code},
-        )
-    log.log(level, "not processed", extra=doc.fields | {"error": code})
-    return outcome
-
-
-def inspect(doc: Document, deps: Deps) -> str:
+def inspect(doc: Document, deps: Deps, source: Source) -> str:
     pdf = doc.file(batches.PDF)
     companion = doc.file(batches.COMPANION)
     if pdf is None or pdf.version_id is None:
         raise RuntimeError("the document has no clean PDF to inspect")
-    storage = deps.storage()
-    ctx, objects = storage.context, storage.objects
-
-    with tempfile.TemporaryDirectory(dir=deps.work_dir) as work:
-        # The sandbox user must be able to reach the file, and only read it.
-        Path(work).chmod(0o755)  # nosec B103
-        path = Path(work) / "document.pdf"
-        digest = objects.download(pdf.s3_key, pdf.version_id, path)
-        path.chmod(0o444)
-        if digest != pdf.sha256:
-            # The scan step and the fingerprint step both checked this version.
-            return _finish(
-                deps,
-                doc,
-                status="failed",
-                outcome=FAILED,
-                code=CHECKSUM_MISMATCH,
-                level=logging.ERROR,
-            )
-        try:
-            result = deps.inspect(path)
-        except SandboxNotStarted:
-            # The task could not start the child as the sandbox user. Not the file's fault:
-            # the step fails and the document is not blamed.
-            raise
-        except SandboxError as exc:
-            # The ending is a name from the sandbox runner, never anything the child wrote.
-            at_a_limit = isinstance(exc, SandboxLimit)
-            log.error(
-                STOPPED_AT_A_LIMIT if at_a_limit else ENDED_UNEXPECTEDLY,
-                extra=doc.fields | {"ending": exc.reason, "sandbox_limit": at_a_limit},
-            )
-            return _finish(
-                deps,
-                doc,
-                status="failed",
-                outcome=FAILED,
-                code=PDF_UNREADABLE,
-                error_type=f"{SANDBOX}.{exc.reason}",
-            )
+    try:
+        path = source.fetch()
+    except ChecksumMismatch:
+        return checksum_mismatch(deps, doc, INSPECT)
+    try:
+        result = deps.inspect(path)
+    except SandboxNotStarted:
+        # The task could not start the child as the sandbox user. Not the file's fault:
+        # the step fails and the document is not blamed.
+        raise
+    except SandboxError as exc:
+        # The ending is a name from the sandbox runner, never anything the child wrote.
+        at_a_limit = isinstance(exc, SandboxLimit)
+        log.error(
+            STOPPED_AT_A_LIMIT if at_a_limit else ENDED_UNEXPECTEDLY,
+            extra=doc.fields | {"ending": exc.reason, "sandbox_limit": at_a_limit},
+        )
+        return finish(
+            deps,
+            doc,
+            step=INSPECT,
+            status="failed",
+            outcome=FAILED,
+            code=PDF_UNREADABLE,
+            error_type=f"{SANDBOX}.{exc.reason}",
+        )
 
     if result.problem == "pdf_encrypted":
-        return _finish(deps, doc, status="on_hold", outcome=ON_HOLD, code=result.problem)
+        return finish(
+            deps, doc, step=INSPECT, status="on_hold", outcome=ON_HOLD, code=result.problem
+        )
     if result.problem is not None:
-        return _finish(deps, doc, status="failed", outcome=FAILED, code=result.problem)
+        return finish(deps, doc, step=INSPECT, status="failed", outcome=FAILED, code=result.problem)
 
-    original_key = ctx.original_key(doc.document_id)
+    # The storage the PDF was just downloaded with.
+    storage = source.storage or deps.storage()
+    original_key = storage.context.original_key(doc.document_id)
     if doc.s3_key != original_key:
         # The first attempt to get here copies the PDF. A later attempt ("Process again")
         # finds it there: the same bytes, checked against the same hash above, are not
         # written to `originals/` a second time.
-        objects.copy(
+        storage.objects.copy(
             source_key=pdf.s3_key,
             source_version=pdf.version_id,
             target_key=original_key,
@@ -250,7 +214,7 @@ def inspect(doc: Document, deps: Deps) -> str:
     # task (assay_workers.companion_data): it is plain JSON and needs no sandbox.
     has_companion = companion is not None and companion.version_id is not None
     with deps.engine.begin() as conn:
-        _event(conn, doc, INSPECT, CONTINUE, {"pages": result.pages, "companion": has_companion})
+        event(conn, doc, INSPECT, CONTINUE, {"pages": result.pages, "companion": has_companion})
         conn.execute(
             text(
                 "UPDATE assay.documents SET s3_key = :key, page_count = :pages "
@@ -262,12 +226,15 @@ def inspect(doc: Document, deps: Deps) -> str:
     return CONTINUE
 
 
-STEPS: dict[str, Callable[[Document, Deps], str]] = {INSPECT: inspect}
+STEPS: dict[str, Callable[[Document, Deps, Source], str]] = {
+    INSPECT: inspect,
+    text_step.STEP: text_step.text,
+}
 
 
 def run(job: Job, deps: Deps) -> str:
     """Run the attempt's steps in order. Returns the last outcome; raises on a failure that
-    is not the document's (the database, storage, the TSS)."""
+    is not the document's (the database, storage, the TSS, Textract)."""
     if keys.is_reserved(job.document_id):
         raise Refused("the reserved isolation-test document ID is never processed")
     with deps.engine.begin() as conn:
@@ -278,33 +245,52 @@ def run(job: Job, deps: Deps) -> str:
                 extra={"document_id": str(job.document_id), "attempt": job.attempt},
             )
             return NOT_ELIGIBLE
-        _event(conn, doc, progress.WORKER, progress.RUNNING)
+        event(conn, doc, progress.WORKER, progress.RUNNING)
 
     outcome = CONTINUE
-    for step in progress.WORKER_STEPS:
-        with deps.engine.begin() as conn:
-            previous = _result(conn, doc, step)
-            if previous is None:
-                _event(conn, doc, step, progress.RUNNING)
-        if previous is not None:
-            log.info("step already done", extra=doc.fields | {"step": step, "outcome": previous})
-            outcome = previous
-        else:
-            try:
-                outcome = STEPS[step](doc, deps)
-            except Exception as exc:
-                _record_error(deps, doc, step, exc)
-                raise
-        if outcome != CONTINUE:
-            break
+    with tempfile.TemporaryDirectory(dir=deps.work_dir) as work:
+        # The sandbox user must be able to reach the PDF, and only read it. What the parent
+        # keeps for itself (pages' text and pictures) is in a directory closed to it.
+        shared = Path(work)
+        shared.chmod(0o755)  # nosec B103
+        private = shared / "parent"
+        private.mkdir(mode=0o700)
+        source = Source(doc=doc, deps=deps, shared=shared, private=private)
+        for step in progress.WORKER_STEPS:
+            with deps.engine.begin() as conn:
+                previous = _result(conn, doc, step)
+                if previous is None:
+                    event(conn, doc, step, progress.RUNNING)
+            if previous is not None:
+                log.info(
+                    "step already done", extra=doc.fields | {"step": step, "outcome": previous}
+                )
+                outcome = previous
+            else:
+                try:
+                    outcome = STEPS[step](doc, deps, source)
+                except Exception as exc:
+                    _record_error(deps, doc, step, exc)
+                    raise
+            if outcome != CONTINUE:
+                break
     return outcome
 
 
+def error_name(exc: BaseException) -> str:
+    """What is kept of an error: a name. An exception that carries the service's own error
+    code (`error_type`, as `ocr.OcrFailed` does) is named by it; any other by its type."""
+    carried = getattr(exc, "error_type", None)
+    if isinstance(carried, str) and ERROR_NAME.fullmatch(carried):
+        return carried
+    return type(exc).__name__
+
+
 def _record_error(deps: Deps, doc: Document, step: str, exc: Exception) -> None:
-    """Best effort: name the step and the exception's type for the failure handler. If the
-    database is what failed, the step's `running` mark still names the step."""
+    """Best effort: name the step and the error for the failure handler. If the database is
+    what failed, the step's `running` mark still names the step."""
     try:
         with deps.engine.begin() as conn:
-            _event(conn, doc, step, progress.ERROR, {"error_type": type(exc).__name__})
+            event(conn, doc, step, progress.ERROR, {"error_type": error_name(exc)})
     except Exception:  # the task is failing anyway; its failure must not be hidden by this one
         log.warning("could not record the failed step", extra=doc.fields | {"step": step})

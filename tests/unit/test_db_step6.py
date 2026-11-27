@@ -30,6 +30,8 @@ FUNCTIONS = {
     "tenants_with_work": APP_TENANT,
     "bound_tenant": "app_worker",
     "bound_document": "app_worker",
+    # Migration 0012: the attempt of the grant the session presented.
+    "bound_attempt": "app_worker",
     "bind_worker": "app_worker",
     "worker_grant": "tss",
 }
@@ -188,6 +190,12 @@ def test_the_master_step_view_has_no_viewer_and_no_detail(db: TestDb) -> None:
         "at",
         "error_code",
         "error_type",
+        # Migration 0012 (owner decision C, 2026-11-27): a `text` event's page counts, so the
+        # master view's Text line shows how many pages could not be read. Counts only.
+        "pages",
+        "pages_native",
+        "pages_ocr",
+        "pages_unread",
     ]
     assert ("viewed",) not in rows and ("scan",) in rows
 

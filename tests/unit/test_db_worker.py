@@ -487,6 +487,10 @@ def test_app_worker_column_grants_are_exactly_these(db: TestDb) -> None:
             "size_bytes",
             "page_count",
             "completed_at",
+            # Migration 0012: the content pointer, held to the bound attempt by a trigger
+            # (tests/unit/test_db_worker_stage2.py).
+            "content_attempt",
+            "text_version_id",
         },
         ("batch_files", "SELECT"): {
             "id",
@@ -508,10 +512,38 @@ def test_app_worker_column_grants_are_exactly_these(db: TestDb) -> None:
             "at",
             "attempt",
         },
+        # Migration 0012: what step 5 writes, insert-only. It can read neither table.
+        ("pages", "INSERT"): {
+            "tenant_id",
+            "document_id",
+            "attempt",
+            "page_no",
+            "text_source",
+            "quality_score",
+            "ocr_confidence",
+            "char_count",
+        },
+        ("ai_usage", "INSERT"): {
+            "tenant_id",
+            "job",
+            "service",
+            "operation",
+            "model_version",
+            "document_id",
+            "attempt",
+            "page_no",
+            "input_tokens",
+            "output_tokens",
+            "units",
+            "unit",
+            "unit_price",
+            "cost",
+            "request_id",
+        },
     }
     found: dict[tuple[str, str], set[str]] = {}
     with psycopg.connect(db.url) as conn:
-        for privilege in ("SELECT", "UPDATE"):
+        for privilege in ("SELECT", "UPDATE", "INSERT"):
             rows = conn.execute(
                 "SELECT c.relname, a.attname FROM pg_attribute a "
                 "JOIN pg_class c ON c.oid = a.attrelid "
@@ -524,6 +556,7 @@ def test_app_worker_column_grants_are_exactly_these(db: TestDb) -> None:
             for table, column in rows:
                 found.setdefault((table, privilege), set()).add(column)
     # document_events has table-level INSERT, which the privilege matrix test covers.
+    assert found.pop(("document_events", "INSERT"))
     assert found == expected
 
 

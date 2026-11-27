@@ -175,6 +175,7 @@ class FakeBuckets:
     objects: dict[tuple[str, str], list[Version]] = field(default_factory=dict)
     copies: list[tuple[str, str, str, str]] = field(default_factory=list)
     deletes: list[tuple[str, str]] = field(default_factory=list)
+    uploads: list[tuple[str, str]] = field(default_factory=list)
     reads: list[tuple[str, str, str | None]] = field(default_factory=list)
     _counter: Iterator[int] = field(default_factory=itertools.count)
 
@@ -229,6 +230,10 @@ class FakeObjects:
         assert v is not None
         self._b.copies.append((self._bucket, source_key, source_version, target_key))
         return self._b.put(self._bucket, target_key, v.body, content_type)
+
+    def upload(self, key: str, path: Path, content_type: str) -> str | None:
+        self._b.uploads.append((self._bucket, key))
+        return self._b.put(self._bucket, key, path.read_bytes(), content_type)
 
     def delete(self, key: str) -> None:
         self._b.deletes.append((self._bucket, key))

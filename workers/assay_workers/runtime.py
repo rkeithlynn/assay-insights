@@ -96,6 +96,8 @@ class Objects(Protocol):
 
     def delete(self, key: str) -> None: ...
 
+    def upload(self, key: str, path: Path, content_type: str) -> str | None: ...
+
 
 @dataclass(frozen=True)
 class TenantStorage:
@@ -112,8 +114,8 @@ class StorageSource(Protocol):
 class S3Objects:
     def __init__(self, ctx: StorageContext) -> None:
         # WORKER: the worker task's context, for one document's keys (build step 6, second
-        # half). It may read and copy by key and version; it can neither head a key it was
-        # not given nor delete anything.
+        # half). It may read and copy by key and version, and write its document's text
+        # object; it can neither head a key it was not given nor delete anything.
         if ctx.access not in (StorageAccess.PIPELINE, StorageAccess.WORKER):
             raise ValueError("the pipeline works with PIPELINE and WORKER contexts only")
         self._bucket = ctx.bucket
@@ -179,6 +181,23 @@ class S3Objects:
     def delete(self, key: str) -> None:
         """A delete marker only: the role never deletes a version (Object Lock keeps it)."""
         self._s3.delete_object(Bucket=self._bucket, Key=key)
+
+    def upload(self, key: str, path: Path, content_type: str) -> str | None:
+        """Write a file as a new version of `key`, with no tags; return its version ID.
+
+        One PUT, read from the file as it goes. The bucket's own default encrypts it with
+        the tenant's key: nothing here names a key. Used for what the pipeline derives from
+        a document (its text), never for an upload or an original.
+        """
+        with path.open("rb") as body:
+            response = self._s3.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=body,
+                ContentType=content_type,
+                ChecksumAlgorithm="SHA256",
+            )
+        return response.get("VersionId")
 
 
 class TssStorageSource:

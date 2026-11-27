@@ -22,8 +22,9 @@ from __future__ import annotations
 from assay_schemas.pipeline import PROGRESS_MARKS, RUNNING, STEP_ERROR, WORKER_STEP
 
 WORKER = WORKER_STEP
-# The task's steps, in the order it runs them. Part 1 has one; steps 5 to 10 follow.
-WORKER_STEPS: tuple[str, ...] = ("inspect",)
+# The task's steps, in the order it runs them: the inspection, then step 5 (text, stage 2).
+# Steps 6 to 8 and 10 follow in the later stages.
+WORKER_STEPS: tuple[str, ...] = ("inspect", "text")
 ERROR = STEP_ERROR
 MARKS = PROGRESS_MARKS
 

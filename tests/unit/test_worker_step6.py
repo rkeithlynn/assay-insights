@@ -9,6 +9,7 @@ machine (it needs Linux and another user), so here the inspect job runs in this 
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import logging
 import uuid
@@ -28,7 +29,9 @@ from assay_workers.worker import db as worker_db
 from assay_workers.worker import run as worker_run
 from assay_workers.worker.__main__ import job_from_env
 from assay_workers.worker.db import GrantRefused, Job
+from assay_workers.worker.ocr import Ocr
 from tests.unit.pgtest import requires_db
+from tests.unit.stage2 import SETTINGS, InProcessPages, NoOcr
 from tests.unit.step6 import Db, FakeQueue, FakeStorage
 from tests.unit.test_pipeline_step6 import (
     World,
@@ -101,7 +104,14 @@ def deps_for(
     tmp_path: Path,
     engines: list[Any],
     inspect: Inspect = in_process_inspect,
+    *,
+    pages: worker_run.Pages | None = None,
+    ocr: Ocr | None = None,
+    text: worker_run.TextSettings = SETTINGS,
 ) -> worker_run.Deps:
+    """The text step (stage 2) runs after the inspection. By default its page jobs run in
+    this process and Textract must not be called: these tests' documents have blank pages or
+    a good text layer."""
     engine = worker_db.bound_engine(w.db.worker_connection, job)
     engines.append(engine)
     return worker_run.Deps(
@@ -109,6 +119,9 @@ def deps_for(
         storage=lambda: w.storage.worker(tenant_id, job.document_id),
         inspect=inspect,
         work_dir=tmp_path,
+        pages=pages or InProcessPages(),
+        ocr=ocr or NoOcr(),
+        text=text,
     )
 
 
@@ -244,10 +257,13 @@ def test_the_worker_inspects_then_copies_the_pinned_version_to_originals(
     assert (b.bucket, pdf.key, version) in w.storage.buckets.reads
     # It asked for a worker context for this document, never a pipeline one.
     assert w.storage.asked[-1][:2] == (b.tenant_id, StorageAccess.WORKER)
-    assert events(w, doc_id)[-3:] == [
+    # The text step (stage 2) follows the inspection in the same task.
+    assert events(w, doc_id)[-5:] == [
         ("worker", "running"),
         ("inspect", "running"),
         ("inspect", "continue"),
+        ("text", "running"),
+        ("text", "continue"),
     ]
     # Nothing is left in the task's work directory.
     assert list(tmp_path.iterdir()) == []
@@ -477,9 +493,7 @@ def test_a_failure_that_is_not_the_documents_names_its_step_for_the_failure_hand
     doc_id, b = fingerprinted(w, "a", "a-admin", "infra.pdf")
     job = claimed(w, b.tenant_id, doc_id)
     deps = deps_for(w, job, b.tenant_id, tmp_path, engines)
-    broken = worker_run.Deps(
-        engine=deps.engine, storage=down, inspect=deps.inspect, work_dir=tmp_path
-    )
+    broken = dataclasses.replace(deps, storage=down)
     with pytest.raises(StorageDown):
         worker_run.run(job, broken)
     assert doc(w, doc_id)[0] == "processing"  # the state machine decides, not the task
@@ -552,6 +566,9 @@ def test_the_worker_refuses_the_reserved_document(
         storage=lambda: w.storage.worker(w.db.tenants["a"], job.document_id),
         inspect=in_process_inspect,
         work_dir=tmp_path,
+        pages=InProcessPages(),
+        ocr=NoOcr(),
+        text=SETTINGS,
     )
     with pytest.raises(worker_run.Refused):
         worker_run.run(job, deps)

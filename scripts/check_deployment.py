@@ -1,13 +1,23 @@
-"""Check a deployed stack: Lambda concurrency, and that every configured log is arriving.
+"""Check a deployed stack: the AI services' data settings, Lambda concurrency, and that every
+configured log is arriving.
 
 Usage (PowerShell, from the repository root):
 
+    uv run scripts/check_deployment.py --ai-services     # only the AI services check
     uv run scripts/check_deployment.py --before-deploy   # a new account, before `pulumi up`
     uv run scripts/check_deployment.py                   # after the isolation run
     uv run scripts/check_deployment.py --strict          # also fail on a log not proven
 
 Read-only: it describes resources and reads metrics, and changes nothing. It reads no log
 event and no object, only whether one exists.
+
+0. AI services (a failure, in every mode; BUILD_SPEC.md section 6, rule 6). No document
+   content may go to an AI service unless both hold:
+   - The AI services opt-out policy in effect for this account says `optOut` by default and
+     for every service it names, so for Textract and Rekognition too. No policy in effect
+     fails.
+   - Bedrock model invocation logging is off in the stack's Region: the account has no
+     logging configuration there at all.
 
 1. Lambda concurrency.
    - The account's limit (a warning). It must cover the two reservations below and what
@@ -145,6 +155,91 @@ def pulumi(*args: str, stack: str) -> str:
         text=True,
     )
     return out.stdout.strip()
+
+
+# --- AI services: opt-out policy and model invocation logging ---------------------------------
+
+OPT_OUT_POLICY_TYPE = "AISERVICES_OPT_OUT_POLICY"
+OPT_OUT = "optOut"
+DEFAULT_SERVICE = "default"
+# The AI services this build sends tenant content to that the opt-out policy covers. Each
+# is reported by name, with the setting that applies to it: its own, or the default.
+SERVICES_IN_USE = ("textract", "rekognition")
+NO_EFFECTIVE_POLICY = "EffectivePolicyNotFoundException"
+
+
+def opt_out_report(organizations: Any) -> tuple[bool, list[str]]:
+    """Whether the AI services opt-out policy in effect for this account opts every service
+    out. The default must be `optOut`, and so must every service the policy names: an
+    exception for one service fails the check whichever service it is."""
+    lines = ["AI services opt-out policy (the policy in effect for this account):"]
+    try:
+        effective = organizations.describe_effective_policy(PolicyType=OPT_OUT_POLICY_TYPE)
+    except ClientError as error:
+        if error.response["Error"]["Code"] != NO_EFFECTIVE_POLICY:
+            raise
+        lines.append("  FAILED: no AI services opt-out policy is in effect for this account.")
+        return False, lines
+    policy = effective["EffectivePolicy"]
+    updated = policy.get("LastUpdatedTimestamp")
+    if updated is not None:
+        lines.append(f"  last updated {updated.astimezone(dt.UTC):%Y-%m-%d %H:%M:%S} UTC")
+    try:
+        services = json.loads(policy["PolicyContent"])["services"]
+        settings = {
+            str(name).lower(): str(entry["opt_out_policy"]) for name, entry in services.items()
+        }
+    except KeyError, TypeError, ValueError, AttributeError:
+        lines.append("  FAILED: the policy's content is not in the form this check reads.")
+        return False, lines
+
+    passed = True
+    for name in sorted(settings, key=lambda n: (n != DEFAULT_SERVICE, n)):
+        good = settings[name] == OPT_OUT
+        passed = passed and good
+        lines.append(f"  {'ok' if good else 'FAILED'}: {name}: {settings[name]}")
+    if DEFAULT_SERVICE not in settings:
+        passed = False
+        lines.append("  FAILED: the policy sets no default, so a service it does not name is in.")
+    for name in SERVICES_IN_USE:
+        if name in settings:
+            continue  # reported above, by its own setting
+        applies = settings.get(DEFAULT_SERVICE)
+        if applies == OPT_OUT:
+            lines.append(f"  ok: {name}: {applies} (the default applies; no setting of its own)")
+        else:
+            passed = False
+            lines.append(f"  FAILED: {name}: no setting of its own, and the default is {applies}")
+    return passed, lines
+
+
+def invocation_logging_report(bedrock: Any, region: str) -> tuple[bool, list[str]]:
+    """Whether Bedrock model invocation logging is off in `region`: no logging configuration
+    at all. A configuration with every destination disabled still fails: the spec's state is
+    "off", and nothing should be one setting away from logging prompts."""
+    lines = [f"Bedrock model invocation logging ({region}):"]
+    config = bedrock.get_model_invocation_logging_configuration().get("loggingConfig")
+    if not config:
+        lines.append("  ok: off (the account has no invocation logging configuration here).")
+        return True, lines
+    # Names only: which kinds of destination and data the configuration has.
+    lines.append(f"  FAILED: a logging configuration exists ({', '.join(sorted(config))}).")
+    return False, lines
+
+
+def ai_services_report(organizations: Any, bedrock: Any, region: str) -> tuple[bool, list[str]]:
+    """Both checks, always both, so one failure never hides the other."""
+    opted_out, lines = opt_out_report(organizations)
+    logging_off, more = invocation_logging_report(bedrock, region)
+    lines += ["", *more, ""]
+    if opted_out and logging_off:
+        lines.append("AI services: ok. Both settings are as BUILD_SPEC.md section 6 requires.")
+    else:
+        lines.append(
+            "AI services: FAILED. No document content may go to Textract, Bedrock or "
+            "Rekognition until both settings above are ok."
+        )
+    return opted_out and logging_off, lines
 
 
 # --- Lambda concurrency -----------------------------------------------------------------------
@@ -611,6 +706,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--stack", default=DEFAULT_STACK)
     parser.add_argument(
+        "--ai-services",
+        action="store_true",
+        help="only the AI services check (opt-out policy, Bedrock invocation logging)",
+    )
+    parser.add_argument(
         "--before-deploy",
         action="store_true",
         help="only the Lambda concurrency check (nothing is deployed yet)",
@@ -623,9 +723,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    region = pulumi("config", "get", "aws:region", stack=args.stack)
     session = boto3.Session(
         profile_name=pulumi("config", "get", "aws:profile", stack=args.stack),
-        region_name=pulumi("config", "get", "aws:region", stack=args.stack),
+        region_name=region,
     )
     clients: dict[str, Any] = {}
 
@@ -635,11 +736,18 @@ def main() -> int:
             clients[name] = session.client(name)  # type: ignore[call-overload]
         return clients[name]
 
+    # First, and in every mode: it needs no deployed stack, and it decides whether any
+    # document content may go to an AI service at all.
+    ai_ok, lines = ai_services_report(client("organizations"), client("bedrock"), region)
+    print("\n".join(lines) + "\n", flush=True)
+    if args.ai_services:
+        return 0 if ai_ok else 1
+
     reserved = configured_reservations(stack_values(args.stack))
     enough, lines = concurrency_report(client("lambda"), client("service-quotas"), reserved)
     print("\n".join(lines), flush=True)
     if args.before_deploy:
-        return 0
+        return 0 if ai_ok else 1
 
     outputs = json.loads(pulumi("stack", "output", "--json", stack=args.stack))
     functions = {
@@ -661,7 +769,9 @@ def main() -> int:
         print("\nThe Lambda concurrency warning above still stands.")
     if not reservations_ok:
         print("\nFAILED: a function's reserved concurrency is not what the stack says (above).")
-    return 0 if passed and reservations_ok else 1
+    if not ai_ok:
+        print("\nFAILED: the AI services check (at the top).")
+    return 0 if passed and reservations_ok and ai_ok else 1
 
 
 if __name__ == "__main__":

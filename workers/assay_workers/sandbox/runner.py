@@ -41,6 +41,7 @@ user) and CAP_KILL (to stop it). If the switch is refused, the job does not run 
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import functools
 import json
@@ -51,9 +52,9 @@ import subprocess  # nosec B404  (starts the sandbox child: a fixed command, no 
 import sys
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -147,7 +148,94 @@ def inherited_environment(report: SelfTestResult) -> list[str]:
     return sorted(set(report.environment or []) - SET_BY_THE_INTERPRETER)
 
 
-RESULTS: dict[str, type[_Result]] = {"inspect": InspectResult, "selftest": SelfTestResult}
+class PagesResult(_Result):
+    """What a job that writes to the page channel prints at the end: how many pages it sent."""
+
+    pages: int = Field(ge=0, le=MAX_PAGES)
+
+
+RESULTS: dict[str, type[_Result]] = {
+    "inspect": InspectResult,
+    "selftest": SelfTestResult,
+    "text": PagesResult,
+    "render": PagesResult,
+    "pageprobe": PagesResult,
+}
+
+
+# --- The page channel: what a record may hold -------------------------------------------------
+#
+# Two jobs send more than a small result (stage 2): the text of each page's text layer, and
+# pages drawn as pictures for Textract. They write records to a pipe this module opens, one
+# JSON object per line, and this module reads them as they arrive, one at a time. Standard
+# output keeps its rule: one small object of numbers and codes.
+#
+# A record is as untrusted as a result. It must validate against its model; it must be for
+# the next page that was asked for; its text must be encodable and within its cap; a picture
+# must begin as a PNG does and be within its cap. Text is data: it is stored for its tenant
+# and never becomes a path, a key, SQL or a log line. A picture is forwarded unopened.
+
+# One page's text, in UTF-8, and one page record with its word positions.
+MAX_PAGE_TEXT_BYTES = 256 * 1024
+MAX_PAGE_RECORD_BYTES = 1024 * 1024
+MAX_WORDS = 10_000
+MAX_WORD_CHARS = 200
+# Positions are ten-thousandths of the page, from its top left corner.
+UNITS = 10_000
+MAX_OBJECTS = 20_000
+MAX_ANNOTATIONS = 5_000
+# One page's picture, and its record (the picture in base64, and a few numbers).
+MAX_IMAGE_BYTES = 5_000_000
+MAX_IMAGE_RECORD_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_SIDE = 10_000
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# How many pages one child is asked for.
+TEXT_PAGES_PER_CHILD = 25
+RENDER_PAGES_PER_CHILD = 8
+
+_Unit = Annotated[int, Field(ge=0, le=UNITS)]
+_Word = tuple[_Unit, _Unit, _Unit, _Unit, Annotated[str, Field(max_length=MAX_WORD_CHARS)]]
+
+
+class PageRecord(_Result):
+    """One page's text layer, as the `text` job reports it."""
+
+    kind: Literal["page"]
+    page: int = Field(ge=1, le=MAX_PAGES)
+    # In points, as the page is displayed.
+    width: float = Field(gt=0, le=1_000_000)
+    height: float = Field(gt=0, le=1_000_000)
+    rotation: Literal[0, 90, 180, 270]
+    objects: int = Field(ge=0, le=MAX_OBJECTS)
+    # The share of the page that images cover.
+    image_coverage: float = Field(ge=0, le=1)
+    # Annotations that draw something: form fields, stamps, free text, ink.
+    annotations: int = Field(ge=0, le=MAX_ANNOTATIONS)
+    # The page has more text than a record holds; it is sent without any.
+    oversize: bool
+    text: str = Field(max_length=MAX_PAGE_TEXT_BYTES)
+    # left, top, width, height, the word.
+    words: list[_Word] = Field(max_length=MAX_WORDS)
+
+
+class ImageRecord(_Result):
+    kind: Literal["image"]
+    page: int = Field(ge=1, le=MAX_PAGES)
+    width: int = Field(ge=1, le=MAX_IMAGE_SIDE)
+    height: int = Field(ge=1, le=MAX_IMAGE_SIDE)
+    dpi: int = Field(ge=1, le=1200)
+    png: str = Field(min_length=1, max_length=MAX_IMAGE_RECORD_BYTES)
+
+
+@dataclass(frozen=True)
+class PageImage:
+    """One page drawn by the `render` job: PNG bytes this module never decodes."""
+
+    page: int
+    width: int
+    height: int
+    dpi: int
+    data: bytes = field(repr=False)
 
 
 # --- Errors -----------------------------------------------------------------------------
@@ -220,15 +308,71 @@ class Completed:
     overflow: bool = False
     # Processor time the child (and anything it started and waited for) used, in seconds.
     cpu_seconds: float = 0.0
+    # The page channel carried something that is not a record this module accepts.
+    refused: bool = False
 
 
 Spawn = Callable[[Sequence[str], Limits], Completed]
 
 
-def child_command(job: str, source: Path) -> list[str]:
+def child_command(job: str, source: Path, *arguments: str) -> list[str]:
     """Isolated mode: no environment variables, no user site directory, no script directory
     on the path. `-B`: no bytecode is written."""
-    return [sys.executable, "-I", "-B", "-m", CHILD_MODULE, job, str(source)]
+    return [sys.executable, "-I", "-B", "-m", CHILD_MODULE, job, str(source), *arguments]
+
+
+class ChannelOverflow(Exception):
+    """More came down the page channel than the parent accepts."""
+
+
+class RecordRefused(Exception):
+    """What came down the page channel is not a record the parent accepts."""
+
+
+class Channel:
+    """The parent's end of the page channel: bytes in, whole lines out, one at a time.
+
+    It holds at most one unfinished line (`max_line` bytes) and passes each finished line to
+    `on_line` before it reads further, so the parent never holds more than one record however
+    many the child sends. `max_total` bounds everything one child may send.
+    """
+
+    def __init__(self, on_line: Callable[[bytes], None], *, max_line: int, max_total: int) -> None:
+        self._on_line = on_line
+        self._max_line = max_line
+        self._max_total = max_total
+        self._pending = bytearray()
+        self._scanned = 0
+        self.total = 0
+
+    def feed(self, data: bytes) -> None:
+        self.total += len(data)
+        if self.total > self._max_total:
+            raise ChannelOverflow
+        self._pending += data
+        while True:
+            end = self._pending.find(b"\n", self._scanned)
+            if end < 0:
+                self._scanned = len(self._pending)
+                if len(self._pending) > self._max_line:
+                    raise ChannelOverflow
+                return
+            if end > self._max_line:
+                raise ChannelOverflow
+            line = bytes(self._pending[:end])
+            del self._pending[: end + 1]
+            self._scanned = 0
+            self._on_line(line)
+
+    def finish(self) -> None:
+        """The child closed its end. A line it never finished is not a record."""
+        if self._pending:
+            raise RecordRefused
+
+
+# Starts a child that is given the page channel: `command(descriptor)` is its command line,
+# once the descriptor it will write to is known.
+ChannelSpawn = Callable[[Callable[[int], Sequence[str]], Limits, Channel], Completed]
 
 
 def _children_cpu_seconds() -> float:
@@ -250,16 +394,44 @@ def _kill(process: subprocess.Popen[bytes]) -> None:
 
 def spawn(argv: Sequence[str], limits: Limits) -> Completed:
     """Run the child confined, and collect at most MAX_OUTPUT_BYTES of its output. Linux."""
+    return _spawn(lambda _descriptor: argv, limits, None)
+
+
+def spawn_with_channel(
+    command: Callable[[int], Sequence[str]], limits: Limits, channel: Channel
+) -> Completed:
+    """The same, for a job that also writes to the page channel: the child inherits one more
+    descriptor, the write end of a pipe, and `channel` is fed what arrives on the other end
+    as it arrives."""
+    return _spawn(command, limits, channel)
+
+
+def _close(*descriptors: int | None) -> None:
+    for descriptor in descriptors:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+def _spawn(
+    command: Callable[[int], Sequence[str]], limits: Limits, channel: Channel | None
+) -> Completed:
+    read_end: int | None = None
+    write_end: int | None = None
     try:
         cpu_before = _children_cpu_seconds()
+        if channel is not None:
+            read_end, write_end = os.pipe()
         process = subprocess.Popen(  # noqa: S603  # nosec B603  (a fixed command)
-            list(argv),
+            list(command(-1 if write_end is None else write_end)),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env={},
             cwd="/",
             close_fds=True,
+            # The page channel's write end, and nothing else, stays open in the child.
+            pass_fds=() if write_end is None else (write_end,),
             user=SANDBOX_UID,
             group=SANDBOX_GID,
             extra_groups=[],
@@ -270,48 +442,73 @@ def spawn(argv: Sequence[str], limits: Limits) -> Completed:
             preexec_fn=functools.partial(confine, limits),
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        _close(read_end, write_end)
         raise SandboxNotStarted from exc
+    # Only the child holds the write end now, so the channel ends when the child does.
+    _close(write_end)
 
     assert process.stdout is not None and process.stderr is not None  # noqa: S101  # nosec B101
     deadline = time.monotonic() + limits.wall_seconds
     output = bytearray()
-    timed_out = overflow = False
-    with selectors.DefaultSelector() as selector:
-        selector.register(process.stdout, selectors.EVENT_READ)
-        selector.register(process.stderr, selectors.EVENT_READ)
-        while selector.get_map() and not (timed_out or overflow):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            for key, _events in selector.select(remaining):
-                data = os.read(key.fd, READ_CHUNK)
-                if not data:
-                    selector.unregister(key.fileobj)
-                elif key.fileobj is process.stdout:
-                    output += data
-                    if len(output) > MAX_OUTPUT_BYTES:
-                        overflow = True
-                        break
-                # stderr is read only so the child never blocks on it, and is dropped.
-    if timed_out or overflow:
-        _kill(process)
+    timed_out = overflow = refused = False
     try:
-        returncode = process.wait(max(deadline - time.monotonic(), 0) + EXIT_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill(process)
-        returncode = process.wait()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stderr, selectors.EVENT_READ)
+            if read_end is not None:
+                selector.register(read_end, selectors.EVENT_READ)
+            while selector.get_map() and not (timed_out or overflow or refused):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                for key, _events in selector.select(remaining):
+                    data = os.read(key.fd, READ_CHUNK)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                    elif key.fileobj is process.stdout:
+                        output += data
+                        if len(output) > MAX_OUTPUT_BYTES:
+                            overflow = True
+                            break
+                    elif channel is not None and key.fileobj == read_end:
+                        try:
+                            channel.feed(data)
+                        except ChannelOverflow:
+                            overflow = True
+                            break
+                        except RecordRefused:
+                            refused = True
+                            break
+                    # stderr is read only so the child never blocks on it, and is dropped.
+        if timed_out or overflow or refused:
+            _kill(process)
+        try:
+            returncode = process.wait(max(deadline - time.monotonic(), 0) + EXIT_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill(process)
+            returncode = process.wait()
+        if channel is not None and not (timed_out or overflow or refused):
+            try:
+                channel.finish()
+            except RecordRefused:
+                refused = True
     finally:
-        # Anything the child left running in its process group goes with it.
+        # Anything the child left running in its process group goes with it, also when the
+        # parent's own handling of a record failed (a full disk, say) and is on its way up.
         _kill(process)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(EXIT_GRACE_SECONDS)
         process.stdout.close()
         process.stderr.close()
+        _close(read_end)
     return Completed(
         returncode=returncode,
         stdout=bytes(output),
         timed_out=timed_out,
         overflow=overflow,
+        refused=refused,
         # One child at a time, so the difference is this child's.
         cpu_seconds=_children_cpu_seconds() - cpu_before,
     )
@@ -335,6 +532,9 @@ def ending(done: Completed, limits: Limits) -> SandboxError | None:
         return SandboxLimit(WALL_CLOCK_TIMEOUT)
     if done.overflow or len(done.stdout) > MAX_OUTPUT_BYTES:
         return SandboxLimit(OUTPUT_LIMIT)
+    if done.refused:
+        # The parent stopped it for what it sent down the page channel.
+        return SandboxBadOutput()
     if done.returncode < 0:
         number = -done.returncode
         if number == SIGXCPU:
@@ -383,3 +583,149 @@ def selftest(probe: str, *, limits: Limits | None = None, spawn: Spawn = spawn) 
     result = run("selftest", Path(probe), limits=limits, spawn=spawn)
     assert isinstance(result, SelfTestResult)  # noqa: S101  # nosec B101
     return result
+
+
+# --- Jobs that write to the page channel ---------------------------------------------------
+
+# Drawing a page takes longer than reading its text.
+RENDER_LIMITS = Limits(wall_seconds=120.0, cpu_seconds=90)
+
+
+def _checked_text(record: PageRecord) -> PageRecord:
+    """Text that can be stored and read back: valid UTF-8, within the cap, no NUL."""
+    try:
+        size = len(record.text.encode("utf-8", errors="strict"))
+        "".join(word[4] for word in record.words).encode("utf-8", errors="strict")
+    except ValueError:
+        raise RecordRefused from None
+    if size > MAX_PAGE_TEXT_BYTES or "\x00" in record.text:
+        raise RecordRefused
+    if record.oversize and (record.text or record.words):
+        raise RecordRefused
+    return record
+
+
+def _checked_image(record: ImageRecord) -> PageImage:
+    """The picture's bytes, checked for their first eight and their length only. This module
+    never decodes a picture."""
+    try:
+        data = base64.b64decode(record.png, validate=True)
+    except ValueError:
+        raise RecordRefused from None
+    if not data.startswith(PNG_SIGNATURE) or len(data) > MAX_IMAGE_BYTES:
+        raise RecordRefused
+    return PageImage(
+        page=record.page, width=record.width, height=record.height, dpi=record.dpi, data=data
+    )
+
+
+def _pages[R: _Result, T](
+    job: str,
+    source: Path,
+    arguments: Sequence[str],
+    *,
+    expect: Sequence[int],
+    model: type[R],
+    check: Callable[[R], T],
+    handle: Callable[[T], None],
+    max_record: int,
+    limits: Limits | None,
+    spawn: ChannelSpawn,
+) -> None:
+    """Run a page job and hand `handle` each record as it arrives: exactly the pages in
+    `expect`, in that order, each once, or `SandboxError`. `handle` has finished with one
+    record before the next is read."""
+    limits = limits or Limits()
+    waiting = list(reversed(expect))
+
+    def on_line(line: bytes) -> None:
+        try:
+            record = model.model_validate_json(line)
+        except ValueError:
+            raise RecordRefused from None
+        if not waiting or getattr(record, "page", None) != waiting.pop():
+            raise RecordRefused
+        handle(check(record))
+
+    channel = Channel(on_line, max_line=max_record, max_total=len(expect) * (max_record + 1))
+    done = spawn(
+        lambda descriptor: child_command(job, source, str(descriptor), *arguments), limits, channel
+    )
+    error = ending(done, limits)
+    if error is not None:
+        raise error
+    try:
+        result = PagesResult.model_validate_json(done.stdout)
+    except ValueError:
+        raise SandboxBadOutput from None
+    if waiting or result.pages != len(expect):
+        raise SandboxBadOutput
+
+
+def read_text(
+    source: Path,
+    first: int,
+    last: int,
+    handle: Callable[[PageRecord], None],
+    *,
+    limits: Limits | None = None,
+    spawn: ChannelSpawn = spawn_with_channel,
+) -> None:
+    """The text layer of pages `first` to `last` (from 1), one record a page, in order."""
+    _pages(
+        "text",
+        source,
+        [str(first), str(last)],
+        expect=range(first, last + 1),
+        model=PageRecord,
+        check=_checked_text,
+        handle=handle,
+        max_record=MAX_PAGE_RECORD_BYTES,
+        limits=limits,
+        spawn=spawn,
+    )
+
+
+def render(
+    source: Path,
+    pages: Sequence[int],
+    handle: Callable[[PageImage], None],
+    *,
+    limits: Limits | None = None,
+    spawn: ChannelSpawn = spawn_with_channel,
+) -> None:
+    """Each of `pages` drawn as a PNG, in the order given."""
+    _pages(
+        "render",
+        source,
+        [",".join(str(page) for page in pages)],
+        expect=list(pages),
+        model=ImageRecord,
+        check=_checked_image,
+        handle=handle,
+        max_record=MAX_IMAGE_RECORD_BYTES,
+        limits=limits or RENDER_LIMITS,
+        spawn=spawn,
+    )
+
+
+def pageprobe(
+    probe: str,
+    *,
+    limits: Limits | None = None,
+    spawn: ChannelSpawn = spawn_with_channel,
+) -> None:
+    """`probe` is one of jobs.PAGE_PROBES: a child that misbehaves on the page channel. One
+    page is asked for; whatever arrives is dropped."""
+    _pages(
+        "pageprobe",
+        Path(probe),
+        [],
+        expect=[1],
+        model=PageRecord,
+        check=_checked_text,
+        handle=lambda _record: None,
+        max_record=MAX_PAGE_RECORD_BYTES,
+        limits=limits,
+        spawn=spawn,
+    )
