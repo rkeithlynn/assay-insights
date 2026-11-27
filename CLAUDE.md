@@ -69,9 +69,11 @@ verified in dev.** Stage 3 is not started and needs its own plan first.
   `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,796 passed, none failed, none skipped (1,792 at stage 2,
   and four new tests of the scan role's policy). The portal's type check, lint and 118 unit
   tests pass, and the rendered check passes, 58 of 58 (the 48 layout checks and the 10 new
-  upload checks). **`pulumi preview` was not run for these changes:** the owner's AWS
-  sign-in had expired for Pulumi, so run it, and read it, before `pulumi up`. What it should
-  show is under "The scan role's reach".
+  upload checks). CI passed on commit e70eaea (`python`, `portal`, `portal-render`).
+- **The preview for these changes** (2026-11-27, commit e70eaea): 1 to update (the scan
+  role's policy: the `Resource` of `AllowPostScanTag` and `AllowMalwareScan`, from
+  `assay-dev-t-*/*` to `assay-dev-t-*/inbox/*`, and nothing else in it), 1 to replace (the
+  portal build), 363 unchanged, and two new outputs.
 - **Rule 6** (checked 2026-11-27, before stage 2 was built): the AI services opt-out policy
   in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
   UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is the
@@ -414,13 +416,10 @@ The owner's decision (2026-11-27), as its own change after stage 2.
 
 **The test, in this order** (owner; PowerShell, one line each):
 
-1. `pulumi preview --cwd infra --stack pilartech/assay-platform/dev --diff`, and read it. It
-   was not run when this was built (the AWS sign-in had expired for Pulumi). **What it
-   should show, from the code, not from a run:** one role policy updated
-   (`assay-dev-malware-scan-policy`, the two statements' `Resource`), the portal build
-   replaced with what depends on it (the upload screen's fixes), two new stack outputs, and
-   no image, role, bucket policy, endpoint or database change. Anything else: stop and ask.
-   Then deploy when nobody is uploading: `pulumi up --cwd infra --stack pilartech/assay-platform/dev`.
+1. Deploy when nobody is uploading: `pulumi up --cwd infra --stack pilartech/assay-platform/dev`.
+   Its preview (2026-11-27) showed one role policy updated (`assay-dev-malware-scan-policy`,
+   the two statements' `Resource`), the portal build replaced (the upload screen's fixes)
+   and two new stack outputs: 2 changes, 363 unchanged. Anything else: stop and ask.
 2. Read the deployed policy. Both statements must end in `/inbox/*`:
    `aws iam get-role-policy --role-name assay-dev-malware-scan-role-cf2a8e2 --policy-name assay-dev-malware-scan-policy-4c8a356 --profile pilar-dev --query "PolicyDocument.Statement[?Sid=='AllowMalwareScan' || Sid=='AllowPostScanTag'].[Sid,Resource]" --output text`
    (the deployed names in dev, read on 2026-11-27; the role's name is also the stack output
