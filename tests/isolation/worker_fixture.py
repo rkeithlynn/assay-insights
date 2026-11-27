@@ -13,6 +13,12 @@ tenants:
 - one small object at each document's `originals/` key and (stage 2) at its
   `derived/text/` key, written once with the tenant's pipeline credentials and kept by Object
   Lock. A refused read proves something only for an object that exists;
+- for the probe's own document, a companion file's upload (owner, 2026-11-27): a clean
+  `batch_files` row of kind `companion`, and one small object at its inbox key. The grant's
+  row lists that key, and the worker's credentials must be refused it: the task reads its
+  PDF, never its companion file. The row is committed before the object is written, so
+  GuardDuty's scan result for the object finds a file that already has its result, and the
+  scan function ignores it at INFO ("a later version is never used"): no alarm;
 - grants in every state, made as the pipeline's `claim` step makes them: a live one for the
   first document of tenant A (the probe's own), an ended one and then a live one for the
   second (the live one is ended mid-run, on request), and an expired one for tenant B's.
@@ -27,6 +33,7 @@ the same: nothing queues them, and their PDF row names an inbox object that does
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import uuid
 from collections.abc import Callable
@@ -37,6 +44,7 @@ from sqlalchemy import Connection, Engine, text
 
 from assay_db import grants
 from assay_db.connect import DbTarget, iam_engine
+from assay_tss import keys
 from assay_tss.client import TssClient
 from assay_tss.models import StorageAccess, StorageContext, source_identity
 
@@ -56,6 +64,11 @@ def batch_id(tenant_id: uuid.UUID) -> uuid.UUID:
 
 def document_id(tenant_id: uuid.UUID, number: int) -> uuid.UUID:
     return uuid.uuid5(NAMESPACE, f"{tenant_id}:document-{number}")
+
+
+def companion_file_id(tenant_id: uuid.UUID) -> uuid.UUID:
+    """The companion upload of the tenant's first fixture document (the probe's own)."""
+    return uuid.uuid5(NAMESPACE, f"{tenant_id}:companion-1")
 
 
 def _tenant(conn: Connection, tenant_id: uuid.UUID) -> None:
@@ -118,6 +131,61 @@ def ensure_document(conn: Connection, tenant_id: uuid.UUID, number: int) -> uuid
     return document
 
 
+COMPANION_NAME = "isolation-worker-fixture.json"
+COMPANION_BODY = (
+    b'{"isolation_test_fixture": "the worker probe must be refused this; it is no '
+    b"document's companion file\"}\n"
+)
+
+
+def ensure_companion_upload(conn: Connection, tenant_id: uuid.UUID) -> uuid.UUID:
+    """A clean companion upload of the tenant's first fixture document: the row only.
+
+    `pipeline.worker_grant` lists every clean inbox file of a document, so the grant's row
+    now lists two keys, the PDF's and this one. The TSS must give the worker the PDF's only.
+    """
+    batch, document = batch_id(tenant_id), document_id(tenant_id, 1)
+    file = companion_file_id(tenant_id)
+    user = conn.execute(text("SELECT id FROM assay.users ORDER BY id LIMIT 1")).scalar_one()
+    conn.execute(
+        text(
+            "INSERT INTO assay.batch_files (id, tenant_id, batch_id, kind, file_name, "
+            "base_name, size_bytes, sha256, s3_key, content_type, status, version_id, "
+            "document_id, registered_by) VALUES (:id, :tenant, :batch, 'companion', :name, "
+            ":base, :size, :sha, :key, 'application/json', 'clean', 'isolation-fixture', "
+            ":document, :user) ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": file,
+            "tenant": tenant_id,
+            "batch": batch,
+            "user": user,
+            "name": COMPANION_NAME,
+            "base": "isolation-worker-fixture-1",
+            "size": len(COMPANION_BODY),
+            "sha": hashlib.sha256(COMPANION_BODY).hexdigest(),
+            "key": keys.inbox_key(batch, file),
+            "document": document,
+        },
+    )
+    return file
+
+
+def ensure_upload_object(context: StorageContext, batch: uuid.UUID, file: uuid.UUID) -> None:
+    """One small object at the companion upload's inbox key, written once. Its row exists
+    already (`ensure_companion_upload`, committed), so its scan result raises no alarm."""
+    api: Any = context.session().client("s3", region_name=context.region)
+    key = context.inbox_key(batch, file)
+    try:
+        api.head_object(Bucket=context.bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in MISSING_CODES:
+            raise
+        api.put_object(
+            Bucket=context.bucket, Key=key, Body=COMPANION_BODY, ContentType="application/json"
+        )
+
+
 def ensure_object(context: StorageContext, document: uuid.UUID) -> None:
     """One small object at the document's `originals/` key, written once."""
     api: Any = context.session().client("s3", region_name=context.region)
@@ -176,11 +244,13 @@ def prepare(
     tenant_b: uuid.UUID,
     *,
     write: Callable[[StorageContext, uuid.UUID], None] = ensure_objects,
+    write_upload: Callable[[StorageContext, uuid.UUID, uuid.UUID], None] = ensure_upload_object,
 ) -> dict[str, Any]:
     """Documents, objects and grants; returns the probe's cases."""
     with engine.begin() as conn:
         _tenant(conn, tenant_a)
         own_document = ensure_document(conn, tenant_a, 1)
+        companion = ensure_companion_upload(conn, tenant_a)
         sibling = ensure_document(conn, tenant_a, 2)
         own = _claim(conn, tenant_a, own_document)
         ended = _claim(conn, tenant_a, sibling)
@@ -202,10 +272,15 @@ def prepare(
         context = tss.resolve(tenant_id, StorageAccess.PIPELINE, identity)
         for document in documents:
             write(context, document)
+        if tenant_id == tenant_a:
+            # After its row is committed (above): see `ensure_upload_object`.
+            write_upload(context, batch_id(tenant_a), companion)
     return {
         "tenant_a": str(tenant_a),
         "tenant_b": str(tenant_b),
-        "own": own,
+        # IDs only: the probe builds the key through its own storage context.
+        "own": own
+        | {"companion_upload": {"batch_id": str(batch_id(tenant_a)), "file_id": str(companion)}},
         "sibling": {"document_id": str(sibling)},
         "other_tenant": {"document_id": str(other)},
         "ended": ended,

@@ -356,13 +356,34 @@ BATCH = uuid.UUID("b0000000-0000-4000-8000-000000000001")
 COMPANION_FILE = uuid.UUID("c0000000-0000-4000-8000-000000000001")
 
 
+REPLACEMENT_FILE = uuid.UUID("c0000000-0000-4000-8000-000000000002")
+
+
+def grant_row(document: uuid.UUID = DOC_1, companions: int = 1) -> list[str]:
+    """What `pipeline.worker_grant` lists for a document: its PDF's upload, and each clean
+    companion upload (the first, and any replacement)."""
+    return [
+        keys.inbox_key(BATCH, document),
+        *[keys.inbox_key(BATCH, file) for file in (COMPANION_FILE, REPLACEMENT_FILE)[:companions]],
+    ]
+
+
+def worker_policy_from(
+    row: list[str], document: uuid.UUID = DOC_1, tenant: uuid.UUID = TENANT_A
+) -> dict[str, Any]:
+    """As the service builds it: from the grant's row, through `worker_pdf_upload_keys`."""
+    return policies.worker_session_policy(
+        profile(tenant),
+        document_id=document,
+        inbox_keys=policies.worker_pdf_upload_keys(document, row),
+    )
+
+
 def worker_policy(
     document: uuid.UUID = DOC_1, tenant: uuid.UUID = TENANT_A, companion: bool = True
 ) -> dict[str, Any]:
-    inbox = [keys.inbox_key(BATCH, document)]
-    if companion:
-        inbox.append(keys.inbox_key(BATCH, COMPANION_FILE))
-    return policies.worker_session_policy(profile(tenant), document_id=document, inbox_keys=inbox)
+    row = grant_row(document, companions=1 if companion else 0)
+    return worker_policy_from(row, document, tenant)
 
 
 def object_resources(policy: dict[str, Any]) -> set[str]:
@@ -384,9 +405,10 @@ def test_worker_policy_names_exactly_its_documents_keys() -> None:
     a = profile(TENANT_A)
     bucket = f"arn:aws:s3:::{a.bucket}"
     policy = worker_policy()
+    # In the inbox: the PDF's upload, and not the companion's, which the grant's row lists
+    # beside it (owner, 2026-11-27).
     assert object_resources(policy) == {
         f"{bucket}/inbox/{BATCH}/{DOC_1}",
-        f"{bucket}/inbox/{BATCH}/{COMPANION_FILE}",
         f"{bucket}/originals/{DOC_1}.pdf",
         f"{bucket}/derived/text/{DOC_1}.json",
         f"{bucket}/derived/fields/{DOC_1}.json",
@@ -395,6 +417,7 @@ def test_worker_policy_names_exactly_its_documents_keys() -> None:
     # write, not the task's. It is no longer in the worker's policy at all.
     assert f"{bucket}/originals/{DOC_1}.companion.json" not in object_resources(policy)
     assert ".companion.json" not in json.dumps(policy)
+    assert str(COMPANION_FILE) not in json.dumps(policy)
     other = {r for s in policy["Statement"] for r in as_list(s["Resource"])} - object_resources(
         policy
     )
@@ -455,12 +478,62 @@ def test_worker_policy_with_no_inbox_file_has_no_inbox_statement() -> None:
         [f"inbox/{BATCH}/{DOC_1}/extra"],
         [f"quarantine/{DOC_1}.pdf"],
         [keys.isolation_fixture_inbox_key()],
-        [keys.inbox_key(BATCH, uuid.UUID(int=n)) for n in (1, 2, 3)],
+        # A companion file's upload, alone and beside the PDF's: an upload key, and not the
+        # one registered under the document's own ID.
+        [keys.inbox_key(BATCH, COMPANION_FILE)],
+        [keys.inbox_key(BATCH, DOC_1), keys.inbox_key(BATCH, COMPANION_FILE)],
+        # Another document's PDF.
+        [keys.inbox_key(BATCH, DOC_2)],
+        # The document's ID in two batches: more than the one upload a PDF has.
+        [keys.inbox_key(BATCH, DOC_1), keys.inbox_key(COMPANION_FILE, DOC_1)],
     ],
 )
-def test_worker_policy_refuses_anything_that_is_not_its_upload_keys(inbox_keys: list[str]) -> None:
+def test_worker_policy_refuses_anything_that_is_not_its_pdfs_upload(inbox_keys: list[str]) -> None:
     with pytest.raises(ValueError):
         policies.worker_session_policy(profile(TENANT_A), document_id=DOC_1, inbox_keys=inbox_keys)
+
+
+def test_a_worker_reads_one_inbox_object_at_most() -> None:
+    assert policies.WORKER_MAX_INBOX_KEYS == 1
+    for companions in (0, 1, 2):
+        policy = worker_policy_from(grant_row(companions=companions))
+        inbox = [r for r in object_resources(policy) if "/inbox/" in r]
+        assert inbox == [f"arn:aws:s3:::{profile(TENANT_A).bucket}/inbox/{BATCH}/{DOC_1}"]
+
+
+def test_of_a_grants_row_only_the_pdfs_upload_is_kept() -> None:
+    pdf = keys.inbox_key(BATCH, DOC_1)
+    # The PDF alone, with its companion, and with a replacement companion as well: a row of
+    # three keys, which a document has once its companion file was replaced.
+    for companions in (0, 1, 2):
+        assert policies.worker_pdf_upload_keys(DOC_1, grant_row(companions=companions)) == (pdf,)
+    # Listed twice, it is still one key. Listed in any order.
+    assert policies.worker_pdf_upload_keys(DOC_1, [pdf, pdf]) == (pdf,)
+    backwards = list(reversed(grant_row(companions=2)))
+    assert policies.worker_pdf_upload_keys(DOC_1, backwards) == (pdf,)
+    # No PDF listed (it never scanned clean): nothing, and so no inbox statement at all.
+    assert policies.worker_pdf_upload_keys(DOC_1, [keys.inbox_key(BATCH, COMPANION_FILE)]) == ()
+    assert policies.worker_pdf_upload_keys(DOC_1, []) == ()
+    # Another document's row gives this document nothing.
+    assert policies.worker_pdf_upload_keys(DOC_1, grant_row(DOC_2)) == ()
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        ["inbox/*"],
+        ["originals/x.pdf"],
+        [f"inbox/{BATCH}/secret-name.pdf"],
+        [f"quarantine/{DOC_1}.pdf"],
+        [keys.isolation_fixture_inbox_key()],
+        # One bad key refuses the row, whatever else it lists.
+        [keys.inbox_key(BATCH, DOC_1), "inbox/*"],
+        [keys.inbox_key(BATCH, DOC_1), f"originals/{DOC_1}.pdf"],
+    ],
+)
+def test_a_grants_row_with_a_key_that_is_not_an_upload_key_is_refused(listed: list[str]) -> None:
+    with pytest.raises(ValueError, match="not an inbox upload key"):
+        policies.worker_pdf_upload_keys(DOC_1, listed)
 
 
 def test_worker_policy_refuses_the_reserved_document() -> None:
@@ -473,9 +546,7 @@ def test_worker_policy_refuses_the_reserved_document() -> None:
 def test_worker_policy_fits_the_sts_limit() -> None:
     a = profile(TENANT_A)
     text = policies.worker_session_policy_json(
-        a,
-        document_id=DOC_1,
-        inbox_keys=[keys.inbox_key(BATCH, DOC_1), keys.inbox_key(BATCH, COMPANION_FILE)],
+        a, document_id=DOC_1, inbox_keys=[keys.inbox_key(BATCH, DOC_1)]
     )
     assert len(text) <= policies.SESSION_POLICY_MAX_CHARS
     assert json.loads(text) == worker_policy()

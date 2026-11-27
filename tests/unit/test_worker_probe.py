@@ -100,7 +100,11 @@ class FakeTss:
 
 class PolicyS3:
     """S3 for one set of credentials: an action on an object is allowed only if the session
-    policy issued with those credentials allows it on that exact object."""
+    policy issued with those credentials allows it on that exact object.
+
+    Its refusals read as S3's do (seen in AWS, 2026-11-24): the action asked for, when the
+    object exists; `s3:ListBucket` for a read of a key that was never written, because no
+    tenant session may list."""
 
     def __init__(self, policy: dict[str, Any], objects: set[tuple[str, str]]) -> None:
         self._policy = policy
@@ -113,7 +117,14 @@ class PolicyS3:
             resources = resources if isinstance(resources, list) else [resources]
             if action in statement["Action"] and resource in resources:
                 return
-        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, action)
+        missing = action == "s3:GetObject" and (bucket, key) not in self._objects
+        named = "s3:ListBucket" if missing else action
+        message = (
+            f"User: arn:aws:sts::{ACCOUNT}:assumed-role/{PREFIX}-tenant/t-worker is not "
+            f'authorized to perform: {named} on resource: "{resource}" because no session '
+            f"policy allows the {named} action"
+        )
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": message}}, action)
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
         self._check("s3:GetObject", Bucket, Key)
@@ -272,6 +283,10 @@ class World:
         # Stage 2: the fixture's text object, which the probe's own document may read.
         self.objects.add((context.bucket, context.text_key(document)))
 
+    def write_upload(self, context: StorageContext, batch: uuid.UUID, file: uuid.UUID) -> None:
+        # The fixture's companion upload, in the inbox of the probe's own document.
+        self.objects.add((context.bucket, context.inbox_key(batch, file)))
+
     def textract(self, ctx: StorageContext | None = None) -> Any:
         return self.task_textract if ctx is None else SessionTextract()
 
@@ -283,6 +298,7 @@ class World:
             self.tenant_a,
             self.tenant_b,
             write=self.write,
+            write_upload=self.write_upload,
         )
         # The reserved-ID fixtures the isolation tests keep in tenant A's bucket.
         bucket = naming.bucket_name(PREFIX, self.tenant_a)
@@ -396,6 +412,7 @@ def test_every_check_passes_on_a_correct_system(world: World) -> None:
         "storage: the other tenant's document's text",
         "storage: writing the other tenant's text",
         "storage: writing its own document's stored companion file",
+        "storage: reading its own document's companion upload",
         "database: a pages row for its own attempt",
         "database: a pages row for its tenant's other document",
         "database: a pages row for the other tenant's document",
@@ -436,6 +453,10 @@ def test_every_check_passes_on_a_correct_system(world: World) -> None:
         "refused:not_the_bound_attempt"
     )
     assert by_name["textract: AnalyzeDocument"] == "refused:AccessDeniedException"
+    # S3's own answer: the read itself, of an object that is there.
+    assert by_name["storage: reading its own document's companion upload"] == (
+        "denied:s3:GetObject"
+    )
     assert by_name["textract: pointed at another tenant's document in its bucket"] == (
         "refused:InvalidS3ObjectException"
     )
@@ -502,6 +523,50 @@ def test_the_fixture_ids_are_fixed_per_tenant_and_never_the_reserved_one() -> No
     assert keys.parse_inbox_key(
         f"inbox/{worker_fixture.batch_id(tenant)}/{worker_fixture.document_id(tenant, 1)}"
     )
+    # The companion upload's file ID: fixed, its own, and never the document's.
+    companion = worker_fixture.companion_file_id(tenant)
+    assert companion == worker_fixture.companion_file_id(tenant)
+    assert companion != worker_fixture.companion_file_id(uuid.uuid4())
+    assert companion not in {worker_fixture.document_id(tenant, n) for n in (1, 2)}
+    assert not keys.is_reserved(companion)
+    assert keys.parse_inbox_key(keys.inbox_key(worker_fixture.batch_id(tenant), companion))
+
+
+def companion_upload(world: World, cases: dict[str, Any]) -> tuple[str, str]:
+    """The bucket and key of the fixture's companion upload."""
+    upload = cases["own"]["companion_upload"]
+    key = keys.inbox_key(uuid.UUID(upload["batch_id"]), uuid.UUID(upload["file_id"]))
+    return naming.bucket_name(PREFIX, world.tenant_a), key
+
+
+def test_the_grants_row_lists_the_companion_upload_and_the_policy_leaves_it_out(
+    world: World,
+) -> None:
+    """Owner, 2026-11-27. What the probe's new check rests on: the database does list the
+    companion's upload for the worker's document, the object is there, and the credentials
+    the TSS issues name the PDF's upload only."""
+    cases = world.prepare()
+    own = uuid.UUID(cases["own"]["document_id"])
+    bucket, key = companion_upload(world, cases)
+    pdf = keys.inbox_key(worker_fixture.batch_id(world.tenant_a), own)
+
+    reader = service.DbStorageReader(world.engines[0])
+    grant = reader.worker_grant(own, 1, service.token_hash(cases["own"]["token"]))
+    assert grant is not None and sorted(grant.inbox_keys) == sorted([pdf, key])
+    assert (bucket, key) in world.objects
+
+    ctx = world.worker_tss.resolve_worker(own, 1, cases["own"]["token"])
+    policy = json.dumps(world.sts.policies[ctx.credentials.access_key_id])
+    assert f"arn:aws:s3:::{bucket}/{pdf}" in policy
+    assert key not in policy and cases["own"]["companion_upload"]["file_id"] not in policy
+    # A second run finds the same row and the same object.
+    again = world.prepare()
+    assert again["own"]["companion_upload"] == cases["own"]["companion_upload"]
+    assert world.db.row(
+        "SELECT count(*), min(status), min(kind) FROM assay.batch_files "
+        "WHERE document_id = %s AND kind = 'companion'",
+        own,
+    ) == (1, "clean", "companion")
 
 
 # --- A broken system fails the check that guards it --------------------------------------------
@@ -712,6 +777,62 @@ def test_a_session_policy_that_still_names_the_companion_file_fails_its_check(
     assert problems == [
         "storage: writing its own document's stored companion file: expected denied, was allowed"
     ]
+
+
+COMPANION_UPLOAD_CHECK = "storage: reading its own document's companion upload"
+
+
+def test_a_session_policy_that_names_the_companion_upload_fails_its_check(world: World) -> None:
+    """Owner, 2026-11-27: the policy as it was before, with every clean inbox file of the
+    document in it. The task can then read its document's companion file."""
+    cases = world.prepare()
+    bucket, key = companion_upload(world, cases)
+
+    def as_before(ctx: StorageContext) -> PolicyS3:
+        policy = world.sts.policies[ctx.credentials.access_key_id]
+        extra = {
+            "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+            "Resource": [f"arn:aws:s3:::{bucket}/{key}"],
+        }
+        return PolicyS3({"Statement": [*policy["Statement"], extra]}, world.objects)
+
+    problems = failed(world.probe(cases, s3=as_before).run())
+    assert problems == [f"{COMPANION_UPLOAD_CHECK}: expected denied:s3:GetObject, was allowed"]
+
+
+def test_a_companion_upload_that_was_never_written_fails_the_check(world: World) -> None:
+    """A refusal proves something only for an object that exists. Without the fixture's
+    object S3 refuses the read for `s3:ListBucket`, which the check does not accept."""
+    cases = world.prepare()
+    world.objects.discard(companion_upload(world, cases))
+    problems = failed(world.probe(cases).run())
+    assert problems == [
+        f"{COMPANION_UPLOAD_CHECK}: expected denied:s3:GetObject, was denied:s3:ListBucket"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message", "outcome"),
+    [
+        ("because no session policy allows the s3:GetObject action", "denied:s3:GetObject"),
+        ("because no session policy allows the s3:ListBucket action", "denied:s3:ListBucket"),
+        ("Access Denied", "denied:no_reason"),
+        ("", "denied:no_reason"),
+    ],
+)
+def test_an_s3_refusal_is_reported_with_the_action_s3_names(message: str, outcome: str) -> None:
+    def refuse() -> None:
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": message}}, "GetObject")
+
+    assert worker_probe.s3_refusal(refuse) == outcome
+
+
+def test_an_s3_answer_that_is_no_refusal_is_never_reported_as_one() -> None:
+    def missing() -> None:
+        raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "missing"}}, "GetObject")
+
+    assert worker_probe.s3_refusal(missing) == "error:NoSuchKey"
+    assert worker_probe.s3_refusal(lambda: None) == "allowed"
 
 
 def test_a_session_policy_that_reaches_other_documents_text_fails_its_checks(

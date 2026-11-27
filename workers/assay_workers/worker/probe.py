@@ -41,6 +41,10 @@ Checked (owner conditions b and c, 2026-11-24):
   - *Storage.* The document's own text object is read; another document's and the other
     tenant's are refused, to read and to write. Writing the document's stored companion file
     is refused: that key left the worker's policy (owner decision F, 2026-11-27).
+  - *The companion upload.* Reading the document's companion file in the inbox is refused
+    (owner, 2026-11-27): the task reads its PDF only, so the TSS leaves the companion's
+    upload out of the policy although the grant's row lists it. The object exists, and S3
+    must say that the read itself was what the session policy does not allow.
   - *Database.* A bound session writes a `pages` row and an `ai_usage` row for its own
     attempt. A row for another document, another tenant or another attempt is refused by row
     security, and reading either table is refused. It sets the content pointer for its bound
@@ -66,6 +70,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import re
 import tempfile
 import time
 import uuid
@@ -128,6 +133,12 @@ PERMISSION_DENIED = "refused:permission_denied"
 NOT_THE_BOUND_ATTEMPT = "refused:not_the_bound_attempt"
 # What the probe writes into the content pointer of its own fixture document.
 PROBE_VERSION = "isolation-probe"
+# S3's own words when a session policy does not allow an action. For an object that exists
+# it names the action that was asked for. For a key that was never written it names
+# s3:ListBucket instead (no tenant session may list), which says nothing about the read: so
+# only "s3:GetObject" shows that an object was there and that reading it was refused.
+SESSION_POLICY_REFUSAL = re.compile(r"because no session policy allows the (s3:[A-Za-z]+) action")
+READ_NOT_IN_THE_SESSION_POLICY = "denied:s3:GetObject"
 # Textract's refusals, by its own error names.
 TEXTRACT_DENIED = "refused:AccessDeniedException"
 # Textract's answer when it is pointed at an object the caller's role cannot read.
@@ -203,6 +214,23 @@ def s3_attempt(call: Callable[[], object]) -> str:
     except ClientError as exc:
         code = str(exc.response.get("Error", {}).get("Code", ""))
         return DENIED if code in DENIED_CODES else f"error:{code}"
+    except BotoCoreError as exc:
+        return f"error:{type(exc).__name__}"
+    return ALLOWED
+
+
+def s3_refusal(call: Callable[[], object]) -> str:
+    """As `s3_attempt`, and for a refusal the action S3 says the session policy does not
+    allow: `denied:s3:GetObject`. `denied:no_reason` when its message names none."""
+    try:
+        call()
+    except ClientError as exc:
+        error = exc.response.get("Error", {})
+        code = str(error.get("Code", ""))
+        if code not in DENIED_CODES:
+            return f"error:{code}"
+        named = SESSION_POLICY_REFUSAL.search(str(error.get("Message", "")))
+        return f"{DENIED}:{named.group(1) if named else 'no_reason'}"
     except BotoCoreError as exc:
         return f"error:{type(exc).__name__}"
     return ALLOWED
@@ -362,6 +390,19 @@ class Probe:
             ),
         ):
             self.check(f"storage: {name}", expected, s3_attempt(call))
+
+        # The companion file's upload (owner, 2026-11-27). The task reads its PDF and never
+        # its companion file, so the TSS gives it the PDF's upload only, though the grant's
+        # row lists both. The fixture wrote this object: S3 must name the read as refused.
+        upload = self.cases["own"]["companion_upload"]
+        companion_upload = ctx.inbox_key(
+            uuid.UUID(str(upload["batch_id"])), uuid.UUID(str(upload["file_id"]))
+        )
+        self.check(
+            "storage: reading its own document's companion upload",
+            READ_NOT_IN_THE_SESSION_POLICY,
+            s3_refusal(get(ctx.bucket, companion_upload)),
+        )
 
     # --- The database -------------------------------------------------------------------------
 

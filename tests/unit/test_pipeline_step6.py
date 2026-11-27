@@ -342,6 +342,43 @@ def test_only_the_isolation_inbox_fixture_is_ignored_without_an_alarm(
     assert w.storage.asked == []
 
 
+def test_the_worker_fixtures_companion_upload_is_scanned_without_an_alarm(
+    w: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The isolation tests write one object into a test tenant's inbox for the worker probe:
+    its fixture document's companion upload (owner, 2026-11-27). GuardDuty scans it. Its row
+    was committed first and already has a result, so whatever the scan says is ignored at
+    INFO, and nothing about the file or its document changes."""
+    from tests.isolation import worker_fixture
+
+    tenant = w.db.tenants["a"]
+    bucket = naming.bucket_name(PREFIX, tenant)
+    try:
+        with tenant_tx(w.db.app_tenant, tenant) as conn:
+            document = worker_fixture.ensure_document(conn, tenant, 1)
+            file = worker_fixture.ensure_companion_upload(conn, tenant)
+        key = keys.inbox_key(worker_fixture.batch_id(tenant), file)
+        with caplog.at_level(logging.INFO):
+            for result in ("NO_THREATS_FOUND", "THREATS_FOUND", "FAILED", "UNSUPPORTED"):
+                event = scan_event(bucket, key, "the-version-guardduty-scanned", result)
+                assert scan.handle(event, w.scan_deps()) == "later_version_ignored"
+            assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert w.db.row(
+            "SELECT status, version_id, scan_result, notice_sent_at FROM assay.batch_files "
+            "WHERE id = %s",
+            file,
+        ) == ("clean", "isolation-fixture", None, None)
+        assert w.db.row(
+            "SELECT status, has_companion FROM assay.documents WHERE id = %s", document
+        ) == ("processing", False)
+        # Nothing was queued, and nothing was read, copied to quarantine/ or deleted.
+        assert w.queue.sent == []
+        buckets = w.storage.buckets
+        assert (buckets.reads, buckets.copies, buckets.deletes) == ([], [], [])
+    finally:
+        worker_fixture.cleanup(w.db.app_tenant, tenant, w.db.tenants["b"])
+
+
 def test_an_event_naming_another_tenants_bucket_is_refused(w: World) -> None:
     b = open_batch(w, "a", "a-admin", [("x.pdf", minimal_pdf(text="x"))])
     version = put(w, b, "x.pdf")

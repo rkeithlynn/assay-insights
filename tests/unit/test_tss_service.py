@@ -557,11 +557,55 @@ def test_no_one_is_issued_worker_access_by_name() -> None:
     assert sts.calls == []
 
 
-def test_a_grant_row_with_a_key_that_is_not_an_upload_key_is_refused() -> None:
-    subject, _, sts = worker_resolver(inbox_keys=("quarantine/x.pdf",))
+COMPANION_UPLOAD = uuid.UUID("c0000000-0000-4000-8000-000000000001")
+REPLACEMENT_UPLOAD = uuid.UUID("c0000000-0000-4000-8000-000000000002")
+OTHER_BATCH = uuid.UUID("b0000000-0000-4000-8000-000000000002")
+
+
+@pytest.mark.parametrize(
+    "inbox_keys",
+    [
+        ("quarantine/x.pdf",),
+        # Beside the PDF's own upload, too: one bad key refuses the row.
+        (keys.inbox_key(BATCH, DOCUMENT), "inbox/*"),
+        # The document's ID in two batches: a PDF has one upload.
+        (keys.inbox_key(BATCH, DOCUMENT), keys.inbox_key(OTHER_BATCH, DOCUMENT)),
+    ],
+)
+def test_a_grant_row_that_is_not_one_the_pipeline_wrote_is_refused(
+    inbox_keys: tuple[str, ...],
+) -> None:
+    subject, _, sts = worker_resolver(inbox_keys=inbox_keys)
     with pytest.raises(service.StorageProfileInvalid):
         subject.resolve_worker(worker_request(), caller=WORKER)
     assert sts.calls == []
+
+
+@pytest.mark.parametrize(
+    "companions", [(), (COMPANION_UPLOAD,), (COMPANION_UPLOAD, REPLACEMENT_UPLOAD)]
+)
+def test_the_workers_credentials_reach_the_pdfs_upload_and_no_companion_upload(
+    companions: tuple[uuid.UUID, ...],
+) -> None:
+    """Owner, 2026-11-27. The grant's row lists every clean inbox file of the document. The
+    worker task reads the PDF only, so its policy names the PDF's upload only: a companion
+    file's upload, first or replacement, is left out, and the row is served all the same."""
+    listed = (keys.inbox_key(BATCH, DOCUMENT), *[keys.inbox_key(BATCH, f) for f in companions])
+    subject, _, sts = worker_resolver(inbox_keys=listed)
+    subject.resolve_worker(worker_request(), caller=WORKER)
+
+    policy = json.loads(sts.calls[0]["Policy"])
+    resources = {r for s in policy["Statement"] for r in _as_list(s["Resource"])}
+    inbox = {r for r in resources if "/inbox/" in r}
+    assert inbox == {f"arn:aws:s3:::assay-dev-t-aaaaaaaa/inbox/{BATCH}/{DOCUMENT}"}
+    for file in companions:
+        assert str(file) not in sts.calls[0]["Policy"]
+
+
+def test_a_document_whose_pdf_is_not_listed_gets_no_inbox_object_at_all() -> None:
+    subject, _, sts = worker_resolver(inbox_keys=(keys.inbox_key(BATCH, COMPANION_UPLOAD),))
+    subject.resolve_worker(worker_request(), caller=WORKER)
+    assert "/inbox/" not in sts.calls[0]["Policy"]
 
 
 def test_a_worker_request_carries_no_tenant_and_a_plausible_token() -> None:

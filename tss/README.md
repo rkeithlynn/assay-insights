@@ -43,7 +43,7 @@ s3.get_object(Bucket=ctx.bucket, Key=ctx.text_key(document_id))
 | `UPLOAD` | Put new objects under `inbox/` only (for presigned upload links) |
 | `READ` | Read objects under `originals/`, `derived/` and `chat/` (never `inbox/` or `quarantine/`), and query vectors |
 | `PIPELINE` | Read and write every object, by key, and vectors; use the face collection |
-| `WORKER` | One document's own keys: read its inbox files, read and write its original, text and fields objects. Not its stored companion file (the pipeline's companion step writes that; owner decision F, 2026-11-27). Nothing else in the bucket, no vectors, no face collection |
+| `WORKER` | One document's own keys: read its PDF's upload in the inbox (one object, `inbox/{batch}/{document ID}`; never a companion file's upload, owner 2026-11-27), read and write its original, text and fields objects. Not its stored companion file (the pipeline's companion step writes that; owner decision F, 2026-11-27). Nothing else in the bucket, no vectors, no face collection |
 
 | Caller (service) | Route | Accesses |
 | --- | --- | --- |

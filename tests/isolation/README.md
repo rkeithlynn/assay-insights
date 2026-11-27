@@ -49,7 +49,10 @@ The script runs three things and waits for each:
      root filesystem;
    - for the text step (stage 2): the document's own text object is read, and another
      document's or the other tenant's is refused, to read and to write; writing the stored
-     companion file is refused; a bound session writes its own attempt's `pages` and
+     companion file is refused; reading the document's companion upload in the inbox is
+     refused, with S3 naming `s3:GetObject` as what the session policy does not allow (the
+     grant's row lists that upload, and the TSS gives the worker the PDF's upload only;
+     owner, 2026-11-27); a bound session writes its own attempt's `pages` and
      `ai_usage` rows and no other's (row security), can read neither table, sets the content
      pointer for its bound attempt only, and can update no other column of `documents`;
    - the real `text` and `render` jobs run in the sandbox on a synthetic PDF, and a child
@@ -66,7 +69,10 @@ The script runs three things and waits for each:
    The isolation Lambda prepares its fixture first (`worker_fixture.py`): three documents
    with fixed IDs in the two test tenants, one small object at each one's `originals/` key
    and at its `derived/text/` key (written once, kept by Object Lock), and grants in every
-   state. The probe leaves a `pages` row, an `ai_usage` row (for its one Textract call, at no
+   state. The probe's own document also has a companion upload: a clean `batch_files` row
+   and one small object at its inbox key (written once). GuardDuty scans that object the
+   first time; its row is committed before it is written and already has a result, so the
+   scan function ignores the scan result at INFO and no alarm fires. The probe leaves a `pages` row, an `ai_usage` row (for its one Textract call, at no
    price) and the content pointer on its own fixture document. It ends one grant when
    the probe says it is watching, and clears the grants afterwards. The fixture documents
    are `discarded` between runs, so they show in no history view by default, and each has a

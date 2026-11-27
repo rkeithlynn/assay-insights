@@ -10,7 +10,8 @@ One module, so the pieces can be read and tested together:
 - `session_policy`: the inline policy passed to AssumeRole. It names the exact bucket, key,
   index and collection, and narrows the actions to what the caller asked for.
 - `worker_session_policy`: the same for the pipeline's worker task, narrowed further to one
-  document's own object keys.
+  document's own object keys. In the inbox that is one object, the PDF's upload
+  (`worker_pdf_upload_keys`), never a companion file's.
 - `tenant_bucket_policy` and `tenant_key_policy`: the resource side. They deny or withhold
   access from every principal except the four named in `Principals`, each for its own job.
 - `tenant_vector_bucket_policy`: the same for the vector bucket, admitting only the tenant
@@ -379,13 +380,34 @@ def session_policy(
     return {"Version": VERSION, "Statement": statements}
 
 
-# What a worker session may do with the inbox files it was given: read them, by version.
+# What a worker session may do with the one inbox file it was given: read it, by version.
 WORKER_INBOX_READ = ("s3:GetObject", "s3:GetObjectVersion")
 # And with its document's own stored objects: read them and write new versions. No delete,
 # no tagging, no listing.
 WORKER_OWN_OBJECTS = (*WORKER_INBOX_READ, "s3:PutObject")
-# A PDF and its companion file. A grant row with more is not one the pipeline wrote.
-WORKER_MAX_INBOX_KEYS = 2
+# The PDF's upload, and nothing else in the inbox (owner, 2026-11-27). The task never reads a
+# companion file: the pipeline's `companion` step does, with its own PIPELINE context.
+WORKER_MAX_INBOX_KEYS = 1
+
+
+def worker_pdf_upload_keys(document_id: uuid.UUID, listed: Sequence[str]) -> tuple[str, ...]:
+    """Of the inbox keys a grant's row lists, the one a worker session may read: its
+    document's PDF upload.
+
+    A PDF is registered under its document's own ID (`inbox/{batch}/{document ID}`), so the
+    key itself says which upload it is, and nothing else is asked of the database. A companion
+    file's upload, first or replacement, has a file ID of its own: the row lists it, and it is
+    left out. A listed key that is not an upload key at all is not one the pipeline wrote, and
+    is refused outright.
+    """
+    own: set[str] = set()
+    for key in listed:
+        parsed = keys.parse_inbox_key(key)
+        if parsed is None:
+            raise ValueError("not an inbox upload key")
+        if parsed[1] == document_id:
+            own.add(key)
+    return tuple(sorted(own))
 
 
 def worker_document_keys(document_id: uuid.UUID) -> tuple[str, ...]:
@@ -406,26 +428,32 @@ def worker_document_keys(document_id: uuid.UUID) -> tuple[str, ...]:
 def worker_session_policy(
     profile: TenantStorageProfile, *, document_id: uuid.UUID, inbox_keys: Sequence[str]
 ) -> Policy:
-    """One document of one tenant: its inbox files (read) and its own stored objects.
+    """One document of one tenant: its PDF's upload (read) and its own stored objects.
 
     Nothing under quarantine/ or chat/, no other document's keys, no vectors, no face
-    collection, no listing. `inbox_keys` come from the grant's database row; each must still
-    be an upload key (`inbox/{batch}/{file}`, IDs only), so a changed row cannot widen this.
+    collection, no listing. `inbox_keys` is what `worker_pdf_upload_keys` kept of the grant's
+    database row. It is checked again here, so that nothing else can be put into a worker's
+    policy whoever calls this: at most one key, and that one the upload registered under the
+    document's own ID (`inbox/{batch}/{document ID}`). A companion file's upload is refused.
     The reserved isolation-test document ID is refused by the key builders.
     """
-    if len(inbox_keys) > WORKER_MAX_INBOX_KEYS:
-        raise ValueError("a document has at most a PDF and a companion file in the inbox")
-    for key in inbox_keys:
-        if keys.parse_inbox_key(key) is None:
+    inbox = sorted(set(inbox_keys))
+    if len(inbox) > WORKER_MAX_INBOX_KEYS:
+        raise ValueError("a worker reads one inbox object: its document's PDF upload")
+    for key in inbox:
+        parsed = keys.parse_inbox_key(key)
+        if parsed is None:
             raise ValueError("not an inbox upload key")
+        if parsed[1] != document_id:
+            raise ValueError("not the upload of this document's PDF")
     bucket = f"arn:aws:s3:::{profile.bucket}"
     statements: list[dict[str, Any]] = []
-    if inbox_keys:
+    if inbox:
         statements.append(
             {
                 "Effect": "Allow",
                 "Action": list(WORKER_INBOX_READ),
-                "Resource": [f"{bucket}/{key}" for key in sorted(set(inbox_keys))],
+                "Resource": [f"{bucket}/{key}" for key in inbox],
             }
         )
     statements += [

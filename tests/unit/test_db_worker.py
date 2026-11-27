@@ -203,6 +203,47 @@ def test_the_tss_learns_the_tenant_and_the_documents_clean_inbox_keys(
     assert all(key.startswith(f"inbox/{db.seed.batch_a}/") for key in keys)
 
 
+def test_a_replaced_companion_makes_the_row_three_keys_and_the_worker_still_gets_one(
+    db: TestDb, docs: tuple[uuid.UUID, ...]
+) -> None:
+    """The row lists every clean inbox file of the document: its PDF, its companion file, and
+    each companion file that later replaced it (they all stay `clean`). The TSS gives the
+    worker the PDF's upload alone (owner, 2026-11-27).
+
+    Found on the way: until then the TSS refused a row of more than two keys, so a document
+    whose companion file had been replaced could get no worker credentials at all, and
+    "Process again" would have failed for it.
+    """
+    from assay_tss import policies
+
+    a1 = docs[0]
+    s = db.seed
+    replacement = uuid.uuid4()
+    _admin(
+        db,
+        "INSERT INTO assay.batch_files (id, tenant_id, batch_id, kind, file_name, base_name, "
+        "size_bytes, sha256, s3_key, content_type, status, version_id, document_id, "
+        "registered_by, purpose, applied_at) VALUES (%s, %s, %s, 'companion', 'secret-name', "
+        "%s, 10, %s, %s, 'application/json', 'clean', 'v2', %s, %s, 'companion_replacement', "
+        "now())",
+        replacement,
+        s.tenant_a,
+        s.batch_a,
+        f"secret-{replacement}",
+        "b" * 64,
+        f"inbox/{s.batch_a}/{replacement}",
+        a1,
+        s.user_a,
+    )
+    token = _claim(db, s.tenant_a, a1)
+    assert token
+    [(tenant, listed)] = _worker_grant(db, a1, 1, token)
+    pdf = f"inbox/{s.batch_a}/{a1}"
+    assert tenant == s.tenant_a
+    assert len(listed) == 3 and {pdf, f"inbox/{s.batch_a}/{replacement}"} <= set(listed)
+    assert policies.worker_pdf_upload_keys(a1, listed) == (pdf,)
+
+
 def test_the_tss_gets_nothing_for_a_grant_that_is_not_live(
     db: TestDb, docs: tuple[uuid.UUID, ...]
 ) -> None:

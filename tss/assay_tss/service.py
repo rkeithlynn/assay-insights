@@ -19,7 +19,9 @@ attempt and the one-time token Step Functions gave that task; the tenant comes f
 grant's database row (`pipeline.worker_grant`, migration 0010), and only while the grant is
 live: not ended, not expired, for the document's current attempt, with the document still
 `processing`. The credentials reach that one document's keys and nothing else
-(`policies.worker_session_policy`). `resolve` never serves a worker, and `resolve_worker`
+(`policies.worker_session_policy`): in the inbox, the PDF's upload only. The grant's row also
+lists the document's companion uploads, and they are left out of the policy
+(`policies.worker_pdf_upload_keys`). `resolve` never serves a worker, and `resolve_worker`
 serves no one else.
 """
 
@@ -164,7 +166,8 @@ class ServiceSettings:
 
 @dataclass(frozen=True)
 class WorkerGrant:
-    """A live grant: the tenant its row names, and its document's clean inbox keys."""
+    """A live grant: the tenant its row names, and its document's clean inbox keys (the
+    PDF's upload and any companion file's; the worker's policy takes the PDF's only)."""
 
     tenant_id: uuid.UUID
     inbox_keys: tuple[str, ...]
@@ -312,11 +315,16 @@ class Resolver:
             raise WorkerGrantRefused("no live grant for this document, attempt and token")
         profile = self._checked_profile(grant.tenant_id)
         try:
+            # The row lists every clean inbox file of the document. The worker gets the PDF's
+            # upload only: a companion file's is left out (owner, 2026-11-27).
             policy = policies.worker_session_policy_json(
-                profile, document_id=request.document_id, inbox_keys=grant.inbox_keys
+                profile,
+                document_id=request.document_id,
+                inbox_keys=policies.worker_pdf_upload_keys(request.document_id, grant.inbox_keys),
             )
         except ValueError as exc:
-            # The grant's row names something that is not an upload key.
+            # The grant's row names something that is not an upload key, or two uploads
+            # under the document's own ID.
             raise StorageProfileInvalid(f"worker grant row: {exc}") from None
         return self._issue(
             profile,
