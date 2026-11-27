@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import threading
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from decimal import Decimal
@@ -291,20 +292,62 @@ def test_a_page_textract_will_not_take_is_recorded_unread_and_the_document_goes_
     assert [row[4] is None for row in page_rows(w, doc_id)].count(True) == 1
 
 
+class KnownPages(InProcessPages):
+    """Remembers which page each picture is of, so a stand-in Textract can answer by page.
+    (Two calls are in flight at once: the order they arrive in is not the pages' order.)"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.page_of: dict[bytes, int] = {}
+
+    def render(
+        self, source: Path, pages: Sequence[int], handle: Callable[[PageImage], None]
+    ) -> None:
+        def remember(image: PageImage) -> None:
+            self.page_of[image.data] = image.page
+            handle(image)
+
+        super().render(source, pages, remember)
+
+
+class BusyOnPageTwo:
+    """Textract answers pages 1 and 3 and stays busy for page 2. Page 2's call gives up only
+    once page 3's has succeeded: the case in which a later page was billed after an earlier
+    one had already failed."""
+
+    def __init__(self, pages: KnownPages) -> None:
+        self._pages = pages
+        self._third_read = threading.Event()
+        self.read_pages: list[int] = []
+
+    def read(self, image: bytes) -> Any:
+        page = self._pages.page_of[image]
+        if page == 2:
+            assert self._third_read.wait(timeout=30), "page 3 was never sent"
+            raise OcrFailed("ThrottlingException")
+        self.read_pages.append(page)
+        if page == 3:
+            self._third_read.set()
+        return ocr_page(f"PAGE {page}")
+
+
 def test_textract_busy_to_the_end_fails_the_step_by_name_and_keeps_what_was_billed(
     w: World, tmp_path: Path, engines: list[Any], caplog: pytest.LogCaptureFixture
 ) -> None:
     body = make.scanned("Package B", "Ann Testperson", "TEST-B", unique())
     doc_id, b, job = start(w, body)
-    ocr = FakeOcr(answers=[ocr_page("ONE"), OcrFailed("ThrottlingException"), ocr_page("THREE")])
-    deps = deps_for(w, job, b.tenant_id, tmp_path, engines, ocr=ocr)
+    pages = KnownPages()
+    ocr = BusyOnPageTwo(pages)
+    deps = deps_for(w, job, b.tenant_id, tmp_path, engines, pages=pages, ocr=ocr)
     with pytest.raises(OcrFailed):
         worker_run.run(job, deps)
 
     assert events(w, doc_id)[-1] == ("text", "error")
     assert text_event(w, doc_id, "error") == {"error_type": "ThrottlingException"}
-    # The page that was read before the failure was billed, and is recorded.
-    assert [row[5] for row in usage_rows(w, doc_id)] == [1]
+    # Every page Textract read was billed, and is recorded: the one before the failure, and
+    # the one after it, whose call succeeded while page 2's was still being tried.
+    assert sorted(ocr.read_pages) == [1, 3]
+    assert [row[5] for row in usage_rows(w, doc_id)] == [1, 3]
     # Nothing else was written: no text object, no page rows, no pointer.
     assert w.storage.buckets.uploads == [] and page_rows(w, doc_id) == []
     assert pointer(w, doc_id) == (None, None)
@@ -328,6 +371,26 @@ def test_textract_busy_to_the_end_fails_the_step_by_name_and_keeps_what_was_bill
 
 
 # --- Limits ---------------------------------------------------------------------------------------
+
+
+def test_after_a_failure_no_further_page_is_sent_to_textract(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """Sixty scanned pages; Textract refuses the task on the very first call. The pages of
+    that batch that were not yet under way are never sent, and no later batch is drawn. Two
+    calls are in flight at once, so at most two pictures ever left the task."""
+    body = make.scanned("Package N", "Max Testperson", "TEST-N", unique(), pages=60)
+    doc_id, b, job = start(w, body)
+    pages = InProcessPages()
+    ocr = FakeOcr(answers=[OcrFailed("AccessDeniedException")] * 60)
+    deps = deps_for(w, job, b.tenant_id, tmp_path, engines, pages=pages, ocr=ocr)
+    with pytest.raises(OcrFailed):
+        worker_run.run(job, deps)
+    assert 1 <= len(ocr.pictures) <= 2
+    assert len(pages.render_calls) == 1
+    assert usage_rows(w, doc_id) == []
+    assert text_event(w, doc_id, "error") == {"error_type": "AccessDeniedException"}
+    assert list(tmp_path.iterdir()) == []  # no picture is left behind
 
 
 def test_a_document_over_the_page_limit_is_not_read_at_all(

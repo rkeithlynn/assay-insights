@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -201,13 +202,20 @@ def _usage(deps: Deps, doc: Document, page: int, result: OcrPage) -> None:
         )
 
 
-def _read_one(deps: Deps, path: Path) -> OcrPage | PageRefused:
+def _read_one(deps: Deps, path: Path, stop: threading.Event) -> OcrPage | PageRefused | None:
     """In a worker thread: one picture to Textract. The bytes are read and passed on; they
-    are never decoded here."""
+    are never decoded here. None: the picture was not sent, because an earlier call had
+    already failed the step (`stop`)."""
     try:
+        if stop.is_set():
+            return None
         return deps.ocr.read(path.read_bytes())
     except PageRefused as refused:
         return refused
+    except BaseException:
+        # The step is failing: no further page is sent. A call already under way finishes.
+        stop.set()
+        raise
     finally:
         path.unlink(missing_ok=True)
 
@@ -231,13 +239,26 @@ def _send_to_textract(
             pictures[image.page] = target  # noqa: B023  (called before the loop moves on)
 
         deps.pages.render(path, chunk, keep)
+        stop = threading.Event()
         with ThreadPoolExecutor(max_workers=OCR_CONCURRENCY) as pool:
-            calls: list[tuple[int, Future[OcrPage | PageRefused]]] = [
-                (page, pool.submit(_read_one, deps, pictures[page])) for page in chunk
+            calls: list[tuple[int, Future[OcrPage | PageRefused | None]]] = [
+                (page, pool.submit(_read_one, deps, pictures[page], stop)) for page in chunk
             ]
+            failure: Exception | None = None
             try:
                 for page, call in calls:
-                    result = call.result()
+                    # Once a call has failed, no page that was not yet under way is sent
+                    # (`stop`). One that was under way is waited for: if it succeeded it was
+                    # billed, and a page that was billed is recorded, whatever happened to
+                    # its neighbour.
+                    try:
+                        result = call.result()
+                    except Exception as exc:
+                        if failure is None:
+                            failure = exc
+                        continue
+                    if result is None:
+                        continue
                     fact = facts[page]
                     if isinstance(result, PageRefused):
                         fact.problem = result.code
@@ -246,6 +267,8 @@ def _send_to_textract(
                     fact.ocr_at = spool.add({"text": result.text, "words": result.words})
                     fact.ocr_chars = quality.legibility(result.text)[0]
                     fact.confidence = result.confidence
+                if failure is not None:
+                    raise failure
             finally:
                 for _page, call in calls:
                     call.cancel()
