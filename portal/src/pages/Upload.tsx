@@ -15,6 +15,13 @@
  * such PDF: fix the companion file (it is removed so a corrected one can be added), remove
  * the PDF, or close without the companion. Each choice is a file removal the API already
  * offers; the API still refuses to close while an invalid companion file is in the batch.
+ *
+ * Nothing chosen goes missing without a word (owner, 2026-11-27): every addition shows how
+ * many files the page was handed and how many are now in the batch, until the next addition
+ * or until it is dismissed; files left out stay listed under "Not added" until dismissed;
+ * while an addition runs the picker is off and a drop is refused in words; each file goes to
+ * the upload link registered under its own name; and the reason an addition or a close was
+ * refused stays on the screen until it is dismissed or the next action succeeds.
  */
 
 import Alert from "@cloudscape-design/components/alert";
@@ -34,7 +41,7 @@ import RadioGroup from "@cloudscape-design/components/radio-group";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import StatusIndicator, { type StatusIndicatorProps } from "@cloudscape-design/components/status-indicator";
 import Table from "@cloudscape-design/components/table";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { type BatchOut, call, type FileOut } from "../api/client";
@@ -42,7 +49,17 @@ import { Confirm, type ConfirmRequest } from "../components/Confirm";
 import { RowActions } from "../components/RowActions";
 import { messageFor } from "../errors";
 import { useSession } from "../session";
-import { chunks, classify, companionWarnings, localProblem, putFile, runLimited, sha256Hex } from "../upload";
+import {
+  additionText,
+  chunks,
+  classify,
+  companionWarnings,
+  localProblem,
+  matchRegistered,
+  putFile,
+  runLimited,
+  sha256Hex,
+} from "../upload";
 import { companionErrorLines, fileProblemText, formatBytes } from "./ingestionFormat";
 
 // While any file waits for its scan, read the batch again this often.
@@ -111,6 +128,16 @@ interface Local {
   error?: string;
 }
 
+const UPLOAD_FAILED = "The upload failed. Remove the file and add it again.";
+const STILL_ADDING = "Other files were still being added. Add it again.";
+
+/** The latest addition: the files the page was handed, and how many are in the batch now. */
+interface Addition {
+  chosen: number;
+  /** Null while the addition is running. */
+  added: number | null;
+}
+
 export function Upload() {
   const { api, me } = useSession();
   const navigate = useNavigate();
@@ -128,6 +155,10 @@ export function Upload() {
   // The Close dialog: a choice for each PDF whose companion file was rejected.
   const [choosing, setChoosing] = useState<Record<string, RejectedChoice> | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [addition, setAddition] = useState<Addition | null>(null);
+  // An addition is running: the picker is off. The ref answers at once, before a render.
+  const [adding, setAdding] = useState(false);
+  const addingNow = useRef(false);
 
   // The caller's open batch (or the one given), with its files; null when there is none.
   const fetchBatch = useCallback(
@@ -139,12 +170,20 @@ export function Upload() {
     [api],
   );
 
+  // Reading the batch again clears only an error that reading it raised. It runs after every
+  // refused action and every few seconds while a file waits for its scan: if it cleared any
+  // error, a refused registration or close would show its reason for a moment and then nothing.
+  const loadFailed = useRef(false);
   const load = useCallback(
     async (batchId?: string) => {
       try {
         setBatch(await fetchBatch(batchId));
-        setError(null);
+        if (loadFailed.current) {
+          loadFailed.current = false;
+          setError(null);
+        }
       } catch (caught) {
+        loadFailed.current = true;
         setError(messageFor(caught));
       }
     },
@@ -192,27 +231,43 @@ export function Upload() {
   };
 
   const addFiles = async (files: File[]) => {
-    if (!batch) return;
-    setSelected([]);
-    const problems: { name: string; problem: string }[] = [];
-    const good: File[] = [];
-    const warnings = new Map<File, string[]>();
-    for (const file of files) {
-      const problem = localProblem(file);
-      if (problem) {
-        problems.push({ name: file.name, problem });
-        continue;
-      }
-      good.push(file);
-      if (classify(file.name)?.kind === "companion") {
-        const found = await companionWarnings(file, me.tenant.id);
-        if (found.length > 0) warnings.set(file, found);
-      }
+    if (!batch) {
+      setError("There is no open batch to add files to. Open a batch, then add the files again.");
+      return;
     }
-    setRejected(problems);
-    if (good.length === 0) return;
-    setBusy(true);
+    const leftOut = (problems: { name: string; problem: string }[]) => {
+      // Kept until dismissed: a later addition never clears an earlier one's list.
+      if (problems.length > 0) setRejected((prev) => [...prev, ...problems]);
+    };
+    if (addingNow.current) {
+      // The picker is off while an addition runs; a drop can still arrive. It is not queued,
+      // and it is not lost without a word: each file is listed, by name, until dismissed.
+      leftOut(files.map((file) => ({ name: file.name, problem: STILL_ADDING })));
+      return;
+    }
+    addingNow.current = true;
+    setAdding(true);
+    setSelected([]);
+    setAddition({ chosen: files.length, added: null });
+    let added = 0;
     try {
+      const problems: { name: string; problem: string }[] = [];
+      const good: File[] = [];
+      const warnings = new Map<File, string[]>();
+      for (const file of files) {
+        const problem = localProblem(file);
+        if (problem) {
+          problems.push({ name: file.name, problem });
+          continue;
+        }
+        good.push(file);
+        if (classify(file.name)?.kind === "companion") {
+          const found = await companionWarnings(file, me.tenant.id);
+          if (found.length > 0) warnings.set(file, found);
+        }
+      }
+      leftOut(problems);
+      if (good.length > 0) setBusy(true);
       for (const group of chunks(good)) {
         const hashed = await Promise.all(group.map(async (file) => ({ file, sha256: await sha256Hex(file) })));
         const registered = await call(
@@ -221,33 +276,42 @@ export function Upload() {
             body: { files: hashed.map(({ file, sha256 }) => ({ name: file.name, size_bytes: file.size, sha256 })) },
           }),
         );
+        // By name, never by position: each file goes to the link registered for it.
+        const { pairs, unregistered } = matchRegistered(group, registered.files);
+        added += pairs.filter((pair) => pair.file).length;
+        leftOut(unregistered.map((file) => ({ name: file.name, problem: "The server did not add it. Add it again." })));
         const seen: Record<string, string[]> = {};
-        registered.files.forEach((entry, index) => {
-          const file = hashed[index]?.file;
+        for (const { entry, file } of pairs) {
           const found = file ? warnings.get(file) : undefined;
           if (found) seen[entry.id] = found;
-        });
+        }
         setEarly((prev) => ({ ...prev, ...seen }));
         await load(batch.id);
-        const tasks = registered.files.map((entry, index) => async () => {
-          const file = hashed[index]?.file;
-          if (!file) return;
+        const tasks = pairs.map(({ entry, file }) => async () => {
+          if (!file) {
+            // Registered, and none of the chosen files has its name: there is nothing to send.
+            setLocal((prev) => ({ ...prev, [entry.id]: { progress: 0, error: UPLOAD_FAILED } }));
+            return;
+          }
           const progress = (fraction: number) => setLocal((prev) => ({ ...prev, [entry.id]: { progress: fraction } }));
           progress(0);
           try {
             await putFile(entry.upload, file, progress);
           } catch {
-            setLocal((prev) => ({ ...prev, [entry.id]: { progress: 0, error: "The upload failed. Remove the file and add it again." } }));
+            setLocal((prev) => ({ ...prev, [entry.id]: { progress: 0, error: UPLOAD_FAILED } }));
           }
         });
         await runLimited(tasks);
       }
-      setError(null);
+      if (good.length > 0) setError(null);
     } catch (caught) {
       setError(messageFor(caught));
     } finally {
+      setAddition({ chosen: files.length, added });
       setBusy(false);
       await load(batch.id);
+      addingNow.current = false;
+      setAdding(false);
     }
   };
 
@@ -298,6 +362,7 @@ export function Upload() {
       setChoosing(null);
       if (Object.values(choosing).includes("fix")) {
         await load(batch.id);
+        setError(null);
         setNotice("Add the corrected companion files, with the same names as their PDFs, then close the batch.");
         setBusy(false);
         return;
@@ -339,6 +404,8 @@ export function Upload() {
         await call(api.DELETE("/api/batches/{batch_id}", { params: { path: { batch_id: batch.id } } }));
         setBatch(null);
         setLocal({});
+        setAddition(null);
+        setRejected([]);
       },
     });
 
@@ -348,6 +415,7 @@ export function Upload() {
     try {
       await confirm.run();
       setConfirm(null);
+      setError(null);
     } catch (caught) {
       setError(messageFor(caught));
       setConfirm(null);
@@ -427,26 +495,43 @@ export function Upload() {
               <SpaceBetween size="m">
                 <FileDropzone onChange={({ detail }) => void addFiles(detail.value)}>
                   <SpaceBetween size="xxs" alignItems="center">
-                    <Box>Drop PDFs and companion files here</Box>
-                    <FileInput
-                      multiple
-                      accept=".pdf,.json,application/pdf,application/json"
-                      value={selected}
-                      onChange={({ detail }) => void addFiles(detail.value)}
-                    >
-                      Choose files
-                    </FileInput>
+                    <Box>{adding ? "Adding the files. Wait until they are listed before adding more." : "Drop PDFs and companion files here"}</Box>
+                    {adding ? (
+                      // The file input has no disabled state: while an addition runs it is not there.
+                      <Button iconName="upload" disabled>
+                        Choose files
+                      </Button>
+                    ) : (
+                      <FileInput
+                        multiple
+                        accept=".pdf,.json,application/pdf,application/json"
+                        value={selected}
+                        onChange={({ detail }) => void addFiles(detail.value)}
+                      >
+                        Choose files
+                      </FileInput>
+                    )}
                   </SpaceBetween>
                 </FileDropzone>
                 <Box variant="small" color="text-body-secondary">
                   A companion file has its PDF's name with .json (smith-package.pdf, smith-package.json). Up to 200 PDFs a
                   batch; 100 MB a PDF; 64 KB a companion file.
                 </Box>
+                {addition && (
+                  <Alert
+                    type={addition.added === null ? "info" : addition.added === addition.chosen && addition.chosen > 0 ? "success" : "warning"}
+                    dismissible
+                    onDismiss={() => setAddition(null)}
+                    data-testid="addition-alert"
+                  >
+                    <span data-testid="addition">{additionText(addition.chosen, addition.added)}</span>
+                  </Alert>
+                )}
                 {rejected.length > 0 && (
-                  <Alert type="warning" dismissible onDismiss={() => setRejected([])} header="Not added">
+                  <Alert type="warning" dismissible onDismiss={() => setRejected([])} header="Not added" data-testid="not-added">
                     <ul>
-                      {rejected.map((r) => (
-                        <li key={r.name}>
+                      {rejected.map((r, i) => (
+                        <li key={i}>
                           {r.name}: {r.problem}
                         </li>
                       ))}

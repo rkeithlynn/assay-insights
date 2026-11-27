@@ -3,11 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { matchText, pdfFor, rejectedCompanions } from "./pages/Upload";
 import { anyInProgress, companionErrorLines, companionErrorText, errorText, formatBytes, formatDuration } from "./pages/ingestionFormat";
 import {
+  additionText,
   chunks,
   classify,
   COMPANION_MAX_BYTES,
   companionWarnings,
   localProblem,
+  matchRegistered,
   putFile,
   runLimited,
   sha256Hex,
@@ -137,6 +139,57 @@ describe("runLimited and chunks", () => {
 
   it("registers at most 50 files at a time", () => {
     expect(chunks(Array.from({ length: 120 }, (_, i) => i)).map((c) => c.length)).toEqual([50, 50, 20]);
+  });
+});
+
+describe("additionText", () => {
+  it("states how many files were chosen and how many were added", () => {
+    expect(additionText(6, 6)).toBe("6 files chosen: 6 added.");
+    expect(additionText(1, 1)).toBe("1 file chosen: 1 added.");
+    expect(additionText(6, 3)).toBe("6 files chosen: 3 added, 3 not added.");
+    expect(additionText(6, 0)).toBe("6 files chosen: 0 added, 6 not added.");
+  });
+
+  it("gives the number chosen at once, while the files are still being added", () => {
+    expect(additionText(6, null)).toBe("6 files chosen: adding them.");
+    expect(additionText(1, null)).toBe("1 file chosen: adding it.");
+  });
+
+  it("says so when nothing was chosen", () => {
+    expect(additionText(0, 0)).toBe("No file was chosen.");
+    expect(additionText(0, null)).toBe("No file was chosen.");
+  });
+});
+
+describe("matchRegistered", () => {
+  const a = { name: "a.pdf" };
+  const b = { name: "b.pdf" };
+  const c = { name: "c.json" };
+
+  it("pairs each registered entry with the file of its name, whatever order the answer is in", () => {
+    const entries = [{ name: "c.json", id: 3 }, { name: "a.pdf", id: 1 }, { name: "b.pdf", id: 2 }];
+    const { pairs, unregistered } = matchRegistered([a, b, c], entries);
+    expect(pairs.map((pair) => [pair.entry.id, pair.file])).toEqual([[3, c], [1, a], [2, b]]);
+    expect(unregistered).toEqual([]);
+  });
+
+  it("names the files the answer left out, and gives an unknown entry no file", () => {
+    const { pairs, unregistered } = matchRegistered([a, b, c], [{ name: "b.pdf" }, { name: "z.pdf" }]);
+    expect(pairs.map((pair) => pair.file)).toEqual([b, undefined]);
+    expect(unregistered).toEqual([a, c]);
+  });
+
+  it("matches a name the API stored without its surrounding spaces", () => {
+    const spaced = { name: " a.pdf" };
+    expect(matchRegistered([spaced], [{ name: "a.pdf" }]).pairs[0]?.file).toBe(spaced);
+  });
+
+  it("pairs two files of one name in the order they were sent", () => {
+    const first = { name: "a.pdf", n: 1 };
+    const second = { name: "a.pdf", n: 2 };
+    const { pairs, unregistered } = matchRegistered([first, second], [{ name: "a.pdf" }, { name: "a.pdf" }]);
+    expect(pairs.map((pair) => pair.file)).toEqual([first, second]);
+    expect(unregistered).toEqual([]);
   });
 });
 

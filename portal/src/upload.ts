@@ -146,6 +146,46 @@ export async function runLimited<T>(tasks: (() => Promise<T>)[], limit = PARALLE
   return results;
 }
 
+/**
+ * What the screen says about an addition: how many files the page was handed and how many of
+ * them are now in the batch (owner, 2026-11-27, after two selections arrived short with
+ * nothing on the screen to show it). `added` is null while the addition is still running.
+ */
+export function additionText(chosen: number, added: number | null): string {
+  if (chosen === 0) return "No file was chosen.";
+  const files = chosen === 1 ? "1 file chosen" : `${chosen} files chosen`;
+  if (added === null) return `${files}: adding ${chosen === 1 ? "it" : "them"}.`;
+  return added === chosen ? `${files}: ${added} added.` : `${files}: ${added} added, ${chosen - added} not added.`;
+}
+
+/** How the API will name a file: it stores the name without surrounding spaces. */
+function registeredName(name: string): string {
+  return name.trim();
+}
+
+export interface Matched<F, E> {
+  /** Each registered entry with the file of its name; no file if the answer named none of ours. */
+  pairs: { entry: E; file: F | undefined }[];
+  /** The files the answer did not mention. */
+  unregistered: F[];
+}
+
+/**
+ * Pair the API's registered entries with the files they were registered for, by name, never
+ * by position: a link is signed for one file's size and hash, so each file must go to the
+ * link registered under its own name whatever order the answer comes in. Two files of one
+ * name are paired in the order they were sent.
+ */
+export function matchRegistered<F extends { name: string }, E extends { name: string }>(files: F[], entries: E[]): Matched<F, E> {
+  const waiting = new Map<string, F[]>();
+  for (const file of files) {
+    const key = registeredName(file.name);
+    waiting.set(key, [...(waiting.get(key) ?? []), file]);
+  }
+  const pairs = entries.map((entry) => ({ entry, file: waiting.get(registeredName(entry.name))?.shift() }));
+  return { pairs, unregistered: [...waiting.values()].flat() };
+}
+
 export function chunks<T>(items: T[], size = MAX_FILES_PER_REQUEST): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
