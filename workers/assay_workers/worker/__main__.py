@@ -114,6 +114,20 @@ def run_job(env: Mapping[str, str]) -> int:
     return 0
 
 
+def run_probe(env: Mapping[str, str]) -> int:
+    """The isolation probe (`WORKER_COMMAND=probe`). Its one Textract call is billed like any
+    other, so it is recorded at the price the text step uses: the task definition's, from
+    stack config. A probe without that price does not run."""
+    from assay_workers.worker import probe
+
+    try:
+        settings = text_settings(env)
+    except KeyError, ValueError, ArithmeticError:
+        log.error("the probe was started without usable settings for the text step")
+        return EXIT_FAILED
+    return probe.main(env, price_per_page=settings.price_per_page)
+
+
 def main(env: Mapping[str, str] | None = None) -> int:
     logs.configure()
     harden()
@@ -121,9 +135,7 @@ def main(env: Mapping[str, str] | None = None) -> int:
     # The token stays in this process's memory only; nothing started later inherits it.
     os.environ.pop("WORKER_TOKEN", None)
     if values.get("WORKER_COMMAND") == "probe":
-        from assay_workers.worker import probe
-
-        return probe.main(values)
+        return run_probe(values)
     return run_job(values)
 
 

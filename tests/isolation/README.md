@@ -72,8 +72,9 @@ The script runs three things and waits for each:
    state. The probe's own document also has a companion upload: a clean `batch_files` row
    and one small object at its inbox key (written once). GuardDuty scans that object the
    first time; its row is committed before it is written and already has a result, so the
-   scan function ignores the scan result at INFO and no alarm fires. The probe leaves a `pages` row, an `ai_usage` row (for its one Textract call, at no
-   price) and the content pointer on its own fixture document. It ends one grant when
+   scan function ignores the scan result at INFO and no alarm fires. The probe leaves a `pages` row, an `ai_usage` row (for its one Textract call, at the
+   stack's price of a page: **every isolation run costs one Textract page**, and the row
+   says so) and the content pointer on its own fixture document. It ends one grant when
    the probe says it is watching, and clears the grants afterwards. The fixture documents
    are `discarded` between runs, so they show in no history view by default, and each has a
    `start` event, so the pipeline never queues or processes them.

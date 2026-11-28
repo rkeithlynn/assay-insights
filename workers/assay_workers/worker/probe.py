@@ -63,6 +63,12 @@ Checked (owner conditions b and c, 2026-11-24):
 Nothing is written to a bucket: each write tried here must be refused. In the database, for
 the bound document only: one `document_events` row, one `pages` row, the content pointer, and
 one `ai_usage` row for the probe's one Textract call (every AI call writes one).
+
+**Every run costs one Textract page.** The positive control is a real, billed call, so its
+`ai_usage` row carries the price of a page from stack config (`textractPricePerPage`), as the
+text step's rows do: `ai_usage` is then a true record of what the account was billed, the
+isolation runs included (owner, 2026-11-27). The task's entry point reads the price and hands
+it to the probe; no price is written here.
 """
 
 from __future__ import annotations
@@ -76,6 +82,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -249,6 +256,9 @@ class Probe:
         tss: TssClient,
         connect: Callable[[], psycopg.Connection],
         name_prefix: str,
+        # What one Textract page costs (`textractPricePerPage`): recorded with the probe's
+        # one Textract call. Required: a run must not record a billed call at no price.
+        price_per_page: Decimal,
         sandbox: Any = runner,
         sleep: Callable[[float], None] = time.sleep,
         s3: Callable[[StorageContext], Any] | None = None,
@@ -261,6 +271,9 @@ class Probe:
         self.tss = tss
         self.connect = connect
         self.name_prefix = name_prefix
+        if not price_per_page.is_finite() or price_per_page < 0:
+            raise ValueError("the price of a page must be zero or more")
+        self.price_per_page = price_per_page
         self.sandbox = sandbox
         self.sleep = sleep
         self.s3 = s3 or _s3_client
@@ -836,8 +849,10 @@ class Probe:
         )
 
     def usage_row(self, page: ocr.OcrPage) -> None:
-        """The probe's one Textract call, recorded as every AI call is. The price is not the
-        probe's to know: the row records the call, at no price."""
+        """The probe's one Textract call, recorded as the text step records each of its own:
+        one unit of `page`, at the configured price of a page (`textractPricePerPage`), which
+        is also the row's cost. AWS bills the page whoever sent it, so the row says what it
+        cost (owner, 2026-11-27)."""
         with self.connect() as bound:
             try:
                 db.bind(bound, self.own)
@@ -849,12 +864,15 @@ class Probe:
                 "INSERT INTO assay.ai_usage (tenant_id, job, service, operation, model_version, "
                 "document_id, attempt, page_no, input_tokens, output_tokens, units, unit, "
                 "unit_price, cost, request_id) VALUES (%s, 'ingest', 'textract', "
-                "'DetectDocumentText', %s, %s, %s, 1, 0, 0, 1, 'page', 0, 0, %s)",
+                "'DetectDocumentText', %s, %s, %s, 1, 0, 0, 1, 'page', %s, %s, %s)",
                 (
                     self.tenant_a,
                     page.model_version,
                     self.own.document_id,
                     self.own.attempt,
+                    # One unit: the price of a page is the call's cost.
+                    self.price_per_page,
+                    self.price_per_page,
                     page.request_id,
                 ),
             )
@@ -926,7 +944,9 @@ class Probe:
         return self.checks
 
 
-def main(env: Mapping[str, str]) -> int:
+def main(env: Mapping[str, str], *, price_per_page: Decimal) -> int:
+    """`price_per_page` comes from the task's entry point, which reads the text step's
+    settings from the task definition (stack config)."""
     from assay_db.connect import DbTarget, iam_connection
 
     cases = json.loads(env["PROBE_CASES"])
@@ -936,6 +956,7 @@ def main(env: Mapping[str, str]) -> int:
         tss=TssClient(env["TSS_ENDPOINT_URL"], region=env["AWS_REGION"]),
         connect=lambda: iam_connection(target, db.DB_USER, "assay-worker-probe"),
         name_prefix=env["NAME_PREFIX"],
+        price_per_page=price_per_page,
         work_dir=Path(env.get("WORK_DIR", DEFAULT_WORK_DIR)),
         region=env["AWS_REGION"],
     )

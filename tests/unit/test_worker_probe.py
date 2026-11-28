@@ -15,6 +15,7 @@ import importlib.util
 import json
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,9 @@ RUNNER = CallerGrant(
     access=frozenset({StorageAccess.PIPELINE, StorageAccess.READ, StorageAccess.UPLOAD}),
 )
 EXPIRATION = dt.datetime(2026, 11, 25, 12, 15, tzinfo=dt.UTC)
+# What a Textract page costs in these tests. Not the stack's price: the probe must record
+# whatever it is handed.
+PRICE = Decimal("0.0125")
 
 
 class FakeSts:
@@ -322,6 +326,7 @@ class World:
             "tss": self.worker_tss,
             "connect": self.db.worker_connection,
             "name_prefix": PREFIX,
+            "price_per_page": PRICE,
             "sandbox": GoodSandbox(),
             "sleep": sleep,
             "s3": self.s3,
@@ -367,11 +372,20 @@ def rows(world: World, table: str, document: uuid.UUID) -> int:
     return int(row[0])
 
 
+def usage_ids(world: World, document: uuid.UUID) -> set[uuid.UUID]:
+    """The fixture document keeps earlier runs' usage rows, and a row's ID says nothing of
+    its age: a run's own row is the one that was not there before."""
+    return {
+        row[0]
+        for row in world.db.rows("SELECT id FROM assay.ai_usage WHERE document_id = %s", document)
+    }
+
+
 def test_every_check_passes_on_a_correct_system(world: World) -> None:
     cases = world.prepare()
     own = uuid.UUID(cases["own"]["document_id"])
     # The fixture document keeps what earlier runs wrote: count from here.
-    pages_before, usage_before = rows(world, "pages", own), rows(world, "ai_usage", own)
+    pages_before, usage_before = rows(world, "pages", own), usage_ids(world, own)
     checks = world.probe(cases).run()
     assert failed(checks) == []
     names = [c.name for c in checks]
@@ -465,18 +479,86 @@ def test_every_check_passes_on_a_correct_system(world: World) -> None:
     assert picture.startswith(b"\x89PNG")
     # What the probe left in the database: one page row, one usage row, the pointer.
     assert rows(world, "pages", own) == pages_before + 1
-    assert rows(world, "ai_usage", own) == usage_before + 1
-    usage = world.db.rows(
-        "SELECT service, operation, units, unit, cost::text, request_id FROM assay.ai_usage "
-        "WHERE document_id = %s ORDER BY id",
-        own,
-    )
-    assert set(usage) == {
-        ("textract", "DetectDocumentText", 1, "page", "0.000000", "probe-request")
-    }
+    [written] = usage_ids(world, own) - usage_before
+    # The usage row is the record of a billed call: one page, at the price of a page.
+    assert world.db.row(
+        "SELECT service, operation, units, unit, unit_price::text, cost::text, request_id "
+        "FROM assay.ai_usage WHERE id = %s",
+        written,
+    ) == ("textract", "DetectDocumentText", 1, "page", "0.012500", "0.012500", "probe-request")
     assert world.db.row(
         "SELECT content_attempt, text_version_id FROM assay.documents WHERE id = %s", own
     ) == (1, "isolation-probe")
+
+
+@pytest.mark.parametrize("price", ["0.0015", "0.02", "0"])
+def test_the_probes_usage_row_carries_the_price_it_was_handed(world: World, price: str) -> None:
+    """Owner, 2026-11-27: `ai_usage` is a true cost record, the isolation runs included. The
+    row's unit price and cost are the configured price of a page, whatever it is; a price of
+    zero is recorded only when zero is what the stack says."""
+    cases = world.prepare()
+    own = uuid.UUID(cases["own"]["document_id"])
+    before = usage_ids(world, own)
+    checks = world.probe(cases, price_per_page=Decimal(price)).run()
+    assert failed(checks) == []
+    [written] = usage_ids(world, own) - before
+    row = world.db.row(
+        "SELECT units, unit, unit_price, cost, input_tokens, output_tokens, model_id "
+        "FROM assay.ai_usage WHERE id = %s",
+        written,
+    )
+    assert row == (1, "page", Decimal(price), Decimal(price), 0, 0, None)
+
+
+@pytest.mark.parametrize("price", ["-0.01", "NaN", "Infinity"])
+def test_a_probe_is_not_made_with_a_price_that_is_no_price(world: World, price: str) -> None:
+    with pytest.raises(ValueError, match="price of a page"):
+        world.probe(world.prepare(), price_per_page=Decimal(price))
+
+
+def test_a_probe_cannot_be_made_without_a_price() -> None:
+    """No default: a run must not record a billed call at no price."""
+    import inspect
+
+    parameter = inspect.signature(worker_probe.Probe.__init__).parameters["price_per_page"]
+    assert parameter.default is inspect.Parameter.empty
+    main = inspect.signature(worker_probe.main).parameters["price_per_page"]
+    assert main.default is inspect.Parameter.empty and main.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_the_tasks_entry_point_hands_the_probe_the_stacks_price(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The probe runs in the worker's own task, so the price is in its environment, where the
+    text step reads it. A probe task without a usable price does not run."""
+    from assay_workers.worker import __main__ as entry
+
+    seen: list[tuple[dict[str, str], Decimal]] = []
+
+    def probe_main(env: dict[str, str], *, price_per_page: Decimal) -> int:
+        seen.append((dict(env), price_per_page))
+        return 0
+
+    monkeypatch.setattr(worker_probe, "main", probe_main)
+    env = {
+        "WORKER_COMMAND": "probe",
+        "TEXT_QUALITY_THRESHOLD": "0.90",
+        "TEXT_MAX_PAGES": "1000",
+        "TEXTRACT_PRICE_PER_PAGE": "0.0125",
+    }
+    assert entry.run_probe(env) == 0
+    assert [price for _, price in seen] == [PRICE]
+
+    for broken in (
+        {k: v for k, v in env.items() if k != "TEXTRACT_PRICE_PER_PAGE"},
+        env | {"TEXTRACT_PRICE_PER_PAGE": ""},
+        env | {"TEXTRACT_PRICE_PER_PAGE": "-1"},
+        env | {"TEXTRACT_PRICE_PER_PAGE": "NaN"},
+    ):
+        caplog.clear()
+        assert entry.run_probe(broken) == entry.EXIT_FAILED
+        assert "without usable settings" in caplog.text
+    assert len(seen) == 1
 
 
 def test_the_fixture_documents_are_never_queued_and_are_cleared_afterwards(world: World) -> None:
