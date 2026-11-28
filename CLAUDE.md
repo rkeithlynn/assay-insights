@@ -54,8 +54,9 @@ not started and needs its own plan first: "For stage 3" below is where that plan
 ### Where things stand
 
 - **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
-  against `main`. `main` has not been fast-forwarded yet (the owner does that). Stage 3
-  continues on `build-step-6`.
+  against `main`. **Pull request #5 stays open until stage 4 is complete and verified: both
+  halves of step 6 merge together** (owner, 2026-11-27). So `main` is not fast-forwarded
+  before then, and that is not an open item. Stages 3 and 4 continue on `build-step-6`.
 - **Deployed: stack update 43** (2026-11-28 00:34 UTC, which is 2026-11-27 19:34 Eastern;
   commit 3346624, 1 minute 3 seconds; owner), with Aurora at migration `0012`. It carried
   the worker's companion-read narrowing and the probe's usage price: 8 updated, 8 replaced,
@@ -115,6 +116,12 @@ not started and needs its own plan first: "For stage 3" below is where that plan
   **CI passed on commit e90b479, on the third attempt of its `python` job** (`portal` and
   `portal-render` passed first time). Neither failed attempt was the change ("Two CI
   failures that were not the change" under "Open items and known gaps").
+- **Tested (2026-11-27), the tests and CI themselves** (commits 6d1e29a and 248a9f7: the
+  mock tests' wait, and CI's base images; no product code, nothing to deploy). The whole
+  suite, with the test PostgreSQL and the image tests required: 1,863 passed, none failed,
+  none skipped (1,838 before; the 25 new ones are the tests of these two changes). Ruff,
+  the format check, mypy and Bandit pass. **CI passed on commit 248a9f7, first time**, and
+  again when its `python` job was run a second time to see the cache at work.
 - **Rule 6** (checked 2026-11-27, before stage 2 was built): the AI services opt-out policy
   in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
   UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is the
@@ -860,6 +867,9 @@ and 8, and "The worker"), section 7 (the tables), section 7b (models) and sectio
 | The fields object | `derived/fields/{doc}.json` (`keys.fields_key`) is already in the worker's session policy, read and write. Nothing writes it yet |
 | The worker's inbox access | One object: the PDF's upload (deployed 2026-11-27, update 43). A step that needs a companion file's content reads the stored values, not the inbox |
 | The isolation suite's counts | 73, 28, 102 and 28 (2026-11-27, after update 43). Stage 3's new checks add to these |
+| The suites' counts | Python 1,863 with nothing skipped; portal 120 unit tests; rendered check 58 of 58 (2026-11-27). Stage 3's tests add to these |
+| New infrastructure mock tests | Apply each check to `conftest.after_settled(...)`, never to `pulumi.Output.all(...)`: `registered()` refuses to answer before every resource of the test is registered |
+| CI | No AWS credentials and no registry sign-in. The pinned base images come from the workflow's cache, with retried pulls. A new pinned base image needs no workflow change |
 | Built, waiting for stage 3's first deploy | "Process again" straight after a companion replacement, and its message (above, with the two checks to run after the deploy). Stage 3's first preview will therefore show the portal build and every image changing, whatever stage 3 itself touches |
 | The text to read | `derived/text/{doc}.json` at `documents.text_version_id`: per page `text` (the source), and for some `ocr` pages `text_layer` (`is_source: false`) |
 | The steps panel | `laterStepsPending` is keyed on the text step's result. It stays until stage 4, and must then be keyed on stage 3's last step |
@@ -967,14 +977,15 @@ Each is recorded in full further down; this is the index.
 | A preview counts an image's dependents | An image's digest is unknown until it is built, so a preview shows its task definition or function as changing. If the files the Dockerfile copies did not change, the build gives the same digest and nothing downstream changes (the API, update 43: 8 and 8 for a preview of 9 and 9) | The same section |
 | Every event counts as the attempt's activity | `document_event` stamps the current attempt, and "under way" looks at any event of it in the last five minutes: a companion replacement held "Process again" for five minutes with nothing running. An event written outside an attempt's run must carry `batches.OUTSIDE_ATTEMPT` | "Process again after a companion replacement" |
 | A module's shared test document | The API tests of part 2 use one document for the whole module: a new test goes last, or uses its own document | The same section |
-| A red `python` job that is not the change | Twice on 2026-11-27: ECR Public answered `429 Too Many Requests` for the pinned base image (39 image tests could not build), and one infrastructure mock test asserted on a resource it does not wait for. Read the log before touching code; a re-run of the failed job is the remedy for the first | "Two CI failures that were not the change" |
+| A red `python` job that is not the change | Twice on 2026-11-27: ECR Public answered `429 Too Many Requests` for the pinned base image (39 image tests could not build; it had also failed CI during step 5), and one infrastructure mock test asserted on a resource it did not wait for. Both are fixed. Read the log before touching code | "Two CI failures that were not the change" |
+| A mock test's check must wait for `settled()` | A resource reaches the Pulumi mocks some time after its constructor returns. A check applied to a few chosen outputs can run first: it fails by chance, or "every registered X has ..." passes over a stack with resources missing. Use `conftest.after_settled(...)`; `registered()` refuses to answer too early | `tests/unit/conftest.py`, `test_mock_settling.py` |
+| Docker's save and load can lose a digest's name | On GitHub's runner an image loaded from a `docker save` file is not found under `name@sha256:...`, so it is pulled again (the manifest only: its layers are there). On Docker 29 with the containerd image store, as on the development machine, it keeps its name | `scripts/ci_base_images.py` |
 | "The latest row" by ID | IDs are random UUIDs: `ORDER BY id DESC LIMIT 1` is not the row written last. A test finds a run's own row as the one that was not there before | `tests/unit/test_worker_probe.py`, `usage_ids` |
 
 ### Open items and known gaps
 
 Decisions the owner has still to make, or things to do:
 
-- **`main`**: fast-forward to `build-step-6` (pull request #5, CI green).
 - **Check the malware protection plans' status again on 2026-11-28** (owner; the scan
   role's limit to `inbox/` was deployed and verified on 2026-11-27, and it is not known when
   GuardDuty next checks a plan's role). Every plan must be `ACTIVE` with no status reason:
@@ -999,9 +1010,6 @@ Decisions the owner has still to make, or things to do:
   (owner, 2026-11-27; "For stage 4" above). Nothing changes before then. Stage 4 also
   replaces the five-minute rule for "Process again".
 - **Stage 3's plan** ("For stage 3" above): not written. It comes before any stage 3 code.
-- **Decide on the two CI findings** ("Two CI failures that were not the change" below): make
-  the pre-token trigger's test wait for the role policy it checks, and whether CI should
-  sign in to ECR Public or cache the base image.
 - **Concurrency numbers**: 50 and 300 rest on a small sample (43 scan runs, 9 at once at
   most). Measure again once real batches have run.
 - **The 74 files Git checks out with CRLF** on the owner's machine (the portal's `.ts` and
@@ -1021,25 +1029,90 @@ Decisions the owner has still to make, or things to do:
   covering originals, derived objects and noncurrent versions together. **Not designed.**
 
 Two CI failures that were not the change (2026-11-27, commit e90b479, the `python` job; the
-same suite passed locally, 1,838 with nothing skipped):
+same suite passed locally, 1,838 with nothing skipped). **Both are fixed** (owner's
+decisions of the same day; commits 6d1e29a and 248a9f7):
 
 - **Attempt 1: Amazon ECR Public refused the base image.** `429 Too Many Requests` for the
   pinned `public.ecr.aws/docker/library/python:3.14-slim` manifest, 156 times in the log.
   The image tests could not build: 36 errors and 3 failures in `test_api_image.py`,
   `test_tenancy_images.py`, `test_worker_image.py` and `test_image_layers.py`; the other
   1,799 tests passed. CI pulls from ECR Public without signing in, from GitHub's shared
-  addresses. **Not seen before in this project.** If it recurs: re-run the failed job; a
-  lasting cure (signing in to ECR Public, or caching the base image in the workflow) is a
-  change to the workflow for the owner to decide.
+  addresses. **A repeat, not a first: the same 429 failed CI during build step 5** (owner,
+  2026-11-27; it was not written down then, which is why it read as new).
 - **Attempt 2: a race in an existing test.** 1,837 passed and
   `test_infra_auth_api.py::test_pre_token_trigger_outside_the_vpc_reads_only_its_pool`
   failed: "`c5-auth-pre-token-tenant-policy`: 0 registered". The test checks that role
-  policy, and `_after_everything` (what it waits for before checking) does not include it,
-  so the check can run before the mock engine has registered the resource. It had always
-  won that race until now. **Proposed, not done:** add the pre-token trigger's role policy
-  (and anything else a check reads) to what `_after_everything` waits for. That makes the
-  test wait for what it asserts on and weakens nothing. The owner decides.
+  policy, and what it waited for before checking did not include it, so the check could
+  run before the mock engine had registered the resource. It had always won that race
+  until then.
 - Attempt 3 passed, with no change to anything.
+
+**The 429: CI keeps the pinned base images in its cache and retries a pull** (commit
+248a9f7; `scripts/ci_base_images.py`, `.github/workflows/ci.yml`).
+
+- **No AWS credentials and no registry sign-in, on purpose** (owner, 2026-11-27). Every
+  base image is public and pinned by digest, so what is loaded or pulled can only be the
+  image a Dockerfile names. `test_ci_base_images.py` fails if the workflow gains a
+  credential, a sign-in or a secret.
+- The script reads the pinned names from the Dockerfiles (all but the portal's, which CI
+  never builds): the same three the image tests hold every build to. It loads them from
+  the workflow's cache, pulls what Docker still lacks under its pinned name, and saves what
+  is new. **A failed pull is tried again: seven tries, waiting 5, 15, 30, 60, 120 and 120
+  seconds (plus up to a quarter, at random), about six minutes at most.** Then the step
+  fails and says what the registry answered.
+- The `python` job runs it before the tests. The cache is `actions/cache` (restore and
+  save, one commit, v6.1.0), keyed on a hash of the pinned names, and saved as soon as the
+  images are there, so a later failure does not cost the next run its cache. The job's time
+  limit went from 15 to 25 minutes, to leave room for the retries.
+- **What it did on GitHub's runner** (2026-11-28 UTC, commit 248a9f7):
+  - First run: no cache; each of the three images pulled on its first try; 279 MB saved.
+  - Second run of the same job: the cache restored and all three loaded from it, and
+    **each was still pulled once.** Docker on the runner does not keep a digest's name
+    through save and load, so the loaded image is not found under `name@sha256:...`. The
+    layers were there: the whole step took five seconds, so each pull was a request for
+    the manifest alone.
+- **So the cache spares the downloads, and one small request per image remains on every
+  run. That request is what the retries cover.** Before, every build asked the registry
+  itself, with no retry of ours.
+- **Not proven:** that a build asks the registry for nothing once the image is in Docker
+  under its pinned name. That is how BuildKit treats a digest-pinned image it has. If a 429
+  ever fails a build after this step reported every image present or pulled, that is
+  wrong: record it.
+- **Not done (for the owner, if the 429 comes back in spite of the retries):** switching
+  the runner's Docker to the containerd image store, where a loaded image keeps its pinned
+  name and no request is made at all (as on the development machine, Docker 29).
+- A new pinned base image needs nothing here: the script finds it in the Dockerfile, and
+  the cache's key changes with it.
+
+**The race: a mock test's check waits until every resource of its test is registered**
+(commit 6d1e29a; `tests/unit/conftest.py`).
+
+- A resource is registered with the Pulumi mocks some time after its constructor returns,
+  when its inputs have resolved. Each test file had its own list of outputs to wait for,
+  and a check could read a resource that was on none of them.
+- `conftest.settled()` resolves once every resource the test constructed is registered,
+  also one constructed while it waits. `conftest.after_settled(...)` is
+  `pulumi.Output.all(...)` with the same values in the same order, resolved only then.
+  **Every wait in the nine mock test files goes through it**, and no assertion changed.
+- **`conftest.registered()` now refuses to answer while a resource of the test is still on
+  its way**, naming the first one. So the race cannot come back unseen: it fails every
+  time, on every machine, not by chance on one.
+- **The same race was in nine other tests.** Run alone, before any wait was changed, the
+  guard failed nine checks on the development machine that had been passing over an
+  incomplete stack: three in `test_infra_auth_api.py` (the rotation switch, the way back,
+  no custom-auth trigger), five in `test_infra_data.py` (subnets and routes, the interface
+  endpoints, security groups, the database writer, the migration role) and one in
+  `test_infra_pipeline.py` (the security-notice topic). The test that failed on CI was not
+  among them: here it won its race. Which tests lose it depends on the machine, which is
+  why every wait was changed and not only those ten.
+- **A check that iterates ("every registered X has ...") was the worse case:** over a stack
+  with resources missing it passes, having looked at fewer than it should.
+- `tests/unit/test_mock_settling.py` holds the rule, with a resource that is late on
+  purpose: an early check is refused by name, `after_settled` waits for it, a resource
+  constructed in a callback is waited for too, and a scan of the mock test files fails if
+  one combines outputs itself again.
+- **A new mock test:** apply its check to `after_settled(...)` (or a helper built on it),
+  never to `pulumi.Output.all(...)` or to one resource's output.
 
 Known gaps: things not proven, or proven only in part:
 
@@ -1554,6 +1627,14 @@ assets/     Logo and favicon SVGs
   every image rebuilds on the next `pulumi up`.
 - CI (`.github/workflows/ci.yml`) runs ruff (lint and format), mypy (strict), pytest,
   pip-audit and Bandit. It never deploys.
+- **CI has no AWS credentials and signs in to no registry** (owner, 2026-11-27). Before the
+  image tests, `scripts/ci_base_images.py` loads the pinned base images from the workflow's
+  cache and pulls what is missing, retrying a failed pull with growing waits (ECR Public's
+  `429 Too Many Requests` failed the job during step 5 and on 2026-11-27). A test fails if
+  the workflow gains a credential or a sign-in.
+- **A Pulumi mock test's check waits for `conftest.after_settled(...)`**, never for
+  `pulumi.Output.all(...)` or one resource's output: a resource is registered with the
+  mocks some time after its constructor returns (`tests/unit/test_mock_settling.py`).
 - **GitHub Actions pinning (SOC 2).** Pin every action to a full 40-character commit
   SHA, with the release in a trailing comment:
   `uses: owner/repo@<sha> # vX.Y.Z`. Never use a tag or branch alone. Before using or

@@ -1013,5 +1013,11 @@ owner accepted.
 - Lambda and task images are built by `scripts/build_image.py` with attestations off, pinned
   base images, and their dependencies and code as two layers (2026-11-25).
 - A file Git marks as LF is LF on disk (2026-11-27).
+- CI holds no AWS credentials and signs in to no registry. It keeps the pinned base images
+  in its cache and retries a failed pull with growing waits, because a public registry's
+  anonymous limit (`429 Too Many Requests`) failed it during step 5 and again on 2026-11-27
+  (2026-11-27).
+- Pull request #5 stays open until stage 4 is complete and verified: both halves of step 6
+  merge to `main` together (2026-11-27).
 - Staging and Production: raise the Lambda concurrency quota before the first deploy
   (2026-11-25).
