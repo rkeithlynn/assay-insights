@@ -19,6 +19,18 @@ export type AuditPage = Schemas["AuditPage"];
 export type TenantModels = Schemas["TenantModels"];
 export type SettingsModels = Schemas["SettingsModels"];
 export type CatalogModel = Schemas["CatalogModel"];
+// Build step 6: batches, uploads and ingestion history.
+export type BatchOut = Schemas["BatchOut"];
+export type BatchSummary = Schemas["BatchSummary"];
+export type FileOut = Schemas["FileOut"];
+export type RegisteredFile = Schemas["RegisteredFile"];
+export type DocumentRow = Schemas["DocumentRow"];
+export type DocumentPage = Schemas["DocumentPage"];
+export type DocumentDetail = Schemas["DocumentDetail"];
+export type DocumentStatus = DocumentRow["status"];
+export type IngestionRow = Schemas["IngestionRow"];
+export type IngestionPage = Schemas["IngestionPage"];
+export type IngestionDetail = Schemas["IngestionDetail"];
 
 export type Api = ReturnType<typeof createClient<paths>>;
 

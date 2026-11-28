@@ -25,14 +25,20 @@ describe("sign-out channel", () => {
     }
   });
 
-  it("carries nothing but the fact of the sign-out", async () => {
+  it("carries nothing but the fact of the sign-out and its reason", async () => {
     const listener = new BroadcastChannel(SIGN_OUT_CHANNEL);
     const heard: unknown[] = [];
     listener.onmessage = (event: MessageEvent<unknown>) => heard.push(event.data);
     const tab = signOutChannel(() => undefined);
     try {
       tab.announce();
-      await vi.waitFor(() => expect(heard).toEqual([{ type: "signed-out" }]));
+      tab.announce("idle_timeout");
+      await vi.waitFor(() =>
+        expect(heard).toEqual([
+          { type: "signed-out", reason: "user" },
+          { type: "signed-out", reason: "idle_timeout" },
+        ]),
+      );
     } finally {
       tab.close();
       listener.close();

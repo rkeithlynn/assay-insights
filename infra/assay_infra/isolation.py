@@ -12,6 +12,10 @@ and the tests would fail. For the same reason it has no Rekognition permission: 
 collection has no resource policy to refuse it.
 
 It may also call the TSS, under the service name `isolation`, for the two test tenants.
+
+Since stage 2 of build step 6's second half it also holds the worker task's Textract
+permission, word for word. The VPC's Textract endpoint admits only the worker task's role, so
+the runner's call must be refused there, by the endpoint's policy and nothing else.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ import pulumi_aws as aws
 from assay_infra.database import Database, db_user_arn
 from assay_infra.images import WORKSPACE_MANIFESTS, ContainerImage
 from assay_infra.network import Network
+from assay_infra.pipeline import textract_statement
 from assay_infra.tss import VPC_NETWORK_INTERFACE_STATEMENT, _service_trust
 from assay_tss import policies
 from assay_tss.naming import tenant_pattern
@@ -80,6 +85,7 @@ def runner_role_policy(
     log_group: str,
     db_user: str,
     tenant_role: str,
+    textract_endpoint: str,
 ) -> str:
     pattern = tenant_pattern(name_prefix)
     bucket = f"arn:aws:s3:::{pattern}"
@@ -87,6 +93,10 @@ def runner_role_policy(
         {
             "Version": "2012-10-17",
             "Statement": [
+                # The same permission as the worker task's, condition and all (owner,
+                # 2026-11-27), so that the Textract endpoint's policy is the only thing left
+                # to refuse this role, and the test shows it doing so.
+                textract_statement("ProbeTextractEndpoint", textract_endpoint),
                 {
                     "Sid": "Logs",
                     "Effect": "Allow",
@@ -151,6 +161,8 @@ class IsolationRunner(pulumi.ComponentResource):
         invite_function_arn: pulumi.Input[str],
         # The API's Cognito admin function (build step 5): refused to the runner too.
         api_cognito_function_arn: pulumi.Input[str],
+        # The VPC's Textract endpoint, whose policy must refuse the runner (stage 2).
+        textract_endpoint_id: pulumi.Input[str],
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -185,6 +197,7 @@ class IsolationRunner(pulumi.ComponentResource):
                     region, account_id, database.cluster_resource_id, APP_TENANT_DB_USER
                 ),
                 tenant_role=tenant_role_arn,
+                textract_endpoint=textract_endpoint_id,
             ).apply(lambda a: runner_role_policy(region=region, name_prefix=name_prefix, **a)),
             opts=child,
         )

@@ -8,6 +8,7 @@ from typing import Any
 
 import pulumi
 import pulumi_aws as aws
+import pytest
 
 from assay_infra.auth import Auth
 from assay_infra.edge import (
@@ -25,6 +26,7 @@ from tests.unit.conftest import (
     CLOUDFRONT_VPC_ORIGIN_SG,
     ELB_ACCOUNT_ID,
     REGION,
+    after_settled,
     registered,
 )
 from tests.unit.test_infra_auth_api import AUTH, AUTH_EVENT_TRIGGER, DNS, FAKE_JWKS
@@ -71,7 +73,7 @@ def _edge(prefix: str) -> Edge:
 
 
 def _ready(edge: Edge) -> pulumi.Output[list[Any]]:
-    return pulumi.Output.all(
+    return after_settled(
         edge.distribution.id,
         edge.load_balancer_ingress.id,
         edge.portal_policy.policy,
@@ -249,9 +251,12 @@ def test_csp_allows_scripts_only_from_the_portal() -> None:
     directives = dict(d.split(" ", 1) for d in csp.split("; "))
     assert directives["script-src"] == "'self'"
     assert directives["object-src"] == "'none'"
+    # Build step 6: presigned upload (and, from step 7, view) links to tenant buckets, by
+    # their regional virtual-hosted names (owner decision 11).
     assert directives["connect-src"] == (
         "'self' https://cognito-idp.us-east-1.amazonaws.com "
-        "https://a.auth.us-east-1.amazoncognito.com https://b.auth.us-east-1.amazoncognito.com"
+        "https://a.auth.us-east-1.amazoncognito.com https://b.auth.us-east-1.amazoncognito.com "
+        "https://*.s3.us-east-1.amazonaws.com"
     )
 
 
@@ -267,13 +272,30 @@ def test_portal_config_lists_both_pools() -> None:
             platform_pool="p2",
             platform_client="c2",
             platform_domain="d2",
+            idle_timeout_minutes=30,
         )
     )
+    assert config["idleTimeoutMinutes"] == 30
     assert config["pools"]["platform"] == {
         "userPoolId": "p2",
         "clientId": "c2",
         "loginUrl": "https://d2.auth.us-east-1.amazoncognito.com",
     }
+
+
+def test_the_portal_idle_timeout_is_checked() -> None:
+    from assay_infra.config import EdgeConfig, validate_edge
+
+    assert validate_edge(EdgeConfig(waf_rate_limit=1000, portal_idle_minutes=30))
+    for minutes in (4, 481):
+        with pytest.raises(ValueError, match="portalIdleTimeoutMinutes"):
+            validate_edge(EdgeConfig(waf_rate_limit=1000, portal_idle_minutes=minutes))
+
+
+def test_the_dev_stack_sets_a_60_minute_idle_timeout() -> None:
+    # 60 for now (owner, 2026-11-24); the decision was 30. The portal's fallback stays 30.
+    stack = (Path(__file__).resolve().parents[2] / "infra" / "Pulumi.dev.yaml").read_text()
+    assert 'assay-platform:portalIdleTimeoutMinutes: "60"' in stack
 
 
 def test_portal_source_hash_ignores_build_output(tmp_path: Path) -> None:

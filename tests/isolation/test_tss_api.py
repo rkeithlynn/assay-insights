@@ -51,3 +51,21 @@ def test_unknown_route_is_refused(env: Env, tss: TssClient) -> None:
     with pytest.raises(TssRequestError) as raised:
         tss.send(tss.signed_request("/provision", b"{}"))
     assert raised.value.status in {403, 404}
+
+
+def test_the_workers_route_refuses_every_other_caller(env: Env, tss: TssClient) -> None:
+    """`/resolve-worker` serves the pipeline's worker task only (owner condition b, build
+    step 6). This Lambda's role is not it: API Gateway refuses the request before the service
+    sees it, because the role's policy and the API's policy name only `/resolve` for it.
+    The worker's own side is tried by its probe (`assay_workers.worker.probe`)."""
+    with pytest.raises(TssRequestError) as raised:
+        tss.resolve_worker(uuid.uuid4(), 1, "A" * 43)
+    assert raised.value.status == 403
+    assert raised.value.code != "worker_grant_refused"  # it never reached a grant lookup
+
+
+def test_worker_access_cannot_be_asked_for_by_name(env: Env, tss: TssClient) -> None:
+    """No caller of `/resolve` is issued the worker's access, for any tenant."""
+    with pytest.raises(TssRequestError) as raised:
+        tss.resolve(env.tenant_a, StorageAccess.WORKER, f"{env.service}.probe")
+    assert (raised.value.status, raised.value.code) == (403, "access_not_allowed")

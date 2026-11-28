@@ -16,6 +16,15 @@ describe("config", () => {
     expect(parseConfig(RAW).pools.platform.clientId).toBe("platform-client");
   });
 
+  it("reads the idle timeout, and falls back to 30 minutes only when it is missing", () => {
+    expect(parseConfig({ ...RAW, idleTimeoutMinutes: 45 }).idleTimeoutMinutes).toBe(45);
+    expect(poolFor(parseConfig({ ...RAW, idleTimeoutMinutes: 45 }), "portal.example.test").idleTimeoutMinutes).toBe(45);
+    expect(parseConfig(RAW).idleTimeoutMinutes).toBe(30);
+    for (const bad of [4, 481, 30.5, "30", null]) {
+      expect(() => parseConfig({ ...RAW, idleTimeoutMinutes: bad })).toThrow(/idleTimeoutMinutes/);
+    }
+  });
+
   it("refuses an incomplete config or a non-HTTPS login URL", () => {
     expect(() => parseConfig({ region: "us-east-1" })).toThrow();
     expect(() =>

@@ -2,7 +2,8 @@
 
 Build order follows BUILD_SPEC.md section 4. Implemented so far: 1 (DNS and certificate),
 2 (network), 3 (database, with the migration Lambda), 4 (Cognito, with the audit triggers),
-5 (the Tenant Storage Service, with tenant provisioning), 6 (the API), 7 (the edge) and the
+5 (the Tenant Storage Service, with tenant provisioning), 6 (the API), 7 (the edge), 8 (the
+pipeline, build step 6 first half: scan routing, the ingest queue, fingerprint) and the
 alarms of 9.
 """
 
@@ -11,8 +12,8 @@ from pathlib import Path
 import pulumi
 import pulumi_aws as aws
 
-from assay_infra.alerts import Alerts
-from assay_infra.api import ApiService
+from assay_infra.alerts import Alerts, SecurityNotices
+from assay_infra.api import ApiService, api_task_role
 from assay_infra.auth import Auth
 from assay_infra.auth_events import AuthEvents
 from assay_infra.cognito_admin import CognitoAdminApi
@@ -25,9 +26,18 @@ from assay_infra.isolation import SERVICE_NAME as ISOLATION_SERVICE
 from assay_infra.isolation import IsolationRunner, runner_role
 from assay_infra.migrations import MigrationRunner
 from assay_infra.network import Network, states_endpoint_policy
+from assay_infra.pipeline import (
+    SCAN_SERVICE,
+    STEPS_SERVICE,
+    SWEEPER_SERVICE,
+    WORKER_SERVICE,
+    Pipeline,
+    pipeline_roles,
+    textract_endpoint_policy,
+)
 from assay_infra.provisioning import Provisioning
 from assay_infra.seed import SeedFunction
-from assay_infra.tss import TenantStorage
+from assay_infra.tss import TenantStorage, TssCaller
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -115,12 +125,29 @@ auth_events.add_consumer(
     pool_ids=(auth.tenant.pool.id, auth.platform.pool.id),
 )
 
-# The isolation test runner (development stacks only) is a TSS caller, so its role exists
-# before the TSS does.
+# Every TSS caller's role exists before the TSS does, which names each one with the
+# accesses it may ask for (build step 6). The API signs upload and view links; the pipeline's
+# functions get pipeline access; the isolation test runner (development stacks only) tries
+# all three.
+api_name = f"{prefix}-api"
+api_role = api_task_role(api_name, account_id=account_id, region=config.region)
+pipeline_name = f"{prefix}-pipeline"
+pipeline_role = pipeline_roles(pipeline_name, account_id, config.region)
+PIPELINE_ACCESS = ("pipeline",)
+tss_callers: dict[str, TssCaller] = {
+    "api": TssCaller(role=api_role, access=("read", "upload")),  # assay_api.storage.SERVICE
+    SCAN_SERVICE: TssCaller(role=pipeline_role.scan, access=PIPELINE_ACCESS),
+    STEPS_SERVICE: TssCaller(role=pipeline_role.steps, access=PIPELINE_ACCESS),
+    SWEEPER_SERVICE: TssCaller(role=pipeline_role.sweeper, access=PIPELINE_ACCESS),
+    # The worker task (build step 6, second half): its own route, /resolve-worker, against
+    # an attempt grant, for one document's keys. It can never name a tenant.
+    WORKER_SERVICE: TssCaller(role=pipeline_role.worker, access=("worker",)),
+}
 isolation_name = f"{prefix}-isolation-tests"
-tss_callers: dict[str, aws.iam.Role] = {}
 if config.tenancy.isolation_tests:
-    tss_callers[ISOLATION_SERVICE] = runner_role(isolation_name, account_id)
+    tss_callers[ISOLATION_SERVICE] = TssCaller(
+        role=runner_role(isolation_name, account_id), access=("pipeline", "read", "upload")
+    )
 
 storage = TenantStorage(
     f"{prefix}-tss",
@@ -134,6 +161,7 @@ storage = TenantStorage(
     break_glass_principal_arn=config.tenancy.break_glass_principal_arn,
     alarm_topic_arn=alerts.topic.arn,
     callers=tss_callers,
+    reserved_concurrency=config.pipeline.tss_reserved_concurrency,
     aws_profile=aws_profile,
 )
 
@@ -151,6 +179,8 @@ provisioning = Provisioning(
     vector_dimensions=config.tenancy.vector_dimensions,
     default_tags=config.tenancy.default_tags,
     default_models=default_models,
+    upload_origins=[f"https://{config.dns.tenant_host}"],
+    scan_inbox_only=config.tenancy.scan_inbox_only,
     # Every KMS key this program creates outside the provisioning component. Add a new
     # one here: the provisioning role is denied tagging the keys in this list.
     platform_key_arns=[database.key.arn, alerts.key.arn],
@@ -168,8 +198,51 @@ cognito_admin_api = CognitoAdminApi(
 
 edge_logs = EdgeLogs(f"{prefix}-edge-logs", region=config.region, account_id=account_id)
 
+# Security notices (a quarantined upload), apart from the alarms: their own topic, published
+# to by the scan function only, through the VPC's SNS endpoint (build step 6, second half).
+security_notices = SecurityNotices(
+    f"{prefix}-security-notices",
+    email=config.alerts.security_notice_email,
+    key_id=alerts.key.key_id,
+    publisher_role_arn=pipeline_role.scan.arn,
+    sns_endpoint_id=network.interface_endpoints["sns"].id,
+)
+
+# The ingestion pipeline (section 8; build step 6, first half).
+pipeline = Pipeline(
+    pipeline_name,
+    repo_root=REPO_ROOT,
+    region=config.region,
+    account_id=account_id,
+    name_prefix=prefix,
+    network=network,
+    database=database,
+    database_name=config.database.database_name,
+    roles=pipeline_role,
+    tss_endpoint_url=storage.endpoint_url,
+    api_task_role=api_role,
+    alarm_topic_arn=alerts.topic.arn,
+    security_topic_arn=security_notices.topic.arn,
+    notices_key_arn=alerts.key.arn,
+    text_quality_threshold=config.text.quality_threshold,
+    text_max_pages=config.text.max_pages,
+    textract_price_per_page=config.text.textract_price_per_page,
+    textract_daily_pages_alarm=config.text.textract_daily_pages_alarm,
+    textract_endpoint_id=network.interface_endpoints["textract"].id,
+    worker_max_per_tenant=config.pipeline.worker_max_per_tenant,
+    scan_reserved_concurrency=config.pipeline.scan_reserved_concurrency,
+    aws_profile=aws_profile,
+)
+# Through the Textract endpoint: the worker task's role and DetectDocumentText, nothing else.
+# Never deleted or recreated: without a policy resource an endpoint allows everything.
+aws.ec2.VpcEndpointPolicy(
+    f"{prefix}-textract-endpoint-policy",
+    vpc_endpoint_id=network.interface_endpoints["textract"].id,
+    policy=pipeline_role.worker.arn.apply(lambda arn: textract_endpoint_policy(worker_role=arn)),
+)
+
 api = ApiService(
-    f"{prefix}-api",
+    api_name,
     repo_root=REPO_ROOT,
     region=config.region,
     account_id=account_id,
@@ -179,6 +252,10 @@ api = ApiService(
     auth=auth,
     cognito_admin_function_arn=cognito_admin_api.function.arn,
     state_machine_arn=provisioning.state_machine.arn,
+    task_role=api_role,
+    tss_endpoint_url=storage.endpoint_url,
+    ingest_queue_arn=pipeline.ingest_queue.arn,
+    ingest_queue_url=pipeline.ingest_queue.url,
     certificate_arn=certificate.certificate_arn,
     access_logs_bucket=edge_logs.bucket.bucket,
     access_logs_ready=edge_logs.policy,
@@ -216,11 +293,28 @@ aws.ec2.VpcEndpointPolicy(
         state_machine=provisioning.state_machine.arn,
         api=api.task_role.arn,
         seed=seed.role.arn,
+        pipeline=pipeline.state_machine.arn,
+        starter=pipeline_role.starter.arn,
     ).apply(
         lambda a: states_endpoint_policy(
-            state_machine=a["state_machine"], callers=[a["api"], a["seed"]]
+            state_machine=a["state_machine"],
+            callers=[a["api"], a["seed"]],
+            pipeline_state_machine=a["pipeline"],
+            pipeline_callers=[a["starter"]],
         )
     ),
+)
+# Every queue a workload in the VPC sends to (build step 6): the auth-event trigger's, and
+# the ingest queue, for its three senders. The starter reads it through its event source
+# mapping, which the Lambda service polls outside the VPC.
+auth_events.sqs_endpoint_access(
+    [
+        (
+            "PipelineQueuesIngestJobs",
+            pipeline.ingest_queue.arn,
+            [api_role.arn, pipeline_role.scan.arn, pipeline_role.sweeper.arn],
+        )
+    ]
 )
 
 edge = Edge(
@@ -236,13 +330,14 @@ edge = Edge(
     load_balancer_security_group=api.alb_security_group,
     logs=edge_logs,
     waf_rate_limit=config.edge.waf_rate_limit,
+    portal_idle_minutes=config.edge.portal_idle_minutes,
     aws_profile=aws_profile,
 )
 
 if config.tenancy.isolation_tests:
     isolation = IsolationRunner(
         isolation_name,
-        role=tss_callers[ISOLATION_SERVICE],
+        role=tss_callers[ISOLATION_SERVICE].role,
         repo_root=REPO_ROOT,
         region=config.region,
         account_id=account_id,
@@ -254,6 +349,7 @@ if config.tenancy.isolation_tests:
         tenant_role_arn=storage.tenant_role.arn,
         invite_function_arn=provisioning.invite_function.arn,
         api_cognito_function_arn=cognito_admin_api.function.arn,
+        textract_endpoint_id=network.interface_endpoints["textract"].id,
         aws_profile=aws_profile,
     )
     pulumi.export("isolation_function_name", isolation.function.name)
@@ -269,6 +365,10 @@ pulumi.export("db_master_secret_arn", database.master_secret_arn)
 pulumi.export("migrate_function_name", migrations.function.name)
 pulumi.export("tenant_user_pool_id", auth.tenant.pool.id)
 pulumi.export("tenant_app_client_id", auth.tenant.client.id)
+# Whether each app client is meant to have refresh-token rotation on (the isolation run
+# checks the deployed clients against these).
+pulumi.export("tenant_refresh_token_rotation", bool(config.auth.tenant_refresh_rotation))
+pulumi.export("platform_refresh_token_rotation", bool(config.auth.platform_refresh_rotation))
 pulumi.export("tenant_login_domain", auth.tenant.domain.domain)
 pulumi.export("platform_user_pool_id", auth.platform.pool.id)
 pulumi.export("platform_app_client_id", auth.platform.client.id)
@@ -281,12 +381,17 @@ pulumi.export("api_target_group_arn", api.target_group.arn)
 pulumi.export("api_cluster_name", api.cluster.name)
 pulumi.export("api_service_name", api.service.name)
 pulumi.export("alarm_topic_arn", alerts.topic.arn)
+pulumi.export("security_notice_topic_arn", security_notices.topic.arn)
 pulumi.export("tss_endpoint_url", storage.endpoint_url)
 pulumi.export("tss_function_name", storage.function.name)
 pulumi.export("tenant_role_arn", storage.tenant_role.arn)
 pulumi.export("break_glass_role_arn", storage.break_glass.role.arn)
 pulumi.export("provisioning_state_machine_arn", provisioning.state_machine.arn)
 pulumi.export("provisioning_role_arn", provisioning.task_role.arn)
+# The GuardDuty scan role, and whether its object access stops at inbox/ (stack config
+# malwareScanInboxOnly): what the role's deployed policy is compared with.
+pulumi.export("malware_scan_role_name", provisioning.scan_role.name)
+pulumi.export("malware_scan_inbox_only", config.tenancy.scan_inbox_only)
 pulumi.export("tenant_state_bucket", provisioning.state_bucket.bucket)
 pulumi.export("cognito_admin_function_name", provisioning.invite_function.name)
 pulumi.export("cognito_admin_api_function_name", cognito_admin_api.function.name)
@@ -299,3 +404,12 @@ pulumi.export("provisioning_cluster_name", provisioning.cluster.name)
 pulumi.export("provisioning_task_definition_arn", provisioning.task_definition.arn)
 pulumi.export("provisioning_log_group", provisioning.log_group.name)
 pulumi.export("workload_security_group_id", network.workload_security_group.id)
+pulumi.export("ingest_queue_url", pipeline.ingest_queue.url)
+pulumi.export("ingest_dlq_url", pipeline.ingest_dlq.url)
+pulumi.export("scan_dlq_url", pipeline.scan_dlq.url)
+pulumi.export("pipeline_state_machine_arn", pipeline.state_machine.arn)
+pulumi.export("pipeline_function_names", {k: f.name for k, f in pipeline.functions.items()})
+# Read by scripts/run_isolation.py, which runs the worker task's probe command.
+pulumi.export("worker_cluster_name", pipeline.worker_cluster.name)
+pulumi.export("worker_task_definition_arn", pipeline.worker_task_definition.arn)
+pulumi.export("worker_log_group", pipeline.worker_log_group.name)

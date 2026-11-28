@@ -16,7 +16,9 @@ concurrency:
 jobs:
   python:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The checks take about seven minutes. The rest is room for the base images' pulls to be
+    # retried when a registry is busy (scripts/ci_base_images.py: about six minutes at most).
+    timeout-minutes: 25
     # Throwaway PostgreSQL for the role, RLS and migration tests (tests/unit/test_db_security.py).
     # Same major version as Aurora (dbEngineVersion); pinned by digest.
     services:
@@ -52,6 +54,12 @@ jobs:
       - name: Install (locked)
         run: uv sync --locked
 
+      # Files .gitattributes marks as LF must not have CRLF. A Linux checkout has none, so
+      # here this catches only CRLF that was committed; on the Windows development machine
+      # the same check runs as a unit test, and `pulumi preview` refuses a CRLF image source.
+      - name: Line endings
+        run: uv run scripts/check_line_endings.py
+
       - name: Lint
         run: uv run ruff check .
 
@@ -60,6 +68,35 @@ jobs:
 
       - name: Type check
         run: uv run mypy
+
+      # The image tests build the project's Dockerfiles, and each build asks a public registry
+      # for its pinned base image. The runner is signed in to none of them and shares their
+      # anonymous limits: Amazon ECR Public answered 429 Too Many Requests and failed this job
+      # during build step 5 and on 2026-11-27. So the base images are kept in the workflow's
+      # cache and loaded from it, and a pull that is still needed is tried again with growing
+      # waits. No sign-in and no credentials, on purpose: every image is public and pinned by
+      # digest (scripts/ci_base_images.py has the detail).
+      - name: Pinned base images (cache key)
+        id: base-images
+        run: echo "key=$(uv run scripts/ci_base_images.py key)" >> "$GITHUB_OUTPUT"
+
+      - name: Pinned base images (restore the cache)
+        id: base-images-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/base-images
+          key: base-images-${{ runner.os }}-${{ steps.base-images.outputs.key }}
+
+      - name: Pinned base images (load; pull what is missing, with retries)
+        run: uv run scripts/ci_base_images.py ensure --cache "$RUNNER_TEMP/base-images"
+
+      # Saved here, not at the job's end: a later failure must not cost the next run its cache.
+      - name: Pinned base images (save the cache)
+        if: steps.base-images-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/base-images
+          key: base-images-${{ runner.os }}-${{ steps.base-images.outputs.key }}
 
       - name: Unit tests
         run: uv run pytest
@@ -70,7 +107,7 @@ jobs:
           uv run pip-audit --strict --disable-pip --require-hashes -r "$RUNNER_TEMP/requirements.txt"
 
       - name: Bandit
-        run: uv run bandit -c pyproject.toml -r api infra db scripts tss
+        run: uv run bandit -c pyproject.toml -r api infra db schemas scripts tss workers
 
   portal:
     runs-on: ubuntu-latest

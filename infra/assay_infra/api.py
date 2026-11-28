@@ -10,8 +10,14 @@ access logs go to the edge's logging bucket.
 
 The task signs in to Aurora with IAM database authentication as `app_tenant` (tenant
 routes), `platform_reader` (admin reads) and `platform_writer` (admin changes). Its only other
-AWS permissions: invoke the API's Cognito admin function, and start the tenant provisioning
-state machine. Both calls go through interface endpoints whose policies name this role.
+AWS permissions: invoke the API's Cognito admin function, start the tenant provisioning
+state machine, and (build step 6) send ingest jobs to the pipeline's queue. The TSS grants it
+`execute-api:Invoke` as caller `api`, with UPLOAD and READ access only. Every call goes
+through an interface endpoint whose policy names this role.
+
+The task role is created before the TSS (`api_task_role`), which must name it as a caller.
+It has an alias to its place under this component, where it was created in build step 3,
+so Pulumi keeps the same role instead of replacing it.
 """
 
 from __future__ import annotations
@@ -34,7 +40,8 @@ PLATFORM_WRITER_DB_USER = "platform_writer"  # assay_db.roles.PLATFORM_WRITER
 API_DB_USERS = (APP_TENANT_DB_USER, PLATFORM_READER_DB_USER, PLATFORM_WRITER_DB_USER)
 
 DOCKERFILE = "api/Dockerfile"
-IMAGE_TREES = ("db/assay_db", "api/assay_api")
+# The image ships the TSS client and the shared schemas too (build step 6).
+IMAGE_TREES = ("db/assay_db", "api/assay_api", "schemas/assay_schemas", "tss/assay_tss")
 
 CONTAINER_NAME = "api"
 CONTAINER_PORT = 8000  # assay_api.__main__.PORT
@@ -60,6 +67,8 @@ TASK_VARIABLES = (
     "COGNITO_PLATFORM_CLIENT_ID",
     "COGNITO_ADMIN_FUNCTION",
     "PROVISIONING_STATE_MACHINE_ARN",
+    "TSS_ENDPOINT_URL",
+    "INGEST_QUEUE_URL",
     *JWKS_VARIABLES,
 )
 LOG_RETENTION_DAYS = 30
@@ -122,7 +131,7 @@ def execution_role_policy(*, repository: str, log_group: str) -> str:
 
 
 def task_role_policy(
-    db_users: list[str], *, cognito_admin_function: str, state_machine: str
+    db_users: list[str], *, cognito_admin_function: str, state_machine: str, ingest_queue: str
 ) -> str:
     return _json(
         {
@@ -146,8 +155,36 @@ def task_role_policy(
                     "Action": "states:StartExecution",
                     "Resource": state_machine,
                 },
+                {
+                    "Sid": "QueueIngestJobs",
+                    "Effect": "Allow",
+                    "Action": "sqs:SendMessage",
+                    "Resource": ingest_queue,
+                },
             ],
         }
+    )
+
+
+COMPONENT_TYPE = "assay:compute:ApiService"
+TASK_ROLE_DESCRIPTION = "API task: database sign-in, Cognito admin calls, tenant provisioning"
+
+
+def api_task_role(name: str, *, account_id: pulumi.Input[str], region: str) -> aws.iam.Role:
+    """The API's task role, created before the TSS (which names it as a caller).
+
+    Until build step 6 it was a child of the ApiService component `name`; the alias tells
+    Pulumi it is that same role, so it is not replaced. Name, description and trust policy
+    are unchanged.
+    """
+    trust = pulumi.Output.from_input(account_id).apply(lambda acct: _ecs_tasks_trust(acct, region))
+    return aws.iam.Role(
+        f"{name}-task-role",
+        description=TASK_ROLE_DESCRIPTION,
+        assume_role_policy=trust,
+        opts=pulumi.ResourceOptions(
+            aliases=[pulumi.Alias(parent=pulumi.create_urn(name, COMPONENT_TYPE))]
+        ),
     )
 
 
@@ -231,6 +268,12 @@ class ApiService(pulumi.ComponentResource):
         auth: Auth,
         cognito_admin_function_arn: pulumi.Input[str],
         state_machine_arn: pulumi.Input[str],
+        # Build step 6: the role made by `api_task_role`, the TSS's private API, and the
+        # pipeline's ingest queue.
+        task_role: aws.iam.Role,
+        tss_endpoint_url: pulumi.Input[str],
+        ingest_queue_arn: pulumi.Input[str],
+        ingest_queue_url: pulumi.Input[str],
         # The validated certificate for the portal hosts, and the edge's logging bucket.
         certificate_arn: pulumi.Input[str],
         access_logs_bucket: pulumi.Input[str],
@@ -239,7 +282,7 @@ class ApiService(pulumi.ComponentResource):
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
-        super().__init__("assay:compute:ApiService", name, None, opts)
+        super().__init__(COMPONENT_TYPE, name, None, opts)
         child = pulumi.ResourceOptions(parent=self)
         account = pulumi.Output.from_input(account_id)
 
@@ -278,12 +321,7 @@ class ApiService(pulumi.ComponentResource):
             ).apply(lambda a: execution_role_policy(**a)),
             opts=child,
         )
-        self.task_role = aws.iam.Role(
-            f"{name}-task-role",
-            description="API task: database sign-in, Cognito admin calls, tenant provisioning",
-            assume_role_policy=trust,
-            opts=child,
-        )
+        self.task_role = task_role
         self.task_role_policy = aws.iam.RolePolicy(
             f"{name}-task-policy",
             role=self.task_role.id,
@@ -296,11 +334,13 @@ class ApiService(pulumi.ComponentResource):
                 ),
                 cognito_admin_function=cognito_admin_function_arn,
                 state_machine=state_machine_arn,
+                ingest_queue=ingest_queue_arn,
             ).apply(
                 lambda a: task_role_policy(
                     list(a["db_users"]),
                     cognito_admin_function=a["cognito_admin_function"],
                     state_machine=a["state_machine"],
+                    ingest_queue=a["ingest_queue"],
                 )
             ),
             opts=child,
@@ -417,6 +457,8 @@ class ApiService(pulumi.ComponentResource):
             COGNITO_PLATFORM_JWKS=auth.platform_jwks,
             COGNITO_ADMIN_FUNCTION=cognito_admin_function_arn,
             PROVISIONING_STATE_MACHINE_ARN=state_machine_arn,
+            TSS_ENDPOINT_URL=tss_endpoint_url,
+            INGEST_QUEUE_URL=ingest_queue_url,
         ).apply(lambda env: {**env, "AWS_REGION": region, "DB_NAME": database_name})
         self.task_definition = aws.ecs.TaskDefinition(
             f"{name}-task",

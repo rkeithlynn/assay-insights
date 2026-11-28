@@ -55,6 +55,8 @@ TENANT_STATUSES = ("provisioning", "active", "suspended", "failed")
 STORAGE_MODES = ("dedicated",)
 STORAGE_STATUSES = ("active", "offboarded")
 JOBS = ("ingest", "query")
+# Who made an AI call (ai_usage.service). Textract is billed by the page and has no tokens.
+AI_SERVICES = ("bedrock", "textract")
 USER_ROLES = ("master-admin", "master-user", "tenant-admin", "tenant-user")
 USER_STATUSES = ("invited", "active", "disabled")
 BATCH_STATUSES = ("open", "closed", "discarded")
@@ -68,12 +70,33 @@ DOCUMENT_STATUSES = (
     "on_hold",
     "failed",
     "duplicate",
+    # The document's batch was discarded, or its file removed, before it was processed
+    # (owner decision, build step 6). Left out of the ingestion history unless asked for.
+    "discarded",
+)
+# An upload in a batch (build step 6): one PDF or one companion file.
+BATCH_FILE_KINDS = ("pdf", "companion")
+# `companion_replacement`: a companion file attached or replaced after ingestion (build
+# step 6, second half). It is registered against its document, not paired by name.
+BATCH_FILE_PURPOSES = ("upload", "companion_replacement")
+BATCH_FILE_STATUSES = (
+    "registered",  # waiting for the upload and its scan result
+    "clean",  # scanned clean; size and checksum match the registration; companion valid
+    "invalid",  # a companion file that scanned clean but fails validation
+    "mismatch",  # stored size or checksum differs from the registration
+    "infected",  # THREATS_FOUND: moved to quarantine/
+    "unsupported",  # UNSUPPORTED, ACCESS_DENIED or FAILED scan: held
+    "scan_timeout",  # uploaded, but no scan result arrived in time: held
+    "not_uploaded",  # registered, but nothing arrived before the link expired
+    "removed",  # taken out of the batch by the admin, or dropped when it closed
 )
 PART_METHODS = ("rule", "model")
 LABEL_SOURCES = ("companion",)
 TEXT_SOURCES = ("native", "ocr")
 SIGNER_SOURCES = ("audit_trail", "companion")
-AUDIT_CATEGORIES = ("auth", "user", "tenant", "audit")
+# `security`: a file quarantined. `document`: "Process again", a companion file replaced,
+# "Mark as reviewed" (build step 6, second half).
+AUDIT_CATEGORIES = ("auth", "user", "tenant", "audit", "security", "document")
 ATTACHMENT_KINDS = (
     "paystub",
     "bank_statement",
@@ -270,6 +293,9 @@ class Document(Base):
     __table_args__ = (
         one_of("status", DOCUMENT_STATUSES),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256"),
+        CheckConstraint("attempt >= 1", name="attempt"),
+        CheckConstraint("companion_attempt >= 1", name="companion_attempt"),
+        CheckConstraint("content_attempt >= 1", name="content_attempt"),
         UniqueConstraint("tenant_id", "id"),
         child_of("batches", "batch_id"),
         child_of("users", "uploaded_by"),
@@ -277,6 +303,19 @@ class Document(Base):
         Index("ix_documents_tenant_id_received_at", "tenant_id", text("received_at DESC")),
         Index("ix_documents_tenant_id_batch_id", "tenant_id", "batch_id"),
         Index("ix_documents_tenant_id_sha256", "tenant_id", "sha256"),
+        # The master view's history across tenants, newest first.
+        Index("ix_documents_received_at", text("received_at DESC")),
+        # One original per hash within a tenant. Duplicates point at it (duplicate_of), and a
+        # failed original no longer counts. Backs up the fingerprint step's advisory lock.
+        Index(
+            "uq_documents_tenant_id_sha256_original",
+            "tenant_id",
+            "sha256",
+            unique=True,
+            postgresql_where=text(
+                "sha256 IS NOT NULL AND duplicate_of IS NULL AND status <> 'failed'"
+            ),
+        ),
     )
 
     id: Mapped[uuid_pk]
@@ -300,11 +339,127 @@ class Document(Base):
     received_at: Mapped[tstz_now]
     completed_at: Mapped[tstz | None]
     pipeline_version: Mapped[str | None]
+    # When the document became eligible and was sent to the ingest queue (build step 6). The
+    # sweeper queues it again if no execution started within a while.
+    queued_at: Mapped[tstz | None]
+    # Which run of the pipeline is current (build step 6, second half). A worker's grant
+    # names an attempt, and is good only while that attempt is the document's current one.
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
+    # Old results are kept, not deleted (owner decision 2, second half): derived rows carry
+    # an attempt, and these point at the current one. Each moves in the transaction that
+    # writes the new rows, so a reader sees the previous results until then.
+    # Companion data: `signers` (source companion), `companion_loan_terms`, `document_labels`.
+    companion_attempt: Mapped[int | None]
+    # Text and extraction results. NULL until the stages that write them.
+    content_attempt: Mapped[int | None]
+    # The S3 version of `derived/text/{doc}.json` that `content_attempt` stands for. Readers
+    # use this version, never the latest: every version is kept (migration 0012).
+    text_version_id: Mapped[str | None]
+    # The upload (`batch_files.id`) the current companion data came from.
+    companion_file_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+
+class WorkerGrant(Base):
+    """One run of the worker task for one document's attempt (build step 6, second half).
+
+    The pipeline's `claim` step creates the row just before it starts the task, with a random
+    token of which only the SHA-256 is kept here. The task gets the token from Step Functions
+    and presents it, with the document ID and attempt, to the Tenant Storage Service
+    (`/resolve-worker`) and to the database (`pipeline.bind_worker`). Both take the tenant
+    from this row, never from the worker, and only while the grant is live: not ended, not
+    expired, and for the document's current attempt. A live grant is also the tenant's slot
+    in the cap on concurrent workers.
+    """
+
+    __tablename__ = "worker_grants"
+    __table_args__ = (
+        CheckConstraint("token_hash ~ '^[0-9a-f]{64}$'", name="token_hash"),
+        CheckConstraint("attempt >= 1", name="attempt"),
+        UniqueConstraint("token_hash"),
+        child_of("documents", "document_id"),
+        Index("ix_worker_grants_tenant_id_document_id", "tenant_id", "document_id"),
+    )
+
+    id: Mapped[uuid_pk]
+    tenant_id: Mapped[uuid.UUID] = tenant_fk()
+    document_id: Mapped[uuid_col]
+    attempt: Mapped[int]
+    token_hash: Mapped[str]
+    created_at: Mapped[tstz_now]
+    expires_at: Mapped[tstz]
+    ended_at: Mapped[tstz | None]
+
+
+class BatchFile(Base):
+    """One upload in a batch (build step 6): a PDF or a companion file.
+
+    `id` is the upload's opaque file ID, the last part of its inbox key; a PDF's document has
+    the same ID. `file_name` is kept here only, never in an S3 key. `size_bytes` and `sha256`
+    are what the browser registered; the presigned link signs both, and the scan step checks
+    the stored object against them. `version_id` is the object version that scanned clean:
+    every later read, hash and copy uses it.
+    """
+
+    __tablename__ = "batch_files"
+    __table_args__ = (
+        one_of("kind", BATCH_FILE_KINDS),
+        one_of("status", BATCH_FILE_STATUSES),
+        one_of("purpose", BATCH_FILE_PURPOSES),
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256"),
+        CheckConstraint("size_bytes > 0", name="size_bytes"),
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("s3_key"),
+        child_of("batches", "batch_id"),
+        child_of("documents", "document_id"),
+        child_of("users", "registered_by"),
+        Index("ix_batch_files_tenant_id_batch_id", "tenant_id", "batch_id"),
+        # Pairing is by base name, so a batch holds one live upload per kind and base name.
+        # A replacement companion is registered against its document and may share a name.
+        Index(
+            "uq_batch_files_live_name",
+            "tenant_id",
+            "batch_id",
+            "kind",
+            "base_name",
+            unique=True,
+            postgresql_where=text("status <> 'removed' AND purpose = 'upload'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = tenant_fk()
+    batch_id: Mapped[uuid_col]
+    kind: Mapped[str]
+    file_name: Mapped[str]
+    # The name without its extension, lower-cased: how a companion finds its PDF.
+    base_name: Mapped[str]
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str]
+    s3_key: Mapped[str]
+    content_type: Mapped[str]
+    status: Mapped[str] = mapped_column(server_default="registered")
+    error_code: Mapped[str | None]
+    # For an invalid companion: [{code, key}], naming keys only, never values.
+    error_detail: Mapped[json_doc | None]
+    # GuardDuty's scanResultStatus, as received.
+    scan_result: Mapped[str | None]
+    version_id: Mapped[str | None]
+    scanned_at: Mapped[tstz | None]
+    # The PDF's document. For a companion file, set when the batch closes and pairs it.
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    registered_by: Mapped[uuid_col]
+    registered_at: Mapped[tstz_now]
+    purpose: Mapped[str] = mapped_column(server_default="upload")
+    # For a replacement companion: when its values became the document's current ones.
+    applied_at: Mapped[tstz | None]
+    # For an infected file: when its security notice was published.
+    notice_sent_at: Mapped[tstz | None]
 
 
 class DocumentEvent(Base):
     __tablename__ = "document_events"
     __table_args__ = (
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
         Index("ix_document_events_tenant_id_document_id", "tenant_id", "document_id"),
     )
@@ -316,6 +471,8 @@ class DocumentEvent(Base):
     status: Mapped[str]
     at: Mapped[tstz_now]
     detail: Mapped[json_doc | None]
+    # The document's attempt when the event was written (build step 6, second half).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
 
 
 class DocumentPart(Base):
@@ -345,8 +502,9 @@ class DocumentLabel(Base):
     __tablename__ = "document_labels"
     __table_args__ = (
         one_of("source", LABEL_SOURCES),
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
-        UniqueConstraint("tenant_id", "document_id", "key"),
+        UniqueConstraint("tenant_id", "document_id", "attempt", "key"),
     )
 
     id: Mapped[uuid_pk]
@@ -355,6 +513,8 @@ class DocumentLabel(Base):
     key: Mapped[str]
     value: Mapped[json_doc]
     source: Mapped[str] = mapped_column(server_default="companion")
+    # Which version of the document's companion data (documents.companion_attempt).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
 
 
 class Page(Base):
@@ -362,14 +522,17 @@ class Page(Base):
     __table_args__ = (
         one_of("text_source", TEXT_SOURCES),
         CheckConstraint("page_no >= 1", name="page_no"),
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
-        UniqueConstraint("tenant_id", "document_id", "page_no"),
+        UniqueConstraint("tenant_id", "document_id", "attempt", "page_no"),
         Index("ix_pages_search_tsv", "search_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[uuid_pk]
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     document_id: Mapped[uuid_col]
+    # Which attempt read the page (documents.content_attempt points at the current one).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
     page_no: Mapped[int]
     text_source: Mapped[str]
     quality_score: Mapped[float | None]
@@ -397,6 +560,7 @@ class Signer(Base):
     __tablename__ = "signers"
     __table_args__ = (
         one_of("source", SIGNER_SOURCES),
+        CheckConstraint("attempt >= 1", name="attempt"),
         UniqueConstraint("tenant_id", "id"),
         child_of("documents", "document_id"),
         Index("ix_signers_tenant_id_document_id", "tenant_id", "document_id"),
@@ -411,18 +575,22 @@ class Signer(Base):
     location: Mapped[str | None]
     signed_at: Mapped[tstz | None]
     source: Mapped[str]
+    # For source `companion`: the version of the companion data (documents.companion_attempt).
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
 
 
 class CompanionLoanTerms(Base):
     __tablename__ = "companion_loan_terms"
     __table_args__ = (
+        CheckConstraint("attempt >= 1", name="attempt"),
         child_of("documents", "document_id"),
-        UniqueConstraint("tenant_id", "document_id"),
+        UniqueConstraint("tenant_id", "document_id", "attempt"),
     )
 
     id: Mapped[uuid_pk]
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     document_id: Mapped[uuid_col]
+    attempt: Mapped[int] = mapped_column(server_default=text("1"))
     term_months: Mapped[int | None]
     maturity_date: Mapped[dt.date | None]
     # Annual percent, for example 6.125.
@@ -506,12 +674,29 @@ class ChatAudit(Base):
 
 
 class AiUsage(Base):
-    """One row per model call. Cost is frozen at call time."""
+    """One row per call to an AI service. Cost is frozen at call time.
+
+    A Bedrock call names its catalog model and counts tokens. A Textract call (migration
+    0012) has neither: it says which operation it was, the service's own model version, and
+    what it was billed by (`units` of `unit` at `unit_price`).
+    """
 
     __tablename__ = "ai_usage"
     __table_args__ = (
         one_of("job", JOBS),
+        one_of("service", AI_SERVICES),
         CheckConstraint("input_tokens >= 0 AND output_tokens >= 0", name="tokens"),
+        CheckConstraint(
+            "(service = 'bedrock' AND model_id IS NOT NULL) OR "
+            "(service = 'textract' AND model_id IS NULL AND operation IS NOT NULL "
+            "AND units IS NOT NULL AND units >= 1 AND unit IS NOT NULL AND unit = 'page' "
+            "AND unit_price IS NOT NULL AND unit_price >= 0)",
+            name="service_shape",
+        ),
+        CheckConstraint(
+            "(attempt IS NULL OR attempt >= 1) AND (page_no IS NULL OR page_no >= 1)",
+            name="usage_for",
+        ),
         child_of("documents", "document_id"),
         child_of("chat_audit", "chat_audit_id"),
         Index("ix_ai_usage_tenant_id_document_id", "tenant_id", "document_id"),
@@ -520,13 +705,22 @@ class AiUsage(Base):
     id: Mapped[uuid_pk]
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     job: Mapped[str]
-    model_id: Mapped[uuid.UUID] = mapped_column(ForeignKey(f"{SCHEMA}.ai_models.id"))
+    model_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey(f"{SCHEMA}.ai_models.id"))
     document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     chat_audit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     input_tokens: Mapped[int]
     output_tokens: Mapped[int]
     cost: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     request_id: Mapped[str | None]
+    service: Mapped[str] = mapped_column(server_default="bedrock")
+    operation: Mapped[str | None]
+    model_version: Mapped[str | None]
+    # The document's attempt and page the call was for, when it was for one.
+    attempt: Mapped[int | None]
+    page_no: Mapped[int | None]
+    units: Mapped[int | None]
+    unit: Mapped[str | None]
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
 
 
 # --- Audit trail (section 7a) ----------------------------------------------------------

@@ -22,7 +22,7 @@ import pulumi
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from tests.unit.conftest import REGISTERED
+from tests.unit.conftest import REGISTERED, after_settled, require_settled
 from tests.unit.test_infra_auth_api import FAKE_JWKS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -118,6 +118,8 @@ def test_every_description_in_the_program_is_valid_for_its_service(no_network: N
     program = runpy.run_path(str(PROGRAM), run_name="__main__")
 
     def check(_: list[Any]) -> None:
+        # The whole program is registered: nothing is still on its way.
+        require_settled()
         entries = REGISTERED[start:]
         # The run built the whole program, edge included: the check is not vacuous.
         types = {t for t, _, _ in entries}
@@ -131,7 +133,7 @@ def test_every_description_in_the_program_is_valid_for_its_service(no_network: N
         assert any(n.endswith("-edge-alb-in-cloudfront") for n in rules)
         assert problems(entries) == []
 
-    return pulumi.Output.all(
+    return after_settled(
         program["edge"].distribution.id,
         program["edge"].load_balancer_ingress.id,
         program["seed"].function.id,

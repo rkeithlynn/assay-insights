@@ -19,7 +19,7 @@ from assay_infra.database import Database
 from assay_infra.images import WORKSPACE_MANIFESTS
 from assay_infra.migrations import MigrationRunner, image_tag, parse_digest
 from assay_infra.network import INTERFACE_ENDPOINT_SERVICES, Network, plan_subnets
-from tests.unit.conftest import ACCOUNT_ID, REGION, registered
+from tests.unit.conftest import ACCOUNT_ID, REGION, after_settled, registered
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NET = NetworkConfig(vpc_cidr="10.40.0.0/16", workload_az_id="use1-az2", second_az_id="use1-az4")
@@ -44,8 +44,8 @@ def _stack(prefix: str) -> tuple[Network, Database, MigrationRunner]:
 
 
 def _after(*outputs: pulumi.Output[Any]) -> pulumi.Output[list[Any]]:
-    """Resolve once every listed resource is registered with the mocks."""
-    return pulumi.Output.all(*outputs)
+    """The listed outputs, once every resource of the test is registered with the mocks."""
+    return after_settled(*outputs)
 
 
 # --- Config ---------------------------------------------------------------------------
@@ -148,6 +148,8 @@ def test_endpoint_list_matches_spec() -> None:
         "guardduty",
         # Build step 5: the API and the seed Lambda start provisioning executions.
         "states",
+        # Build step 6, second half: the scan function publishes security notices.
+        "sns",
     }
 
 
@@ -163,7 +165,7 @@ def test_s3_gateway_endpoint_limited_to_own_account() -> Any:
         assert [s["Action"] for s in others] == ["s3:GetObject"]
         assert others[0]["Resource"] == f"arn:aws:s3:::prod-{REGION}-starport-layer-bucket/*"
 
-    return network.s3_gateway_endpoint.policy.apply(lambda p: check([p]))
+    return _after(network.s3_gateway_endpoint.policy).apply(check)
 
 
 @pulumi.runtime.test

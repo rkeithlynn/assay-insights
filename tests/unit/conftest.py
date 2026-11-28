@@ -2,14 +2,25 @@
 
 Set before any test module imports a component, because Pulumi reads the mocks when a
 resource is registered.
+
+**A check must wait for `settled()`** (or use `after_settled(...)` where it used
+`pulumi.Output.all(...)`). A resource is registered with the mocks some time after its
+constructor returns, when its inputs have resolved. A check that runs as soon as a few chosen
+outputs resolve can run before a resource it reads is registered: it then fails by chance
+(CI, 2026-11-27: "`c5-auth-pre-token-tenant-policy`: 0 registered"), or, worse, a check of
+the form "every registered X has ..." passes over a stack with resources missing. `settled()`
+resolves only once every resource the test constructed is registered, and `registered()`
+refuses to answer before that, so the race cannot come back unseen.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from typing import Any
 
 import pulumi
+import pytest
 
 # Python 3.14+ no longer creates a default event loop; Pulumi's mock runtime needs one.
 asyncio.set_event_loop(asyncio.new_event_loop())
@@ -26,8 +37,95 @@ CLOUDFRONT_VPC_ORIGIN_SG = "sg-cloudfront-vpc-origins"
 ELB_ACCOUNT_ID = "111111111111"
 
 
+# Every resource the current test has constructed, in order (emptied before each test).
+CREATED: list[pulumi.Resource] = []
+# Where the current test's registrations begin in REGISTERED.
+_TEST_START = [0]
+# The engine's own root resource: the mocks are never asked to register it.
+STACK_TYPE = "pulumi:pulumi:Stack"
+# Far longer than any registration takes: a resource that is never registered is an error
+# with its name, not a test that hangs.
+SETTLE_TIMEOUT_SECONDS = 120.0
+
+_resource_init = pulumi.Resource.__init__
+
+
+def _recording_init(self: pulumi.Resource, *args: Any, **kwargs: Any) -> None:
+    _resource_init(self, *args, **kwargs)
+    CREATED.append(self)
+
+
+pulumi.Resource.__init__ = _recording_init  # type: ignore[method-assign]
+
+
+def unregistered() -> list[str]:
+    """The resources this test constructed that the mocks have not been given yet."""
+    seen = {(t, n) for t, n, _ in REGISTERED[_TEST_START[0] :]}
+    return [
+        f"{r.pulumi_resource_type} {r.pulumi_resource_name}"
+        for r in CREATED
+        if r.pulumi_resource_type != STACK_TYPE
+        and (r.pulumi_resource_type, r.pulumi_resource_name) not in seen
+    ]
+
+
+def settled() -> pulumi.Output[int]:
+    """Resolves once every resource constructed in this test is registered with the mocks:
+    the ones constructed before this call, and any constructed while it waits. Its value is
+    how many there were."""
+
+    async def wait() -> int:
+        done = 0
+        while True:
+            while done < len(CREATED):
+                resource = CREATED[done]
+                try:
+                    # A resource's URN resolves when its registration has returned.
+                    await asyncio.wait_for(resource.urn.future(), SETTLE_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    raise AssertionError(
+                        f"{resource.pulumi_resource_type} {resource.pulumi_resource_name} "
+                        "was never registered with the mocks"
+                    ) from None
+                done += 1
+            # A callback that constructs a resource may be waiting for its turn: let it run.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            if done == len(CREATED):
+                return done
+
+    return pulumi.Output.from_input(asyncio.ensure_future(wait()))
+
+
+def after_settled(*outputs: Any) -> pulumi.Output[list[Any]]:
+    """`pulumi.Output.all(*outputs)`, with the same values in the same order, resolved only
+    once every resource of the test is registered (`settled`). What a check waits for."""
+    return pulumi.Output.all(pulumi.Output.all(*outputs), settled()).apply(lambda both: both[0])
+
+
+def require_settled() -> None:
+    """Fails if a resource of this test is not registered yet: the check came too early."""
+    missing = unregistered()
+    assert not missing, (
+        f"the check ran before {len(missing)} of this test's resources were registered with "
+        f"the mocks (the first: {missing[0]}). Wait for `settled()`, or use "
+        "`after_settled(...)` in place of `pulumi.Output.all(...)`."
+    )
+
+
 def registered(type_token: str, name_prefix: str = "") -> list[tuple[str, dict[str, Any]]]:
+    """The resources of a type the mocks were given, by name prefix. Refuses to answer while
+    a resource of the current test is still on its way (`require_settled`)."""
+    require_settled()
     return [(n, i) for t, n, i in REGISTERED if t == type_token and n.startswith(name_prefix)]
+
+
+@pytest.fixture(autouse=True)
+def _mock_registrations_of_this_test() -> Iterator[None]:
+    """Each test starts with no resources of its own."""
+    CREATED.clear()
+    _TEST_START[0] = len(REGISTERED)
+    yield
 
 
 class Mocks(pulumi.runtime.Mocks):
@@ -116,3 +214,6 @@ pulumi.runtime.set_mocks(Mocks(), preview=False)
 
 # The one throwaway database for every module that needs PostgreSQL (see pgtest.py).
 from tests.unit.pgtest import db  # noqa: E402, F401
+
+# The build step 6 tests' database (see step6.py).
+from tests.unit.step6 import step6_db  # noqa: E402, F401

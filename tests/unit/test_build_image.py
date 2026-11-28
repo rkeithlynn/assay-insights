@@ -113,3 +113,135 @@ def test_build_turns_off_attestations_and_targets_amd64() -> None:
     args = build_image.build_args(ref="r:t", dockerfile="d", context=".", metadata_file="m")
     assert {"--provenance=false", "--sbom=false", "--push"} <= set(args)
     assert args[args.index("--platform") + 1] == "linux/amd64"
+
+
+# --- Confirming the pushed image, and using one that is already there -----------------------------
+#
+# `pulumi up` failed twice with "<repository>@sha256:...: not found" for an image ECR had
+# accepted (2026-11-24, 2026-11-25): the check was a second registry client whose request
+# never reached ECR, and which reported its fallback's "not found" instead.
+
+DIGEST = "sha256:" + "ab" * 32
+OCI = "application/vnd.oci.image.manifest.v1+json"
+INDEX = "application/vnd.oci.image.index.v1+json"
+URL = "123456789012.dkr.ecr.us-east-1.amazonaws.com/assay-test-worker"
+
+
+def _image(media_type: str = OCI, digest: str = DIGEST) -> dict[str, Any]:
+    return {
+        "images": [
+            {
+                "imageId": {"imageDigest": digest, "imageTag": "src-1"},
+                "imageManifest": json.dumps({"schemaVersion": 2}),
+                "imageManifestMediaType": media_type,
+            }
+        ],
+        "failures": [],
+    }
+
+
+def _missing(code: str = "ImageNotFound") -> dict[str, Any]:
+    return {"images": [], "failures": [{"failureCode": code}]}
+
+
+class FakeEcr:
+    """Answers `batch_get_image` from a list: a response, or an exception to raise."""
+
+    def __init__(self, answers: list[Any]) -> None:
+        self.answers = answers
+        self.asked: list[dict[str, Any]] = []
+
+    def batch_get_image(self, **request: Any) -> dict[str, Any]:
+        self.asked.append(request)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return dict(answer)
+
+
+def _connection_error() -> Exception:
+    from botocore.exceptions import ConnectTimeoutError
+
+    return ConnectTimeoutError(endpoint_url="https://api.ecr.us-east-1.amazonaws.com")
+
+
+def _no_wait(_: float) -> None:
+    return None
+
+
+def test_the_pushed_image_is_confirmed_through_ecr_not_a_registry_client() -> None:
+    """No `imagetools` call is left: that client turned a failed request into "not found"."""
+    code = SCRIPT.read_text(encoding="utf-8").split('"""', 2)[2]  # after the module docstring
+    assert "imagetools" not in code
+    ecr = FakeEcr([_image()])
+    build_image.confirm_pushed(ecr, "assay-test-worker", DIGEST, sleep=_no_wait)
+    [request] = ecr.asked
+    assert request["repositoryName"] == "assay-test-worker"
+    assert request["imageIds"] == [{"imageDigest": DIGEST}]
+    assert OCI in request["acceptedMediaTypes"]
+    assert INDEX in request["acceptedMediaTypes"]
+
+
+def test_a_request_that_fails_or_an_image_not_yet_listed_is_looked_for_again() -> None:
+    waited: list[float] = []
+    ecr = FakeEcr([_connection_error(), _missing(), _image()])
+    build_image.confirm_pushed(ecr, "assay-test-worker", DIGEST, sleep=waited.append)
+    assert len(ecr.asked) == 3
+    assert waited == list(build_image.CONFIRM_WAITS[:2])
+
+
+def test_an_image_that_never_appears_fails_and_says_what_the_last_answer_was() -> None:
+    tries = len(build_image.CONFIRM_WAITS) + 1
+    with pytest.raises(build_image.ImageCheckFailed, match="has no such image"):
+        build_image.confirm_pushed(
+            FakeEcr([_missing()] * tries), "assay-test-worker", DIGEST, sleep=_no_wait
+        )
+    # A connection that keeps failing is reported as that, never as a missing image.
+    with pytest.raises(build_image.ImageCheckFailed, match="request to ECR failed") as failed:
+        build_image.confirm_pushed(
+            FakeEcr([_connection_error() for _ in range(tries)]),
+            "assay-test-worker",
+            DIGEST,
+            sleep=_no_wait,
+        )
+    assert "no such image" not in str(failed.value)
+    # Longer than the 37 seconds after which both failed checks gave up.
+    assert sum(build_image.CONFIRM_WAITS) >= 60
+
+
+def test_an_image_index_is_refused_and_not_looked_for_again() -> None:
+    ecr = FakeEcr([_image(INDEX), _image()])
+    with pytest.raises(ValueError, match="single image manifest"):
+        build_image.confirm_pushed(ecr, "assay-test-worker", DIGEST, sleep=_no_wait)
+    assert len(ecr.asked) == 1
+
+
+def test_an_answer_that_is_neither_an_image_nor_not_found_is_an_error() -> None:
+    with pytest.raises(build_image.ImageCheckFailed, match="KmsError"):
+        build_image.stored_image(FakeEcr([_missing("KmsError")]), "r", {"imageTag": "t"})
+
+
+def test_an_image_already_under_its_tag_is_used_without_building() -> None:
+    """A run that failed after its push left the image there. Tags are the hash of the sources
+    and cannot be overwritten, so the next run uses it: no rebuild, no upload."""
+    built: list[str] = []
+
+    def build() -> str:
+        built.append("built")
+        return "sha256:" + "cd" * 32
+
+    ecr = FakeEcr([_image()])
+    digest = build_image.image_digest(ecr, repository_url=URL, tag="src-1", build=build)
+    assert (digest, built) == (DIGEST, [])
+    assert ecr.asked[0]["imageIds"] == [{"imageTag": "src-1"}]
+    assert ecr.asked[0]["repositoryName"] == "assay-test-worker"
+
+
+def test_a_new_tag_is_built_and_then_confirmed_by_digest() -> None:
+    ecr = FakeEcr([_missing(), _image()])
+    digest = build_image.image_digest(ecr, repository_url=URL, tag="src-2", build=lambda: DIGEST)
+    assert digest == DIGEST
+    assert [request["imageIds"] for request in ecr.asked] == [
+        [{"imageTag": "src-2"}],
+        [{"imageDigest": DIGEST}],
+    ]

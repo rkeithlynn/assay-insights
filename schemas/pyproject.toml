@@ -1,0 +1,16 @@
+[project]
+name = "assay-schemas"
+version = "0.1.0"
+description = "Assay Insights: Pydantic models shared by the API and the pipeline"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "pydantic>=2.14,<2.14.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "assay_schemas"
+module-root = ""

@@ -177,9 +177,13 @@ CSV_COLUMNS = (
 _FORMULA = ("=", "+", "-", "@", "\t", "\r")
 
 
-def _cell(value: Any) -> str:
+def csv_cell(value: Any) -> str:
+    """A CSV cell. One a spreadsheet would read as a formula gets a leading apostrophe."""
     text_value = "" if value is None else str(value)
     return f"'{text_value}" if text_value.startswith(_FORMULA) else text_value
+
+
+_cell = csv_cell
 
 
 def to_csv(rows: list[Row[Any]]) -> str:

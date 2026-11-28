@@ -4,13 +4,17 @@ The two tenants come from the runner's event (`ISOLATION_TENANT_A`, `ISOLATION_T
 Every storage context is issued by the real TSS. "The runner" is this Lambda's own role: a
 probe whose IAM policy allows what the tenant resources' own policies must refuse.
 
-The tests write one thing: a small fixture object in each tenant's own bucket, once, with
-that tenant's credentials (`ensure_fixture_object`). Every other write they attempt must be
-refused, and every database transaction is rolled back.
+The tests write only fixture objects, in a test tenant's own bucket, once, with that
+tenant's pipeline credentials, all under the reserved document ID
+(`assay_tss.keys.RESERVED_DOCUMENT_ID`): `derived/text/{id}.json` and `quarantine/{id}.pdf`
+(`ensure_fixture_objects`), and `inbox/{id}/{id}` in two versions (`ensure_inbox_fixture`,
+build step 6). Every other write they attempt must be refused, and every database
+transaction is rolled back.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Callable, Iterator
@@ -24,6 +28,7 @@ from botocore.exceptions import ClientError
 from sqlalchemy import Connection, Engine, text
 
 from assay_db.connect import DbTarget, iam_engine
+from assay_tss import keys
 from assay_tss.client import TssClient
 from assay_tss.models import StorageAccess, StorageContext, source_identity
 
@@ -34,10 +39,26 @@ DENIED_CODES = frozenset({"AccessDenied", "AccessDeniedException", "403", "Forbi
 # A tag no policy looks at. If a tagging probe ever got through, it would change nothing
 # that isolation depends on.
 PROBE_TAG = "isolation-probe"
-# The one object the tests write, once per tenant: derived/text/<this ID>.json.
-FIXTURE_DOCUMENT = uuid.UUID("00000000-0000-4000-8000-0000000000f1")
+# The two objects the tests write, once per tenant, under the reserved document ID.
 FIXTURE_BODY = b'{"isolation-test-fixture": true}\n'
-MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+QUARANTINE_FIXTURE_BODY = b"isolation-test-fixture: not a PDF, never scanned or processed\n"
+FIXTURES = (
+    (keys.isolation_fixture_text_key(), FIXTURE_BODY, "application/json"),
+    (keys.isolation_fixture_quarantine_key(), QUARANTINE_FIXTURE_BODY, "application/pdf"),
+)
+# A pipeline session may not list the bucket (build step 6), so S3 answers 403, not 404,
+# for a key that does not exist.
+MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound", "403", "AccessDenied"})
+# S3's reason for a refusal by the session policy (same-account requests), for an object
+# that exists. A missing key never carries it: S3 then refuses for s3:ListBucket instead,
+# to a caller that may not list (seen on 2026-11-24).
+SESSION_POLICY_REFUSAL = "because no session policy allows the s3:GetObject action"
+VERSION_REFUSAL = "because no session policy allows the s3:GetObjectVersion action"
+LIST_REFUSAL = "because no session policy allows the s3:ListBucket action"
+# The inbox fixture's first version. The second (current) version names the first's ID,
+# because no tenant session may list versions.
+INBOX_FIXTURE_FIRST = b'{"isolation-test-fixture": true, "version": 1}\n'
+NONCURRENT = "noncurrent_version"
 
 
 @dataclass(frozen=True)
@@ -70,12 +91,17 @@ class Pair:
     other: StorageContext
 
 
-def assert_denied(call: Callable[[], object]) -> None:
-    """The call must fail with an access-denied error, not succeed and not fail otherwise."""
+def assert_denied(call: Callable[[], object]) -> str:
+    """The call must fail with an access-denied error, not succeed and not fail otherwise.
+
+    Returns S3's message, for the tests that check why it refused.
+    """
     with pytest.raises(ClientError) as raised:
         call()
-    code = raised.value.response.get("Error", {}).get("Code", "")
+    error = raised.value.response.get("Error", {})
+    code = error.get("Code", "")
     assert code in DENIED_CODES, f"expected access denied, got {code!r}"
+    return str(error.get("Message", ""))
 
 
 def client(session: boto3.Session, service: str, region: str) -> object:
@@ -157,37 +183,108 @@ def tenant(request: pytest.FixtureRequest) -> StorageContext:
     return context
 
 
-def ensure_fixture_object(context: StorageContext) -> str:
-    """One small object in the tenant's bucket, written once with the tenant's credentials.
+def ensure_fixture_objects(context: StorageContext) -> None:
+    """Two small objects in the tenant's bucket, written once with the tenant's credentials.
 
-    A refused read proves something only for an object that exists: S3 answers "no such
-    key" for a missing key to any caller that may list the bucket. This is the only thing
-    the isolation tests write. Object Lock keeps it, so later runs find it and write nothing.
+    A refused read proves something only for an object that exists: S3 refuses a missing key
+    too, to any caller that may not list the bucket. These are the only things the isolation
+    tests write: `derived/text/{reserved}.json` and `quarantine/{reserved}.pdf`. Object Lock
+    keeps them, so later runs find them and write nothing. The pipeline never processes the
+    reserved ID, and nothing scans or processes `quarantine/`.
     """
-    key = context.text_key(FIXTURE_DOCUMENT)
     api: Any = context.session().client("s3", region_name=context.region, config=CLIENT_CONFIG)
-    try:
-        api.head_object(Bucket=context.bucket, Key=key)
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") not in MISSING_CODES:
-            raise
-        api.put_object(
-            Bucket=context.bucket, Key=key, Body=FIXTURE_BODY, ContentType="application/json"
-        )
-    return key
+    for key, body, content_type in FIXTURES:
+        try:
+            api.head_object(Bucket=context.bucket, Key=key)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") not in MISSING_CODES:
+                raise
+            api.put_object(Bucket=context.bucket, Key=key, Body=body, ContentType=content_type)
 
 
 @pytest.fixture(scope="session")
 def object_key() -> Callable[[StorageContext], str]:
-    """The key of the tenant's fixture object, given the tenant's pipeline context."""
-    known: dict[uuid.UUID, str] = {}
+    """The key of the tenant's text fixture, given the tenant's pipeline context."""
+    known: set[uuid.UUID] = set()
 
     def _key(context: StorageContext) -> str:
         if context.tenant_id not in known:
-            known[context.tenant_id] = ensure_fixture_object(context)
-        return known[context.tenant_id]
+            ensure_fixture_objects(context)
+            known.add(context.tenant_id)
+        return keys.isolation_fixture_text_key()
 
     return _key
+
+
+@pytest.fixture(scope="session")
+def quarantine_key(
+    object_key: Callable[[StorageContext], str],
+) -> Callable[[StorageContext], str]:
+    """The key of the tenant's quarantine fixture (written with the text fixture)."""
+
+    def _key(context: StorageContext) -> str:
+        object_key(context)
+        return keys.isolation_fixture_quarantine_key()
+
+    return _key
+
+
+@dataclass(frozen=True)
+class InboxFixture:
+    key: str
+    current: str  # the current version's ID
+    noncurrent: str  # the older version's ID
+
+
+def ensure_inbox_fixture(context: StorageContext) -> InboxFixture:
+    """`inbox/{reserved}/{reserved}` with two versions, written once with the tenant's
+    pipeline credentials.
+
+    A refused inbox read proves something only for an object that exists, current or
+    noncurrent. The first version is written, then a second whose body names the first's
+    version ID; Object Lock keeps both, so later runs read that ID back and write nothing.
+    GuardDuty scans each write; the scan Lambda ignores this exact key at INFO, and no
+    upload is ever registered under it.
+    """
+    api: Any = context.session().client("s3", region_name=context.region, config=CLIENT_CONFIG)
+    key = keys.isolation_fixture_inbox_key()
+    try:
+        current = api.get_object(Bucket=context.bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in MISSING_CODES:
+            raise
+        current = None
+    if current is not None:
+        body = json.loads(current["Body"].read())
+        if isinstance(body, dict) and isinstance(body.get(NONCURRENT), str):
+            return InboxFixture(key, current["VersionId"], body[NONCURRENT])
+        # A run that stopped between the two writes: the first version is the current one.
+        first = str(current["VersionId"])
+    else:
+        first = api.put_object(
+            Bucket=context.bucket,
+            Key=key,
+            Body=INBOX_FIXTURE_FIRST,
+            ContentType="application/json",
+        )["VersionId"]
+    second = json.dumps({"isolation-test-fixture": True, NONCURRENT: first}).encode()
+    written = api.put_object(
+        Bucket=context.bucket, Key=key, Body=second, ContentType="application/json"
+    )
+    return InboxFixture(key, written["VersionId"], first)
+
+
+@pytest.fixture(scope="session")
+def inbox_fixture() -> Callable[[StorageContext], InboxFixture]:
+    """The tenant's inbox fixture, given the tenant's pipeline context."""
+    known: dict[uuid.UUID, InboxFixture] = {}
+
+    def _fixture(context: StorageContext) -> InboxFixture:
+        if context.tenant_id not in known:
+            known[context.tenant_id] = ensure_inbox_fixture(context)
+        return known[context.tenant_id]
+
+    return _fixture
 
 
 @pytest.fixture(scope="session")

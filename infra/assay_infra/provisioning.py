@@ -35,8 +35,9 @@ from assay_infra.auth import Auth
 from assay_infra.database import Database, db_user_arn
 from assay_infra.images import WORKSPACE_MANIFESTS, ContainerImage
 from assay_infra.network import Network
+from assay_infra.propagation import iam_propagation
 from assay_infra.tss import TenantStorage, _service_trust
-from assay_tss import policies
+from assay_tss import keys, policies
 from assay_tss.naming import tenant_pattern
 
 PLATFORM_WRITER_DB_USER = "platform_writer"  # assay_db.roles.PLATFORM_WRITER
@@ -177,6 +178,7 @@ TASK_VARIABLES = (
     "DEFAULT_TAGS",
     "DEFAULT_INGEST_MODEL",
     "DEFAULT_QUERY_MODEL",
+    "UPLOAD_ORIGINS",
     "DB_HOST",
     "DB_PORT",
     "DB_NAME",
@@ -396,9 +398,19 @@ def scan_role_trust_policy(account_id: str) -> str:
     return _service_trust(GUARDDUTY_PLAN_SERVICE, account_id)
 
 
-def scan_role_policy(*, region: str, account_id: str, name_prefix: str) -> str:
-    """AWS's documented role policy for Malware Protection for S3, for every tenant bucket."""
+def scan_role_policy(
+    *, region: str, account_id: str, name_prefix: str, inbox_only: bool = False
+) -> str:
+    """AWS's documented role policy for Malware Protection for S3, for every tenant bucket.
+
+    `inbox_only` (stack config `malwareScanInboxOnly`; owner, 2026-11-27) limits the two
+    statements that reach object content, reading an object and tagging it, to `inbox/`, the
+    one prefix each tenant's protection plan scans. Without it they cover the whole bucket,
+    as AWS's page writes them: originals and text objects too. Nothing else changes with it:
+    listing the bucket and writing GuardDuty's validation object stay as they are.
+    """
     bucket = f"arn:aws:s3:::{tenant_pattern(name_prefix)}"
+    scanned = f"{bucket}/{keys.INBOX_PREFIX}*" if inbox_only else f"{bucket}/*"
     rule = f"arn:aws:events:{region}:{account_id}:rule/{GUARDDUTY_RULE}"
     return _json(
         {
@@ -431,7 +443,7 @@ def scan_role_policy(*, region: str, account_id: str, name_prefix: str) -> str:
                         "s3:PutObjectVersionTagging",
                         "s3:GetObjectVersionTagging",
                     ],
-                    "Resource": f"{bucket}/*",
+                    "Resource": scanned,
                 },
                 {
                     "Sid": "AllowEnableS3EventBridgeEvents",
@@ -455,7 +467,7 @@ def scan_role_policy(*, region: str, account_id: str, name_prefix: str) -> str:
                     "Sid": "AllowMalwareScan",
                     "Effect": "Allow",
                     "Action": ["s3:GetObject", "s3:GetObjectVersion"],
-                    "Resource": f"{bucket}/*",
+                    "Resource": scanned,
                 },
                 {
                     "Sid": "AllowDecryptForMalwareScan",
@@ -804,6 +816,10 @@ class Provisioning(pulumi.ComponentResource):
         default_tags: Mapping[str, str],
         # Profile IDs of the models a tenant starts with (stack config), set at activation.
         default_models: tuple[str, str],
+        # Origins that may use presigned links in a tenant's bucket (build step 6).
+        upload_origins: Sequence[str],
+        # The scan role reads and tags objects under inbox/ only (malwareScanInboxOnly).
+        scan_inbox_only: bool = False,
         # Every other KMS key the platform stack creates. The provisioning role is denied
         # tagging them (and the state key, which this component adds itself).
         platform_key_arns: Sequence[pulumi.Input[str]],
@@ -845,13 +861,24 @@ class Provisioning(pulumi.ComponentResource):
             role=self.scan_role.id,
             policy=account.apply(
                 lambda acct: scan_role_policy(
-                    region=region, account_id=acct, name_prefix=name_prefix
+                    region=region,
+                    account_id=acct,
+                    name_prefix=name_prefix,
+                    inbox_only=scan_inbox_only,
                 )
             ),
             opts=child,
         )
 
         # --- Tenant stack state -------------------------------------------------------------
+        # The state key's policy names the provisioning role, created just above, as a
+        # principal: it waits until IAM has had time to make the role known.
+        self.iam_ready = iam_propagation(
+            f"{name}-iam-propagation",
+            roles=[self.task_role.arn],
+            repo_root=repo_root,
+            opts=child,
+        )
         self.state_key = aws.kms.Key(
             f"{name}-state-key",
             description=f"{name}: tenant stack state and secrets",
@@ -861,7 +888,7 @@ class Provisioning(pulumi.ComponentResource):
             policy=pulumi.Output.all(account=account, role=self.task_role.arn).apply(
                 lambda a: state_key_policy(account_id=a["account"], provisioning_role=a["role"])
             ),
-            opts=protected,
+            opts=pulumi.ResourceOptions(parent=self, protect=True, depends_on=[self.iam_ready]),
         )
         aws.kms.Alias(
             f"{name}-state-key-alias",
@@ -1067,6 +1094,8 @@ class Provisioning(pulumi.ComponentResource):
                 "DEFAULT_TAGS": json.dumps(dict(sorted(default_tags.items()))),
                 "DEFAULT_INGEST_MODEL": default_models[0],
                 "DEFAULT_QUERY_MODEL": default_models[1],
+                # Bucket CORS (build step 6): the tenant portal, which uploads and views.
+                "UPLOAD_ORIGINS": json.dumps(sorted(upload_origins)),
                 "DB_NAME": database_name,
             }
         )

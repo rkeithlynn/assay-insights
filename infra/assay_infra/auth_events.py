@@ -142,23 +142,41 @@ def queue_policy(*, queue: str, trigger_role: str) -> str:
     )
 
 
-def sqs_endpoint_policy(*, queue: str, trigger_role: str) -> str:
-    """Through the VPC's SQS endpoint: one queue, one sender, nothing else."""
-    return _json(
+# (Sid, queue ARN, sender role ARNs): one statement each in the SQS endpoint's policy.
+SqsGrant = tuple[str, str, Sequence[str]]
+
+
+def sqs_endpoint_policy(*, queue: str, trigger_role: str, grants: Sequence[SqsGrant] = ()) -> str:
+    """Through the VPC's SQS endpoint: named queues, each for named senders only.
+
+    The auth-event trigger sends to its queue (build step 5); from build step 6 the API, the
+    scan Lambda and the sweeper send ingest jobs (`grants`). Queues read by an event source
+    mapping need no statement: the Lambda service polls them, not through the endpoint.
+    """
+    statements: list[dict[str, object]] = [
         {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Sid": "TriggerQueuesAuthEvents",
-                    "Effect": "Allow",
-                    "Principal": "*",
-                    "Action": list(SEND_ACTIONS),
-                    "Resource": queue,
-                    "Condition": {"ArnEquals": {"aws:PrincipalArn": trigger_role}},
-                }
-            ],
+            "Sid": "TriggerQueuesAuthEvents",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": list(SEND_ACTIONS),
+            "Resource": queue,
+            "Condition": {"ArnEquals": {"aws:PrincipalArn": trigger_role}},
         }
-    )
+    ]
+    for sid, target, senders in grants:
+        names = sorted(senders)
+        principal: str | list[str] = names[0] if len(names) == 1 else names
+        statements.append(
+            {
+                "Sid": sid,
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": list(SEND_ACTIONS),
+                "Resource": target,
+                "Condition": {"ArnEquals": {"aws:PrincipalArn": principal}},
+            }
+        )
+    return _json({"Version": "2012-10-17", "Statement": statements})
 
 
 class AuthEvents(pulumi.ComponentResource):
@@ -271,14 +289,6 @@ class AuthEvents(pulumi.ComponentResource):
             ).apply(lambda a: queue_policy(**a)),
             opts=child,
         )
-        self.sqs_endpoint_policy = aws.ec2.VpcEndpointPolicy(
-            f"{name}-sqs-endpoint-policy",
-            vpc_endpoint_id=network.interface_endpoints["sqs"].id,
-            policy=pulumi.Output.all(
-                queue=self.queue.arn, trigger_role=self.trigger_role.arn
-            ).apply(lambda a: sqs_endpoint_policy(**a)),
-            opts=child,
-        )
 
         # --- Alarms on the trigger and the dead-letter queue ------------------------------
         self.trigger_error_filter = aws.cloudwatch.LogMetricFilter(
@@ -343,6 +353,37 @@ class AuthEvents(pulumi.ComponentResource):
             treat_missing_data="notBreaching",
             opts=pulumi.ResourceOptions(parent=self),
         )
+
+    def sqs_endpoint_access(
+        self, grants: Sequence[tuple[str, pulumi.Input[str], Sequence[pulumi.Input[str]]]] = ()
+    ) -> aws.ec2.VpcEndpointPolicy:
+        """The `sqs` endpoint's policy: the auth-event trigger, plus these grants.
+
+        Created here, with the name and parent it has had since build step 5, so it is the
+        same resource: deleting a VPC endpoint policy resets the endpoint to allow all. Every
+        queue a workload in the VPC sends to must have a grant (build step 6).
+        """
+        sids = [sid for sid, _, _ in grants]
+        queues = [queue for _, queue, _ in grants]
+        senders = [pulumi.Output.all(*roles) for _, _, roles in grants]
+        self.sqs_endpoint_policy = aws.ec2.VpcEndpointPolicy(
+            f"{self._name}-sqs-endpoint-policy",
+            vpc_endpoint_id=self._network.interface_endpoints["sqs"].id,
+            policy=pulumi.Output.all(
+                queue=self.queue.arn,
+                trigger_role=self.trigger_role.arn,
+                queues=pulumi.Output.all(*queues),
+                senders=pulumi.Output.all(*senders),
+            ).apply(
+                lambda a: sqs_endpoint_policy(
+                    queue=a["queue"],
+                    trigger_role=a["trigger_role"],
+                    grants=list(zip(sids, a["queues"], a["senders"], strict=True)),
+                )
+            ),
+            opts=pulumi.ResourceOptions(parent=self),
+        )
+        return self.sqs_endpoint_policy
 
     def attach(self, name: str, pool: aws.cognito.UserPool, account_id: pulumi.Input[str]) -> None:
         """Let one user pool invoke the trigger."""

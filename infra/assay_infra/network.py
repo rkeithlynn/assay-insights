@@ -38,6 +38,9 @@ INTERFACE_ENDPOINT_SERVICES: tuple[str, ...] = (
     "guardduty",
     # Build step 5: the API and the seed Lambda start tenant provisioning executions.
     "states",
+    # Build step 6, second half: the scan function publishes security notices. Its policy
+    # (assay_infra.alerts.sns_endpoint_policy) allows that one role, action and topic.
+    "sns",
 )
 
 FLOW_LOG_RETENTION_DAYS = 30
@@ -393,23 +396,41 @@ def s3_gateway_policy(account_id: str, region: str) -> str:
     )
 
 
-def states_endpoint_policy(*, state_machine: str, callers: list[str]) -> str:
-    """Through the VPC's Step Functions endpoint: start one state machine, named callers only."""
+def _principal(callers: Sequence[str]) -> str | list[str]:
     names = sorted(callers)
-    principal: str | list[str] = names[0] if len(names) == 1 else names
-    return json.dumps(
+    # One caller is written as a string, as IAM stores a one-item list.
+    return names[0] if len(names) == 1 else names
+
+
+def states_endpoint_policy(
+    *,
+    state_machine: str,
+    callers: list[str],
+    pipeline_state_machine: str | None = None,
+    pipeline_callers: Sequence[str] = (),
+) -> str:
+    """Through the VPC's Step Functions endpoint: start named state machines, named callers
+    only. Tenant provisioning (the API and the seed Lambda), and from build step 6 the
+    ingestion pipeline (its starter)."""
+    statements: list[dict[str, object]] = [
         {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Sid": "StartTenantProvisioning",
-                    "Effect": "Allow",
-                    "Principal": "*",
-                    "Action": "states:StartExecution",
-                    "Resource": state_machine,
-                    "Condition": {"ArnEquals": {"aws:PrincipalArn": principal}},
-                }
-            ],
-        },
-        separators=(",", ":"),
-    )
+            "Sid": "StartTenantProvisioning",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "states:StartExecution",
+            "Resource": state_machine,
+            "Condition": {"ArnEquals": {"aws:PrincipalArn": _principal(callers)}},
+        }
+    ]
+    if pipeline_state_machine is not None and pipeline_callers:
+        statements.append(
+            {
+                "Sid": "StartDocumentIngestion",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "states:StartExecution",
+                "Resource": pipeline_state_machine,
+                "Condition": {"ArnEquals": {"aws:PrincipalArn": _principal(pipeline_callers)}},
+            }
+        )
+    return json.dumps({"Version": "2012-10-17", "Statement": statements}, separators=(",", ":"))

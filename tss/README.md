@@ -32,15 +32,48 @@ s3.get_object(Bucket=ctx.bucket, Key=ctx.text_key(document_id))
 - The source identity is `<service>.<job>`. The TSS takes the service from the caller's
   IAM role and refuses a request that claims another one.
 - Credentials last 15 minutes. Ask for a new context when `ctx.expired()` is true.
-- A caller needs three things, all in `infra/assay_infra/tss.py`: an entry in the
-  `callers` argument (which gives it `execute-api:Invoke` and its service name), and a
-  network path to the `execute-api` endpoint.
+- A caller needs an entry in the `callers` argument of `TenantStorage` (a `TssCaller`: its
+  role and the accesses it may ask for), which gives it `execute-api:Invoke`, its service name
+  and its accesses (`TSS_CALLERS`), and a network path to the `execute-api` endpoint. The TSS
+  refuses any other access (`access_not_allowed`).
+- No access may list a bucket: callers work from database rows and scan events.
 
 | Access | Allows |
 | --- | --- |
 | `UPLOAD` | Put new objects under `inbox/` only (for presigned upload links) |
-| `READ` | Read objects and query vectors |
-| `PIPELINE` | Read and write objects and vectors; use the face collection |
+| `READ` | Read objects under `originals/`, `derived/` and `chat/` (never `inbox/` or `quarantine/`), and query vectors |
+| `PIPELINE` | Read and write every object, by key, and vectors; use the face collection |
+| `WORKER` | One document's own keys: read its PDF's upload in the inbox (one object, `inbox/{batch}/{document ID}`; never a companion file's upload, owner 2026-11-27), read and write its original, text and fields objects. Not its stored companion file (the pipeline's companion step writes that; owner decision F, 2026-11-27). Nothing else in the bucket, no vectors, no face collection |
+
+| Caller (service) | Route | Accesses |
+| --- | --- | --- |
+| `api` (the API's task role) | `/resolve` | `UPLOAD`, `READ` |
+| `scan`, `pipeline`, `sweeper` (the pipeline's Lambdas) | `/resolve` | `PIPELINE` |
+| `worker` (the pipeline's worker task) | `/resolve-worker` | `WORKER` |
+| `isolation` (the isolation test runner, development stacks only) | `/resolve` | `UPLOAD`, `READ`, `PIPELINE` |
+
+### The worker task's route
+
+The worker task opens tenants' PDFs, so it is trusted least (build step 6, second half). It
+never names a tenant and never asks for an access:
+
+```python
+ctx = tss.resolve_worker(document_id, attempt, token)
+```
+
+- `token` is the one-time token of the attempt's grant (`assay_db.grants`), which the
+  pipeline's `claim` step created and Step Functions passed to that one task.
+- The TSS takes the tenant from the grant's database row (`pipeline.worker_grant`, migration
+  0010), and only while the grant is live: not ended, not expired, for the document's current
+  attempt, with the document still `processing`. Anything else is `worker_grant_refused`,
+  with no more detail than that.
+- The credentials reach that one document's keys (`policies.worker_session_policy`): no
+  wildcard, nothing under `quarantine/` or `chat/`, no other document.
+- `/resolve` refuses the worker for every access, and `/resolve-worker` refuses every other
+  caller: in the service, in each caller's own IAM policy, and in the API's resource policy,
+  each of which names one route per caller.
+- Credentials issued just before an attempt ends still last their 15 minutes (the shortest
+  AWS STS allows).
 
 ## Who can do what to a tenant's storage
 
@@ -49,7 +82,7 @@ s3.get_object(Bucket=ctx.bucket, Key=ctx.text_key(document_id))
 | Tenant role, tagged for this tenant | Read and write objects | Read and write vectors | Decrypt and generate data keys, only through S3 and S3 Vectors |
 | Tenant role, tagged for another tenant | Nothing | Nothing | Nothing |
 | Provisioning role | Settings, tags and the policy. No object data. It can list key names, because the AWS provider's `HeadBucket` needs `s3:ListBucket`; keys hold IDs only | The bucket, its index, tags and policy. No vectors | Administer, tag and set the policy. `GenerateDataKey` and `Decrypt` only through S3 Vectors, which requires them to create the vector bucket and index; never directly or through S3. `tenant_id` is write-once |
-| GuardDuty scan role | Read and tag objects; write its one test object | Nothing | Decrypt and generate data keys through S3 |
+| GuardDuty scan role | Read and tag objects under `inbox/`, the prefix a tenant's plan scans (stack config `malwareScanInboxOnly`; without it, every object); write its one test object | Nothing | Decrypt and generate data keys through S3 |
 | Break-glass role | Read objects; repair the bucket policy | Nothing (vectors can be rebuilt) | Decrypt; repair the key policy |
 | Anyone else, including account administrators | Nothing | Nothing | Metadata only (description, policy, rotation, tags) |
 

@@ -106,6 +106,7 @@ def portal_config(
     platform_pool: str,
     platform_client: str,
     platform_domain: str,
+    idle_timeout_minutes: int,
 ) -> str:
     """The portal's runtime configuration. The host it is served on picks the pool."""
 
@@ -120,6 +121,7 @@ def portal_config(
         {
             "region": region,
             "hosts": {"tenant": tenant_host, "admin": admin_host},
+            "idleTimeoutMinutes": idle_timeout_minutes,
             "pools": {
                 "tenant": pool(tenant_pool, tenant_client, tenant_domain),
                 "platform": pool(platform_pool, platform_client, platform_domain),
@@ -132,12 +134,18 @@ def portal_config(
 
 def content_security_policy(*, region: str, login_domains: Iterable[str]) -> str:
     """Scripts from the portal only. The browser talks to the API (same origin), to the
-    managed login token endpoints, and to Cognito's user API (change password, MFA setup).
+    managed login token endpoints, to Cognito's user API (change password, MFA setup), and
+    (build step 6) to tenant buckets through presigned links: uploads, and step 7's viewer.
+
+    CSP cannot name only the tenant buckets (`<prefix>-t-*` is not a valid source), so the
+    S3 source is every virtual-hosted bucket in the Region (owner decision 11, a known
+    limit). A presigned link reaches one key of one tenant's bucket, for 15 minutes at most.
     """
     connect = [
         "'self'",
         f"https://cognito-idp.{region}.amazonaws.com",
         *sorted(f"https://{d}.auth.{region}.amazoncognito.com" for d in login_domains),
+        f"https://*.s3.{region}.amazonaws.com",
     ]
     directives = {
         "default-src": ["'self'"],
@@ -340,6 +348,7 @@ class Edge(pulumi.ComponentResource):
         load_balancer_security_group: aws.ec2.SecurityGroup,
         logs: EdgeLogs,
         waf_rate_limit: int,
+        portal_idle_minutes: int = 30,
         aws_profile: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
@@ -665,7 +674,11 @@ class Edge(pulumi.ComponentResource):
                 platform_domain=auth.platform.domain.domain,
             ).apply(
                 lambda a: portal_config(
-                    region=region, tenant_host=dns.tenant_host, admin_host=dns.admin_host, **a
+                    region=region,
+                    tenant_host=dns.tenant_host,
+                    admin_host=dns.admin_host,
+                    idle_timeout_minutes=portal_idle_minutes,
+                    **a,
                 )
             ),
             content_type="application/json",

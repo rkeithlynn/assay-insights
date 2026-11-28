@@ -160,3 +160,64 @@ def test_probe_report_passes_only_with_results_all_ok_and_exit_code_zero(
     assert run_isolation.report_probe([], 0) is False
     assert run_isolation.report_probe(good, 1) is False
     assert run_isolation.report_probe(good, None) is False
+
+
+# --- The worker task's probe, as run_isolation.py starts and reads it ------------------------
+
+
+def worker_line(check: str, *, ok: bool, outcome: str = "denied") -> str:
+    return json.dumps(
+        {
+            "level": "INFO",
+            "message": "probe",
+            "check": check,
+            "expected": "denied",
+            "outcome": outcome,
+            "ok": ok,
+        }
+    )
+
+
+def test_worker_probe_is_started_with_the_probe_command_and_its_cases() -> None:
+    cases = {"own": {"document_id": str(TENANT), "attempt": 1, "token": "t" * 43}}
+    [container] = run_isolation.worker_overrides(cases)["containerOverrides"]
+    assert container["name"] == "worker"
+    assert container["environment"][0] == {"name": "WORKER_COMMAND", "value": "probe"}
+    assert container["environment"][1]["name"] == "PROBE_CASES"
+    assert json.loads(container["environment"][1]["value"]) == cases
+
+
+def test_worker_probe_lines_carry_checks_and_the_ready_signal() -> None:
+    ready = json.dumps({"message": "probe", "signal": "ready_for_end", "document_id": "d"})
+    messages = [
+        "not json",
+        json.dumps({"message": "worker finished"}),
+        worker_line("storage: the other tenant's document", ok=True),
+        ready,
+    ]
+    entries = run_isolation.worker_entries(messages)
+    assert len(entries) == 2
+    assert any(e.get("signal") == run_isolation.WORKER_READY_FOR_END for e in entries)
+    # The signal is the probe's own word for it.
+    from assay_workers.worker import probe
+
+    assert run_isolation.WORKER_READY_FOR_END == probe.READY_FOR_END
+    assert run_isolation.WORKER_CONTAINER == "worker"
+
+
+def test_worker_probe_report_passes_only_with_results_all_ok_and_exit_code_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ready = json.dumps({"message": "probe", "signal": "ready_for_end"})
+    good = run_isolation.worker_entries([worker_line("a check", ok=True), ready])
+    bad = run_isolation.worker_entries(
+        [worker_line("a check", ok=True), worker_line("storage: x", ok=False, outcome="allowed")]
+    )
+    assert run_isolation.report_worker_probe(good, 0) is True
+    assert run_isolation.report_worker_probe(bad, 1) is False
+    assert run_isolation.report_worker_probe(good, 1) is False
+    printed = capsys.readouterr().out
+    assert "FAIL  worker task: storage: x (expected denied, was allowed)" in printed
+    # No results is never a pass: a task that never ran proves nothing.
+    assert run_isolation.report_worker_probe([], 0) is False
+    assert run_isolation.report_worker_probe(run_isolation.worker_entries([ready]), 0) is False

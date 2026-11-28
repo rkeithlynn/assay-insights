@@ -16,14 +16,16 @@ COPY pyproject.toml uv.lock ./
 COPY infra/pyproject.toml infra/pyproject.toml
 COPY db/pyproject.toml db/pyproject.toml
 COPY api/pyproject.toml api/pyproject.toml
+COPY schemas/pyproject.toml schemas/pyproject.toml
 COPY tss/pyproject.toml tss/pyproject.toml
+COPY workers/pyproject.toml workers/pyproject.toml
 # Locked, hash-checked, wheels only: nothing is compiled and nothing comes from the host.
 RUN uv export --locked --package assay-tss --extra provision --no-dev --no-emit-workspace \
         --no-header --format requirements-txt -o /tmp/requirements.txt \
-    && uv pip install --python /usr/local/bin/python3 --target /out \
+    && uv pip install --python /usr/local/bin/python3 --target /deps \
         --require-hashes --only-binary :all: -r /tmp/requirements.txt
-COPY db/assay_db /out/assay_db
-COPY tss/assay_tss /out/assay_tss
+COPY db/assay_db /code/assay_db
+COPY tss/assay_tss /code/assay_tss
 
 # Pulumi CLI. Checksum from the release's pulumi-<version>-checksums.txt.
 FROM scratch AS pulumi-cli-archive
@@ -60,7 +62,12 @@ RUN groupadd --system --gid 10001 assay \
     && install -d -m 0700 -o 10001 -g 10001 /work
 COPY --from=rds-ca --chmod=0444 /global-bundle.pem /opt/rds-ca/global-bundle.pem
 COPY --from=pulumi /opt/pulumi /opt/pulumi
-COPY --from=build --chmod=a+rX,go-w /out /app
+# Two layers, in this order (owner, 2026-11-25). The dependencies change only with uv.lock;
+# the code changes with every edit. Copied as one layer, any edit pushed every dependency to
+# ECR again (26 to 53 MB an image). The files and their modes are the same as before:
+# tests/unit/test_image_layers.py holds the installed packages to what they were.
+COPY --from=build --chmod=a+rX,go-w /deps /app
+COPY --from=build --chmod=a+rX,go-w /code /app
 ENV PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

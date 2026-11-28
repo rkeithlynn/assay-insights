@@ -606,6 +606,37 @@ def test_sign_out_and_password_change_are_recorded(
     assert rows[-1][4] == "198.51.100.7"
 
 
+def _sign_out_details(w: World, sub: str) -> list[Any]:
+    with psycopg.connect(w.url) as conn:
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT detail FROM assay.audit_log WHERE action = 'sign_out' AND target_id = %s "
+                "ORDER BY at",
+                (str(w.users[sub]),),
+            ).fetchall()
+        ]
+
+
+@pytest.mark.parametrize("sub", ["a-user", "m-admin"])
+def test_an_idle_sign_out_is_told_apart_from_a_manual_one(world: World, sub: str) -> None:
+    """Owner decision (2026-11-24): the portal's idle timeout records its own reason."""
+    before = len(_sign_out_details(world, sub))
+    headers = {"Authorization": f"Bearer {token(world, sub)}", **VIEWER}
+    for body in (None, {"reason": "user"}, {"reason": "idle_timeout", "idle_minutes": 30}):
+        response = world.client.post("/api/auth/signed-out", headers=headers, json=body)
+        assert response.status_code == 204, response.text
+    assert _sign_out_details(world, sub)[before:] == [
+        {"reason": "user", "reported_by": "portal"},
+        {"reason": "user", "reported_by": "portal"},
+        {"reason": "idle_timeout", "reported_by": "portal", "idle_minutes": 30},
+    ]
+    for bad in ({"reason": "admin"}, {"reason": "user", "extra": 1}, {"idle_minutes": 0}):
+        response = world.client.post("/api/auth/signed-out", headers=headers, json=bad)
+        assert response.status_code == 422, bad
+    assert len(_sign_out_details(world, sub)) == before + 3
+
+
 # --- Session start (the sign-in's origin) and MFA enrolment ------------------------------------
 
 

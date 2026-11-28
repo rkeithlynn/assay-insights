@@ -38,14 +38,27 @@ class StorageStatus(StrEnum):
 
 
 class StorageAccess(StrEnum):
-    """What the credentials may do. Each maps to one session policy (assay_tss.policies)."""
+    """What the credentials may do. Each maps to one session policy (assay_tss.policies).
 
-    # Read objects and query vectors.
+    No access may list a bucket: callers work from database rows and scan events, never from
+    a listing. Only PIPELINE may read `inbox/` and `quarantine/` (unscanned and infected
+    files), current or noncurrent versions.
+    """
+
+    # Read objects under originals/, derived/ and chat/, and query vectors.
     READ = "read"
     # Write new objects under inbox/ only. For presigned upload links.
     UPLOAD = "upload"
     # The ingestion pipeline: read and write objects and vectors, use the face collection.
     PIPELINE = "pipeline"
+    # The pipeline's worker task, for one document's attempt (build step 6, second half):
+    # that document's own keys and nothing else. Never asked for by name: issued only by
+    # `/resolve-worker`, against a live attempt grant, for the tenant the grant's row names.
+    WORKER = "worker"
+
+
+# What a caller may ask `resolve` for by name. WORKER is not among them.
+REQUESTABLE_ACCESS = (StorageAccess.READ, StorageAccess.UPLOAD, StorageAccess.PIPELINE)
 
 
 def source_identity(service: str, job: str) -> str:
@@ -76,6 +89,28 @@ class ResolveRequest(BaseModel):
     @classmethod
     def _valid_source_identity(cls, value: str) -> str:
         check_source_identity(value)
+        return value
+
+
+# A worker's token: `secrets.token_urlsafe` text. Never a colon (assay_db.grants).
+_TOKEN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+
+
+class WorkerResolveRequest(BaseModel):
+    """What the worker task presents to `/resolve-worker`. It names no tenant: the TSS takes
+    the tenant from the grant's row. The token is never logged or echoed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    document_id: uuid.UUID
+    attempt: int = Field(ge=1, le=100_000)
+    token: SecretStr
+
+    @field_validator("token")
+    @classmethod
+    def _valid_token(cls, value: SecretStr) -> SecretStr:
+        if not _TOKEN.match(value.get_secret_value()):
+            raise ValueError("not a worker token")
         return value
 
 
@@ -137,6 +172,8 @@ class StorageContext(BaseModel):
     vector_index: str
     face_collection: str
     credentials: Credentials
+    # A WORKER context only: the one document its credentials reach.
+    document_id: uuid.UUID | None = None
 
     # --- AWS clients ---------------------------------------------------------------------
 
@@ -175,6 +212,9 @@ class StorageContext(BaseModel):
 
     def quarantine_key(self, doc_id: uuid.UUID) -> str:
         return keys.quarantine_key(doc_id)
+
+    def quarantine_companion_key(self, file_id: uuid.UUID) -> str:
+        return keys.quarantine_companion_key(file_id)
 
     def text_key(self, doc_id: uuid.UUID) -> str:
         return keys.text_key(doc_id)

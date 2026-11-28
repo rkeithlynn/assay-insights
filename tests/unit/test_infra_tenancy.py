@@ -26,14 +26,17 @@ from assay_infra.database import Database
 from assay_infra.isolation import IsolationRunner, runner_role
 from assay_infra.network import Network
 from assay_infra.provisioning import Provisioning
-from assay_infra.tss import TenantStorage
+from assay_infra.tss import TenantStorage, TssCaller
+from assay_tss import keys as tss_keys
 from assay_tss import policies
-from tests.unit.conftest import ACCOUNT_ID, REGION, registered
+from assay_tss.provision import program
+from tests.unit.conftest import ACCOUNT_ID, REGION, after_settled, registered
 from tests.unit.test_infra_auth_api import AUTH, DNS, FAKE_JWKS
 from tests.unit.test_infra_data import DB, NET
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "assay-dev"
+TEXTRACT_ENDPOINT = "vpce-0textract0000000"
 BREAK_GLASS_PRINCIPAL = f"arn:aws:iam::{ACCOUNT_ID}:role/aws-reserved/sso.amazonaws.com/Admin"
 TAGS = {"app": "assay-insights", "env": "dev"}
 ROLE = f"arn:aws:iam::{ACCOUNT_ID}:role"
@@ -119,7 +122,14 @@ def _one(type_token: str, name: str) -> dict[str, Any]:
 
 
 class Stack:
-    def __init__(self, prefix: str, *, with_runner: bool = True) -> None:
+    def __init__(
+        self,
+        prefix: str,
+        *,
+        with_runner: bool = True,
+        tss_reserved: int | None = None,
+        scan_inbox_only: bool = False,
+    ) -> None:
         self.prefix = prefix
         # Resources named after the platform prefix (the tenant role, the break-glass role,
         # the scan role, the Cognito admin Lambda) must be unique to each test's stack.
@@ -149,9 +159,12 @@ class Stack:
             auth_event_lambda_arn=self.auth_events.trigger_function.arn,
             jwks_fetcher=lambda region, pool_id: FAKE_JWKS,
         )
-        callers = {}
+        callers: dict[str, TssCaller] = {}
         if with_runner:
-            callers[isolation.SERVICE_NAME] = runner_role(f"{prefix}-isolation", ACCOUNT_ID)
+            callers[isolation.SERVICE_NAME] = TssCaller(
+                role=runner_role(f"{prefix}-isolation", ACCOUNT_ID),
+                access=("pipeline", "read", "upload"),
+            )
         self.storage = TenantStorage(
             f"{prefix}-tss",
             repo_root=REPO_ROOT,
@@ -164,6 +177,7 @@ class Stack:
             break_glass_principal_arn=BREAK_GLASS_PRINCIPAL,
             alarm_topic_arn=self.alerts.topic.arn,
             callers=callers,
+            reserved_concurrency=tss_reserved,
         )
         self.provisioning = Provisioning(
             f"{prefix}-provision",
@@ -179,6 +193,8 @@ class Stack:
             vector_dimensions=1024,
             default_tags=TAGS,
             default_models=DEFAULT_MODELS,
+            upload_origins=["https://example.test"],
+            scan_inbox_only=scan_inbox_only,
             platform_key_arns=[self.database.key.arn, self.alerts.key.arn],
             alarm_topic_arn=self.alerts.topic.arn,
         )
@@ -201,7 +217,7 @@ class Stack:
         if with_runner:
             self.runner = IsolationRunner(
                 f"{prefix}-isolation",
-                role=callers[isolation.SERVICE_NAME],
+                role=callers[isolation.SERVICE_NAME].role,
                 repo_root=REPO_ROOT,
                 region=REGION,
                 account_id=ACCOUNT_ID,
@@ -213,10 +229,11 @@ class Stack:
                 tenant_role_arn=self.storage.tenant_role.arn,
                 invite_function_arn=self.provisioning.invite_function.arn,
                 api_cognito_function_arn=self.cognito_admin_api.function.arn,
+                textract_endpoint_id=TEXTRACT_ENDPOINT,
             )
 
     def ready(self) -> pulumi.Output[list[Any]]:
-        """Resolves once everything the checks read is registered with the mocks."""
+        """These outputs, once every resource of the test is registered with the mocks."""
         outputs: list[pulumi.Output[Any]] = [
             self.storage.stage.id,
             self.storage.function.id,
@@ -234,7 +251,7 @@ class Stack:
         ]
         if self.runner is not None:
             outputs.append(self.runner.function.id)
-        return pulumi.Output.all(*outputs)
+        return after_settled(*outputs)
 
     def topic_arn(self) -> str:
         """The alarm topic's ARN, as the mocks build it."""
@@ -257,6 +274,7 @@ def tenancy(**changes: Any) -> TenancyConfig:
         "break_glass_principal_arn": BREAK_GLASS_PRINCIPAL,
         "vector_dimensions": 1024,
         "isolation_tests": False,
+        "scan_inbox_only": False,
         "default_tags": TAGS,
     }
     return TenancyConfig(**(values | changes))
@@ -770,6 +788,27 @@ def test_scan_role_trust_requires_this_account_as_source() -> None:
     assert statement["Condition"] == {"StringEquals": {"aws:SourceAccount": ACCOUNT_ID}}
 
 
+def test_only_the_api_gateway_logging_role_admits_a_call_with_no_source_account() -> None:
+    """The one role whose trust is `IfExists` (proven necessary on 2026-11-25)."""
+    trust = json.loads(tss.api_logs_trust_policy(ACCOUNT_ID))
+    [statement] = trust["Statement"]
+    assert statement["Effect"] == "Allow"
+    assert statement["Principal"] == {"Service": "apigateway.amazonaws.com"}
+    assert statement["Action"] == "sts:AssumeRole"
+    # Another account's ID is still refused; only a call with none is admitted.
+    assert statement["Condition"] == {"StringEqualsIfExists": {"aws:SourceAccount": ACCOUNT_ID}}
+
+    [other] = json.loads(tss._service_trust("lambda.amazonaws.com", ACCOUNT_ID))["Statement"]
+    assert other["Condition"] == {"StringEquals": {"aws:SourceAccount": ACCOUNT_ID}}
+
+    source = (REPO_ROOT / "infra").rglob("*.py")
+    users = [p.name for p in source if "IfExists" in p.read_text(encoding="utf-8")]
+    assert users == ["tss.py"]
+    assert (REPO_ROOT / "infra/assay_infra/tss.py").read_text(encoding="utf-8").count(
+        "IfExists"
+    ) == 1
+
+
 def test_scan_role_reads_and_tags_tenant_buckets_only() -> None:
     policy = json.loads(
         provisioning.scan_role_policy(region=REGION, account_id=ACCOUNT_ID, name_prefix=PREFIX)
@@ -787,6 +826,120 @@ def test_scan_role_reads_and_tags_tenant_buckets_only() -> None:
     assert put["Resource"].endswith("/malware-protection-resource-validation-object")
     key = by_sid(policy, "AllowDecryptForMalwareScan")
     assert key["Condition"]["Null"] == {"aws:ResourceTag/tenant_id": "false"}
+
+
+SCAN_OBJECT_STATEMENTS = {"AllowMalwareScan", "AllowPostScanTag"}
+SCAN_OBJECT_ACTIONS = (
+    "s3:GetObject",
+    "s3:GetObjectVersion",
+    "s3:GetObjectTagging",
+    "s3:GetObjectVersionTagging",
+    "s3:PutObjectTagging",
+    "s3:PutObjectVersionTagging",
+)
+A_TENANT_BUCKET = "arn:aws:s3:::assay-dev-t-0a1b2c3d"
+A_DOCUMENT = "955f3e3d-f39a-5962-bc37-4b37ae1a44c6"
+
+
+def scan_policy(*, inbox_only: bool) -> dict[str, Any]:
+    document: dict[str, Any] = json.loads(
+        provisioning.scan_role_policy(
+            region=REGION, account_id=ACCOUNT_ID, name_prefix=PREFIX, inbox_only=inbox_only
+        )
+    )
+    return document
+
+
+def test_the_inbox_switch_changes_exactly_the_two_statements_that_reach_objects() -> None:
+    """Owner, 2026-11-27: only `AllowMalwareScan` and `AllowPostScanTag` change. Listing the
+    bucket, the validation object, the notification settings, the managed rule and the key
+    statement are the same with the switch on and off."""
+    wide, narrow = scan_policy(inbox_only=False), scan_policy(inbox_only=True)
+    pairs = list(zip(wide["Statement"], narrow["Statement"], strict=True))
+    assert {before["Sid"] for before, after in pairs if before != after} == SCAN_OBJECT_STATEMENTS
+    for sid in SCAN_OBJECT_STATEMENTS:
+        before, after = by_sid(wide, sid), by_sid(narrow, sid)
+        assert before["Resource"] == "arn:aws:s3:::assay-dev-t-*/*"
+        assert after["Resource"] == "arn:aws:s3:::assay-dev-t-*/inbox/*"
+        # Only where it reaches changes, never what it may do there.
+        assert {k: v for k, v in before.items() if k != "Resource"} == {
+            k: v for k, v in after.items() if k != "Resource"
+        }
+    assert by_sid(narrow, "AllowCheckBucketOwnership") == {
+        "Sid": "AllowCheckBucketOwnership",
+        "Effect": "Allow",
+        "Action": "s3:ListBucket",
+        "Resource": "arn:aws:s3:::assay-dev-t-*",
+    }
+    assert by_sid(narrow, "AllowPutValidationObject") == {
+        "Sid": "AllowPutValidationObject",
+        "Effect": "Allow",
+        "Action": "s3:PutObject",
+        "Resource": "arn:aws:s3:::assay-dev-t-*/malware-protection-resource-validation-object",
+    }
+    # The default is the policy as it was: a caller that does not ask gets no narrowing.
+    assert (
+        json.loads(
+            provisioning.scan_role_policy(region=REGION, account_id=ACCOUNT_ID, name_prefix=PREFIX)
+        )
+        == wide
+    )
+
+
+def test_with_the_switch_on_the_scan_role_reaches_uploads_and_no_other_object() -> None:
+    """What the role may read and tag is what a tenant's protection plan scans: `inbox/`.
+    Originals, text objects, quarantined files and chat files are out of its reach."""
+    assert program.SCANNED_PREFIXES == (tss_keys.INBOX_PREFIX,) == ("inbox/",)
+    narrow, wide = scan_policy(inbox_only=True), scan_policy(inbox_only=False)
+    upload = f"{A_TENANT_BUCKET}/inbox/{A_DOCUMENT}/{A_DOCUMENT}"
+    elsewhere = [
+        f"{A_TENANT_BUCKET}/originals/{A_DOCUMENT}.pdf",
+        f"{A_TENANT_BUCKET}/originals/{A_DOCUMENT}.companion.json",
+        f"{A_TENANT_BUCKET}/derived/text/{A_DOCUMENT}.json",
+        f"{A_TENANT_BUCKET}/quarantine/{A_DOCUMENT}.pdf",
+        f"{A_TENANT_BUCKET}/chat/{A_DOCUMENT}",
+        # Not under the prefix, though it begins with the same letters.
+        f"{A_TENANT_BUCKET}/inbox-other/{A_DOCUMENT}",
+        f"{A_TENANT_BUCKET}/inbox",
+    ]
+    for action in SCAN_OBJECT_ACTIONS:
+        assert decide(narrow, action, upload, {}) == "allowed", action
+        for resource in elsewhere:
+            assert decide(narrow, action, resource, {}) == "implicitDeny", (action, resource)
+            # The control: with the switch off the same request is allowed.
+            assert decide(wide, action, resource, {}) == "allowed", (action, resource)
+    # Unchanged with the switch on: the bucket check and the validation object.
+    validation = f"{A_TENANT_BUCKET}/malware-protection-resource-validation-object"
+    assert decide(narrow, "s3:ListBucket", A_TENANT_BUCKET, {}) == "allowed"
+    assert decide(narrow, "s3:PutObject", validation, {}) == "allowed"
+    assert decide(narrow, "s3:PutObject", upload, {}) == "implicitDeny"
+    # Never, on or off: another account's or another project's bucket.
+    for policy in (narrow, wide):
+        other = f"arn:aws:s3:::someone-elses-bucket/inbox/{A_DOCUMENT}/{A_DOCUMENT}"
+        assert decide(policy, "s3:GetObject", other, {}) == "implicitDeny"
+
+
+@pulumi.runtime.test
+def test_the_stack_switch_decides_how_far_the_scan_role_reaches() -> Any:
+    narrowed = Stack("sr1", scan_inbox_only=True)
+    plain = Stack("sr0")
+
+    def check(_: list[Any]) -> None:
+        role_policy = "aws:iam/rolePolicy:RolePolicy"
+        on = json.loads(_one(role_policy, "assay-sr1-malware-scan-policy")["policy"])
+        off = json.loads(_one(role_policy, "assay-sr0-malware-scan-policy")["policy"])
+        for sid in SCAN_OBJECT_STATEMENTS:
+            assert by_sid(on, sid)["Resource"] == "arn:aws:s3:::assay-sr1-t-*/inbox/*"
+            assert by_sid(off, sid)["Resource"] == "arn:aws:s3:::assay-sr0-t-*/*"
+
+    return after_settled(narrowed.ready(), plain.ready()).apply(check)
+
+
+def test_the_dev_stack_limits_the_scan_role_to_the_inbox() -> None:
+    """On in Development (owner, 2026-11-27). The way back is this one key set to "false"."""
+    text = (REPO_ROOT / "infra" / "Pulumi.dev.yaml").read_text(encoding="utf-8")
+    assert 'assay-platform:malwareScanInboxOnly: "true"' in text
+    assert tenancy(scan_inbox_only=True).scan_inbox_only is True
 
 
 def test_state_objects_are_readable_only_by_the_provisioning_role() -> None:
@@ -1003,6 +1156,43 @@ def test_tenant_role_trusts_only_the_tss_and_uses_the_one_template() -> Any:
 
 
 @pulumi.runtime.test
+def test_the_access_logs_role_keeps_the_trust_that_lets_api_gateway_write() -> Any:
+    """With `StringEquals` the access log received nothing for two days (2026-11-25):
+    API Gateway sends no source account when it assumes the role to write a log entry.
+    Do not "tidy" this role back to the form every other service role has."""
+    stack = Stack("t1a")
+
+    def check(_: list[Any]) -> None:
+        role = _one("aws:iam/role:Role", "t1a-tss-api-logs-role")
+        assert json.loads(role["assumeRolePolicy"]) == {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "apigateway.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                    "Condition": {"StringEqualsIfExists": {"aws:SourceAccount": ACCOUNT_ID}},
+                }
+            ],
+        }
+        # It is the role the account setting names, and it has the managed policy alone.
+        attachment = _one(
+            "aws:iam/rolePolicyAttachment:RolePolicyAttachment", "t1a-tss-api-logs-policy"
+        )
+        assert attachment["policyArn"] == tss.API_GATEWAY_LOGS_POLICY
+        assert _one("aws:apigateway/account:Account", "t1a-tss-api-account")
+        # No other role in the stack has the wider form.
+        wider = [
+            name
+            for name, inputs in registered("aws:iam/role:Role", "t1a-")
+            if "IfExists" in inputs["assumeRolePolicy"]
+        ]
+        assert wider == ["t1a-tss-api-logs-role"]
+
+    return stack.ready().apply(check)
+
+
+@pulumi.runtime.test
 def test_tss_lambda_runs_in_the_vpc_as_database_role_tss() -> Any:
     stack = Stack("t2")
 
@@ -1015,7 +1205,12 @@ def test_tss_lambda_runs_in_the_vpc_as_database_role_tss() -> Any:
         variables = function["environment"]["variables"]
         assert variables["NAME_PREFIX"] == stack.name_prefix
         assert variables["TENANT_ROLE_ARN"] == f"{ROLE}/{stack.name_prefix}-tenant"
-        assert json.loads(variables["TSS_CALLERS"]) == {"t2-isolation-role-a1b2c3d": "isolation"}
+        assert json.loads(variables["TSS_CALLERS"]) == {
+            "t2-isolation-role-a1b2c3d": {
+                "service": "isolation",
+                "access": ["pipeline", "read", "upload"],
+            }
+        }
         assert variables["AWS_STS_REGIONAL_ENDPOINTS"] == "regional"
 
         policy = _one("aws:iam/rolePolicy:RolePolicy", "t2-tss-role-policy")["policy"]
@@ -1027,6 +1222,22 @@ def test_tss_lambda_runs_in_the_vpc_as_database_role_tss() -> Any:
         assert services == {"logs", "ec2", "rds-db", "sts"}  # no S3, no KMS: it holds no data
 
     return stack.ready().apply(check)
+
+
+@pulumi.runtime.test
+def test_the_tss_keeps_a_share_of_the_accounts_concurrency_when_the_stack_says_so() -> Any:
+    """Owner decision, 2026-11-25. On that day scan functions held every slot the account
+    had, each waiting for a TSS call that could not get one. A reservation is capacity no
+    other function can take (and the most the TSS will use)."""
+    reserved = Stack("t2r", tss_reserved=300)
+    plain = Stack("t2u")
+
+    def check(_: list[Any]) -> None:
+        key = "reservedConcurrentExecutions"
+        assert _one("aws:lambda/function:Function", "t2r-tss-fn")[key] == 300
+        assert _one("aws:lambda/function:Function", "t2u-tss-fn").get(key) is None
+
+    return after_settled(reserved.ready(), plain.ready()).apply(check)
 
 
 @pulumi.runtime.test
@@ -1073,6 +1284,10 @@ def test_tss_api_is_private_with_iam_authorization() -> Any:
             "t3-tss-api-resolve-lambda-id",
             _one("aws:apigateway/integration:Integration", "t3-tss-api-resolve-lambda")["uri"],
             portable,
+            # The worker task's route (build step 6, second half).
+            "t3-tss-api-resolve-worker-id",
+            "t3-tss-api-resolve-worker-post-id",
+            "t3-tss-api-resolve-worker-lambda-id",
         ]
         expected = hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
         assert deployment["triggers"] == {"redeploy": expected}
@@ -1092,6 +1307,22 @@ def test_tss_api_is_private_with_iam_authorization() -> Any:
         ]
         assert permission["principal"] == "apigateway.amazonaws.com"
         assert permission["sourceArn"].endswith("/*/POST/resolve")
+
+        # The worker task's route: the same authorization, its own method and permission.
+        worker = _one("aws:apigateway/method:Method", "t3-tss-api-resolve-worker-post")
+        assert (worker["httpMethod"], worker["authorization"]) == ("POST", "AWS_IAM")
+        assert (
+            _one("aws:apigateway/resource:Resource", "t3-tss-api-resolve-worker")["pathPart"]
+            == "resolve-worker"
+        )
+        [worker_permission] = [
+            inputs
+            for name, inputs in registered("aws:lambda/permission:Permission")
+            if name == "t3-tss-api-invoke-worker"
+        ]
+        assert worker_permission["sourceArn"].endswith("/*/POST/resolve-worker")
+        # With no worker caller in this stack, no one is admitted to it.
+        assert "resolve-worker" not in attached["policy"]
 
         caller = _one("aws:iam/rolePolicy:RolePolicy", "t3-tss-caller-isolation")["policy"]
         [statement] = json.loads(caller)["Statement"]
@@ -1355,6 +1586,7 @@ def test_runner_probes_are_limited_to_tenant_resources() -> None:
             log_group="arn:logs",
             db_user="arn:dbuser/app_tenant",
             tenant_role=f"{ROLE}/{PREFIX}-tenant",
+            textract_endpoint=TEXTRACT_ENDPOINT,
         )
     )
     keys = by_sid(policy, "ProbeTenantKeys")
@@ -1364,7 +1596,25 @@ def test_runner_probes_are_limited_to_tenant_resources() -> None:
     assert all("assay-dev-t-*" in r for r in buckets["Resource"])
     services = {a.split(":")[0] for s in policy["Statement"] for a in as_list(s["Action"])}
     # No Rekognition (a collection has no resource policy to refuse it) and no Lambda.
-    assert services == {"logs", "ec2", "rds-db", "sts", "s3", "kms", "s3vectors"}
+    # Textract since stage 2 (owner, 2026-11-27, permission 3): the worker task's own
+    # permission, with the same condition, so that the Textract endpoint's policy is the only
+    # thing that can refuse the runner.
+    assert services == {"logs", "ec2", "rds-db", "sts", "s3", "kms", "s3vectors", "textract"}
+    from assay_infra.pipeline import textract_statement, worker_role_policy
+
+    probe = by_sid(policy, "ProbeTextractEndpoint")
+    worker = by_sid(
+        json.loads(worker_role_policy(db_user="arn:db", textract_endpoint=TEXTRACT_ENDPOINT)),
+        "ReadPagesWithTextract",
+    )
+    assert {k: v for k, v in probe.items() if k != "Sid"} == {
+        k: v for k, v in worker.items() if k != "Sid"
+    }
+    assert probe["Condition"] == {"StringEquals": {"aws:SourceVpce": TEXTRACT_ENDPOINT}}
+    assert probe == textract_statement("ProbeTextractEndpoint", TEXTRACT_ENDPOINT)
+    assert [a for s in policy["Statement"] for a in as_list(s["Action"]) if "textract" in a] == [
+        "textract:DetectDocumentText"
+    ]
     assert by_sid(policy, "ConnectAsAppTenant")["Resource"].endswith("/app_tenant")
 
 
@@ -1541,6 +1791,148 @@ def test_alarm_topic_is_encrypted_and_emails_the_configured_address() -> Any:
         for name, inputs in alarms:
             assert inputs.get("alarmActions") == [stack.topic_arn()], name
 
-    return pulumi.Output.all(
-        stack.ready(), stack.alerts.subscription.id, stack.alerts.topic.arn
+    return after_settled(stack.ready(), stack.alerts.subscription.id, stack.alerts.topic.arn).apply(
+        check
+    )
+
+
+# --- The worker task's route: its own, and no one else's (build step 6, second half) -----------
+
+WORKER_ROLE = f"{ROLE}/pl-pipeline-worker-task-role-9f8e7d"
+API_ROLE = f"{ROLE}/pl-api-task-role-1a2b3c"
+STEPS_ROLE = f"{ROLE}/pl-pipeline-steps-role-4d5e6f"
+ENDPOINT = "vpce-0123456789abcdef0"
+
+
+def test_each_caller_is_admitted_to_its_own_route_only() -> None:
+    api_arn = f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:abc123"
+    policy = json.loads(
+        tss.api_resource_policy(
+            vpc_endpoint_id=ENDPOINT,
+            callers=[STEPS_ROLE, API_ROLE],
+            worker_callers=[WORKER_ROLE],
+            execution_arn=api_arn,
+        )
+    )
+    assert [s["Sid"] for s in policy["Statement"]] == [
+        "OnlyThroughTheVpcEndpoint",
+        "KnownCallers",
+        "WorkerTask",
+    ]
+    known, worker = by_sid(policy, "KnownCallers"), by_sid(policy, "WorkerTask")
+    assert known["Resource"] == f"{api_arn}/v1/POST/resolve"
+    assert known["Principal"] == {"AWS": sorted([API_ROLE, STEPS_ROLE])}
+    assert WORKER_ROLE not in json.dumps(known)
+    assert worker["Resource"] == f"{api_arn}/v1/POST/resolve-worker"
+    # One caller: a string, as AWS stores it.
+    assert worker["Principal"] == {"AWS": WORKER_ROLE}
+    assert API_ROLE not in json.dumps(worker) and STEPS_ROLE not in json.dumps(worker)
+    # The portable form (the redeploy fingerprint) names both routes too.
+    portable = json.loads(
+        tss.api_resource_policy(
+            vpc_endpoint_id=ENDPOINT, callers=[API_ROLE], worker_callers=[WORKER_ROLE]
+        )
+    )
+    assert by_sid(portable, "WorkerTask")["Resource"] == "execute-api:/v1/POST/resolve-worker"
+
+
+def test_a_callers_own_policy_names_its_one_route() -> None:
+    api_arn = f"arn:aws:execute-api:{REGION}:{ACCOUNT_ID}:abc123"
+    [resolve] = json.loads(tss.invoke_policy(api_arn))["Statement"]
+    assert resolve["Resource"] == f"{api_arn}/v1/POST/resolve"
+    [worker] = json.loads(tss.invoke_policy(api_arn, tss.WORKER_PATH))["Statement"]
+    assert worker["Resource"] == f"{api_arn}/v1/POST/resolve-worker"
+    assert worker["Action"] == resolve["Action"] == "execute-api:Invoke"
+
+
+def test_worker_access_is_never_combined_with_another() -> None:
+    role: Any = object()
+    worker = TssCaller(role=role, access=("worker",))
+    assert worker.is_worker and worker.path == "resolve-worker"
+    api = TssCaller(role=role, access=("read", "upload"))
+    assert not api.is_worker and api.path == "resolve"
+    tss.check_callers({"worker": worker, "api": api})
+    for mixed in (("worker", "pipeline"), ("pipeline", "read", "upload", "worker")):
+        with pytest.raises(ValueError, match="worker access cannot be combined"):
+            tss.check_callers({"runner": TssCaller(role=role, access=mixed)})
+
+
+def test_the_tss_is_told_each_callers_accesses() -> None:
+    role: Any = object()
+    grants = json.loads(
+        tss.caller_grants(
+            {"worker": "pl-worker-role", "api": "pl-api-role"},
+            {
+                "worker": TssCaller(role=role, access=("worker",)),
+                "api": TssCaller(role=role, access=("upload", "read")),
+            },
+        )
+    )
+    assert grants == {
+        "pl-worker-role": {"service": "worker", "access": ["worker"]},
+        "pl-api-role": {"service": "api", "access": ["read", "upload"]},
+    }
+
+
+# --- Policies that name a role created in the same run wait for IAM (2026-11-25) --------------
+
+
+@pulumi.runtime.test
+def test_policies_that_name_new_roles_wait_for_iam_to_know_them() -> Any:
+    """The first `pulumi up` of the second half failed: the TSS API's policy named the worker
+    task's role a moment after it was created, and API Gateway did not know it yet. Each
+    such policy now depends on a wait that runs once the roles exist."""
+    from assay_infra import propagation
+
+    stack = Stack("t9")
+
+    def check(_: list[Any]) -> None:
+        waits = {
+            name: inputs
+            for name, inputs in registered("command:local:Command", "t9-")
+            if name.endswith("-iam-propagation")
+        }
+        assert set(waits) == {"t9-tss-iam-propagation", "t9-provision-iam-propagation"}
+        for inputs in waits.values():
+            # It only waits: no AWS call, nothing to delete, nothing on an ordinary run.
+            assert inputs["create"] == propagation.WAIT == "import time; time.sleep(30)"
+            assert inputs["interpreter"][-2:] == ["python", "-c"]
+            assert "delete" not in inputs and "update" not in inputs
+        # It runs again when, and only when, the roles it waited for change.
+        [tss_roles] = waits["t9-tss-iam-propagation"]["triggers"]
+        assert len(tss_roles) == 2 and tss_roles == sorted(tss_roles)
+        assert any("t9-tss-role" in arn for arn in tss_roles)
+        assert any("t9-isolation-role" in arn for arn in tss_roles)
+        [provision_roles] = waits["t9-provision-iam-propagation"]["triggers"]
+        assert len(provision_roles) == 1 and "t9-provision-task-role" in provision_roles[0]
+
+    return after_settled(
+        stack.ready(), stack.storage.iam_ready.id, stack.provisioning.iam_ready.id
     ).apply(check)
+
+
+def test_each_policy_with_a_new_role_as_principal_depends_on_the_wait() -> None:
+    """Read from the source: the three resources whose policy names, as a principal, a role
+    this program creates. (A dependency is not among a resource's inputs, so the mocks
+    cannot show it.)"""
+    tss_source = (REPO_ROOT / "infra" / "assay_infra" / "tss.py").read_text(encoding="utf-8")
+    provisioning_source = (REPO_ROOT / "infra" / "assay_infra" / "provisioning.py").read_text(
+        encoding="utf-8"
+    )
+    waiting = "depends_on=[self.iam_ready]"
+
+    def options_of(source: str, resource: str) -> str:
+        start = source.index(resource)
+        return source[start : source.index("\n        )\n", start)]
+
+    assert waiting in options_of(tss_source, "self.api_policy = aws.apigateway.RestApiPolicy(")
+    assert waiting in options_of(tss_source, "self.tenant_role = aws.iam.Role(")
+    state_key = options_of(provisioning_source, "self.state_key = aws.kms.Key(")
+    assert waiting in state_key and "protect=True" in state_key
+
+
+def test_a_wait_needs_a_role() -> None:
+    from assay_infra import propagation
+
+    with pytest.raises(ValueError, match="at least one role"):
+        propagation.iam_propagation("w", roles=[], repo_root=REPO_ROOT)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,77 @@ _ERROR_LINE = re.compile(r"^\s*(?:error|Error):\s*(.+)$", re.MULTILINE)
 
 class StackError(RuntimeError):
     """The tenant's stack did not converge. The message is short and safe to record."""
+
+
+@dataclass(frozen=True)
+class PlannedChange:
+    """One resource a preview would change.
+
+    - `diffs`: the changed top-level properties, as the engine reports them. They can include
+      outputs the provider will recompute (a computed attribute marked unknown for the update).
+    - `inputs`: the top-level inputs the program sends for the resource.
+    - `input_diffs`: the top-level properties the provider's detailed diff marks as input
+      differences.
+    - `outputs`: for each changed property the program does not send (an output), its value
+      before and after, as text (`UNKNOWN` when it is known only after the update).
+    """
+
+    urn: str
+    name: str
+    type: str
+    op: str
+    diffs: tuple[str, ...] = ()
+    inputs: tuple[str, ...] = ()
+    input_diffs: tuple[str, ...] = ()
+    outputs: tuple[tuple[str, str, str], ...] = ()
+
+
+# Preview steps that change nothing.
+UNCHANGED_OPS = frozenset({"same", "read"})
+# Pulumi's placeholder for a value known only after the update.
+UNKNOWN_SENTINEL = "04da6b54-80e4-46f7-96ec-b56ff0331ba9"
+UNKNOWN = "(known after update)"
+MAX_VALUE = 200
+
+
+def _top(path: str) -> str:
+    """`protectedResource.s3Bucket.objectPrefixes[0]` -> `protectedResource`."""
+    return path.split(".", 1)[0].split("[", 1)[0]
+
+
+def _value(state: Any, key: str) -> str:
+    outputs = getattr(state, "outputs", None) or {}
+    if key not in outputs:
+        return UNKNOWN if state is not None else "(none)"
+    value = outputs[key]
+    if value == UNKNOWN_SENTINEL:
+        return UNKNOWN
+    return str(value)[:MAX_VALUE]
+
+
+def planned_change(meta: Any) -> PlannedChange:
+    """A PlannedChange from an engine step's metadata (assay_tss automation events)."""
+    op = str(meta.op.value if hasattr(meta.op, "value") else meta.op)
+    diffs = tuple(sorted(meta.diffs or ()))
+    new_inputs = getattr(meta.new, "inputs", None) or {}
+    inputs = tuple(sorted(new_inputs))
+    detailed = meta.detailed_diff or {}
+    input_diffs = tuple(
+        sorted({_top(path) for path, d in detailed.items() if getattr(d, "input_diff", False)})
+    )
+    outputs = tuple(
+        (key, _value(meta.old, key), _value(meta.new, key)) for key in diffs if key not in inputs
+    )
+    return PlannedChange(
+        urn=meta.urn,
+        name=meta.urn.rsplit("::", 1)[-1],
+        type=meta.type,
+        op=op,
+        diffs=diffs,
+        inputs=inputs,
+        input_diffs=input_diffs,
+        outputs=outputs,
+    )
 
 
 @dataclass(frozen=True)
@@ -131,6 +202,34 @@ class StackRunner:
         except auto.CommandError as exc:
             raise StackError(summarise(exc)) from exc
         return {str(op): count for op, count in result.change_summary.items()}
+
+    def plan(self, tenant_id: uuid.UUID) -> list[PlannedChange]:
+        """Every change `up` would make, resource by resource (a preview: changes nothing)."""
+        changes: list[PlannedChange] = []
+
+        def collect(event: auto.EngineEvent) -> None:
+            pre = event.resource_pre_event
+            if pre is None:
+                return
+            change = planned_change(pre.metadata)
+            if change.op not in UNCHANGED_OPS:
+                changes.append(change)
+
+        try:
+            self._stack(tenant_id).preview(color="never", on_event=collect)
+        except auto.CommandError as exc:
+            raise StackError(summarise(exc)) from exc
+        return changes
+
+    def apply(self, tenant_id: uuid.UUID, urns: Sequence[str]) -> StackOutputs:
+        """`up` limited to these resources (`--target`): nothing else can change."""
+        try:
+            stack = self._stack(tenant_id)
+            stack.up(on_output=self._log_line, color="never", target=list(urns))
+            outputs = stack.outputs()
+        except auto.CommandError as exc:
+            raise StackError(summarise(exc)) from exc
+        return self._outputs(outputs)
 
     @staticmethod
     def _outputs(outputs: Mapping[str, Any]) -> StackOutputs:

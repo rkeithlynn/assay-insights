@@ -9,6 +9,9 @@ One module, so the pieces can be read and tested together:
   whose `tenant_id` tag equals its own.
 - `session_policy`: the inline policy passed to AssumeRole. It names the exact bucket, key,
   index and collection, and narrows the actions to what the caller asked for.
+- `worker_session_policy`: the same for the pipeline's worker task, narrowed further to one
+  document's own object keys. In the inbox that is one object, the PDF's upload
+  (`worker_pdf_upload_keys`), never a companion file's.
 - `tenant_bucket_policy` and `tenant_key_policy`: the resource side. They deny or withhold
   access from every principal except the four named in `Principals`, each for its own job.
 - `tenant_vector_bucket_policy`: the same for the vector bucket, admitting only the tenant
@@ -23,6 +26,8 @@ cannot change.
 from __future__ import annotations
 
 import json
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +51,9 @@ SESSION_POLICY_MAX_CHARS = 2048
 # --- Actions --------------------------------------------------------------------------
 
 OBJECT_READ = ("s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging")
+# The only prefixes a READ session may read. inbox/ (unscanned) and quarantine/ (infected)
+# are for PIPELINE sessions only.
+READ_PREFIXES = (keys.ORIGINALS_PREFIX, keys.DERIVED_PREFIX, keys.CHAT_PREFIX)
 # DeleteObject only adds a delete marker: the role never gets DeleteObjectVersion.
 OBJECT_WRITE = (
     "s3:PutObject",
@@ -347,21 +355,129 @@ def session_policy(
                 allow(("kms:GenerateDataKey",), key),
             ]
         case StorageAccess.READ:
+            # Never inbox/ or quarantine/: unscanned and infected files are the pipeline's
+            # alone. No listing either.
             statements = [
-                allow(OBJECT_READ, f"{bucket}/*"),
-                allow(BUCKET_LIST, bucket),
+                {
+                    "Effect": "Allow",
+                    "Action": list(OBJECT_READ),
+                    "Resource": [f"{bucket}/{prefix}*" for prefix in READ_PREFIXES],
+                },
                 allow(("kms:Decrypt", *KEY_DESCRIBE), key),
                 allow(VECTOR_READ, index),
             ]
         case StorageAccess.PIPELINE:
+            # Every object, by key, but no listing: the pipeline works from database rows and
+            # scan events only.
             statements = [
                 allow((*OBJECT_READ, *OBJECT_WRITE), f"{bucket}/*"),
-                allow(BUCKET_LIST, bucket),
                 allow((*KEY_USE, *KEY_DESCRIBE), key),
                 allow((*VECTOR_READ, *VECTOR_WRITE), index),
                 allow(FACE_COLLECTION, collection),
             ]
+        case StorageAccess.WORKER:
+            raise ValueError("a worker's policy names its document: use worker_session_policy")
     return {"Version": VERSION, "Statement": statements}
+
+
+# What a worker session may do with the one inbox file it was given: read it, by version.
+WORKER_INBOX_READ = ("s3:GetObject", "s3:GetObjectVersion")
+# And with its document's own stored objects: read them and write new versions. No delete,
+# no tagging, no listing.
+WORKER_OWN_OBJECTS = (*WORKER_INBOX_READ, "s3:PutObject")
+# The PDF's upload, and nothing else in the inbox (owner, 2026-11-27). The task never reads a
+# companion file: the pipeline's `companion` step does, with its own PIPELINE context.
+WORKER_MAX_INBOX_KEYS = 1
+
+
+def worker_pdf_upload_keys(document_id: uuid.UUID, listed: Sequence[str]) -> tuple[str, ...]:
+    """Of the inbox keys a grant's row lists, the one a worker session may read: its
+    document's PDF upload.
+
+    A PDF is registered under its document's own ID (`inbox/{batch}/{document ID}`), so the
+    key itself says which upload it is, and nothing else is asked of the database. A companion
+    file's upload, first or replacement, has a file ID of its own: the row lists it, and it is
+    left out. A listed key that is not an upload key at all is not one the pipeline wrote, and
+    is refused outright.
+    """
+    own: set[str] = set()
+    for key in listed:
+        parsed = keys.parse_inbox_key(key)
+        if parsed is None:
+            raise ValueError("not an inbox upload key")
+        if parsed[1] == document_id:
+            own.add(key)
+    return tuple(sorted(own))
+
+
+def worker_document_keys(document_id: uuid.UUID) -> tuple[str, ...]:
+    """The stored objects of one document that the worker task reads or writes: its
+    original, its text and its fields.
+
+    Not `originals/{doc}.companion.json`: the pipeline's `companion` step stores that, with
+    its own PIPELINE context, and the task has had no use for the key since (owner decision F,
+    2026-11-27).
+    """
+    return (
+        keys.original_key(document_id),
+        keys.text_key(document_id),
+        keys.fields_key(document_id),
+    )
+
+
+def worker_session_policy(
+    profile: TenantStorageProfile, *, document_id: uuid.UUID, inbox_keys: Sequence[str]
+) -> Policy:
+    """One document of one tenant: its PDF's upload (read) and its own stored objects.
+
+    Nothing under quarantine/ or chat/, no other document's keys, no vectors, no face
+    collection, no listing. `inbox_keys` is what `worker_pdf_upload_keys` kept of the grant's
+    database row. It is checked again here, so that nothing else can be put into a worker's
+    policy whoever calls this: at most one key, and that one the upload registered under the
+    document's own ID (`inbox/{batch}/{document ID}`). A companion file's upload is refused.
+    The reserved isolation-test document ID is refused by the key builders.
+    """
+    inbox = sorted(set(inbox_keys))
+    if len(inbox) > WORKER_MAX_INBOX_KEYS:
+        raise ValueError("a worker reads one inbox object: its document's PDF upload")
+    for key in inbox:
+        parsed = keys.parse_inbox_key(key)
+        if parsed is None:
+            raise ValueError("not an inbox upload key")
+        if parsed[1] != document_id:
+            raise ValueError("not the upload of this document's PDF")
+    bucket = f"arn:aws:s3:::{profile.bucket}"
+    statements: list[dict[str, Any]] = []
+    if inbox:
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": list(WORKER_INBOX_READ),
+                "Resource": [f"{bucket}/{key}" for key in inbox],
+            }
+        )
+    statements += [
+        {
+            "Effect": "Allow",
+            "Action": list(WORKER_OWN_OBJECTS),
+            "Resource": [f"{bucket}/{key}" for key in worker_document_keys(document_id)],
+        },
+        {
+            "Effect": "Allow",
+            "Action": [*KEY_USE, *KEY_DESCRIBE],
+            "Resource": profile.kms_key_arn,
+        },
+    ]
+    return {"Version": VERSION, "Statement": statements}
+
+
+def worker_session_policy_json(
+    profile: TenantStorageProfile, *, document_id: uuid.UUID, inbox_keys: Sequence[str]
+) -> str:
+    text = to_json(worker_session_policy(profile, document_id=document_id, inbox_keys=inbox_keys))
+    if len(text) > SESSION_POLICY_MAX_CHARS:
+        raise ValueError(f"session policy is {len(text)} characters; the limit is 2048")
+    return text
 
 
 def session_policy_json(

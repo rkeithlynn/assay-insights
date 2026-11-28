@@ -25,7 +25,7 @@ const POOLS = {
 export type Persona = "tenant-admin" | "tenant-user" | "master-admin" | "master-user";
 
 const TENANT_ID = "00000000-0000-4000-8000-0000000000a1";
-const PLATFORM_ID = "00000000-0000-4000-8000-0000000000f1";
+const PLATFORM_ID = "00000000-0000-4000-8000-0000000000e1";
 const HAIKU = "00000000-0000-4000-8000-00000000c001";
 const SONNET = "00000000-0000-4000-8000-00000000c002";
 const OPUS = "00000000-0000-4000-8000-00000000c003";
@@ -99,6 +99,114 @@ const AUDIT_EVENTS = Array.from({ length: 12 }, (_, i) => ({
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/142.0",
 }));
 
+// Build step 6: an open batch, ingestion history for both views. Long names on purpose: the
+// tables must still fit at 1280 px.
+const BATCH_ID = "cfd08356-aac4-4dfe-a3f5-0000000003b1";
+// Realistic IDs: the table shows each one's first 8 characters.
+const DOC = (i: number) => `${(0x3f2d2180 + i * 0x1111).toString(16)}-2e99-4991-8cee-0000000004${String(i).padStart(2, "0")}`;
+const batchFile = (i: number, name: string, kind: "pdf" | "companion", status: string, extra = {}) => ({
+  id: `00000000-0000-4000-8000-0000000005${String(i).padStart(2, "0")}`,
+  name,
+  kind,
+  size_bytes: kind === "pdf" ? 2_400_000 + i * 1000 : 812,
+  status,
+  error_code: null,
+  errors: [],
+  matched: false,
+  document_id: kind === "pdf" ? DOC(i) : null,
+  registered_at: "2026-11-24T15:00:00Z",
+  scanned_at: status === "registered" ? null : "2026-11-24T15:01:00Z",
+  ...extra,
+});
+const BATCH = {
+  id: BATCH_ID,
+  name: "October applications, Atlanta branch",
+  status: "open",
+  opened_by: "Ada Lovelace",
+  mine: true,
+  opened_at: "2026-11-24T14:55:00Z",
+  closed_at: null,
+  closes_by: "2026-11-25T14:55:00Z",
+  pdf_count: 4,
+  files: [
+    batchFile(1, "smith-package-final-signed-2026-10-28.pdf", "pdf", "clean", { matched: true }),
+    batchFile(2, "smith-package-final-signed-2026-10-28.json", "companion", "clean", { matched: true }),
+    batchFile(3, "jones-application.pdf", "pdf", "clean"),
+    batchFile(4, "garcia-package.pdf", "pdf", "clean", { matched: true }),
+    // Every problem at once (owner decision A2).
+    batchFile(5, "garcia-package.json", "companion", "invalid", {
+      matched: true,
+      error_code: "companion_invalid",
+      errors: [
+        { code: "tenant_mismatch", key: "TenantID" },
+        { code: "must_be_a_date", key: "CreateDate" },
+        { code: "must_be_a_whole_number", key: "LoanTerm" },
+      ],
+    }),
+    batchFile(6, "eicar-test.pdf", "pdf", "infected", { error_code: "threats_found" }),
+    // On hold, with its reason and what to do.
+    batchFile(7, "password-protected-statement.pdf", "pdf", "unsupported", { error_code: "scan_unsupported" }),
+  ],
+  // Only the rejected companion file stands in the way, so Close opens its dialog.
+  problems: [{ file_id: "00000000-0000-4000-8000-000000000505", code: "companion_invalid" }],
+};
+const DOC_STATUSES = ["ready", "processing", "duplicate", "quarantined", "on_hold", "failed", "needs_review", "scanning"];
+const DOCUMENTS = Array.from({ length: 10 }, (_, i) => ({
+  id: DOC(i),
+  received_at: new Date(Date.UTC(2026, 10, 24, 15, 50 - i)).toISOString(),
+  batch_id: BATCH_ID,
+  batch_name: i % 2 ? "October applications, Atlanta branch" : "Weekly upload",
+  file_name: i % 3 ? `application-package-${i}.pdf` : "smith-package-final-signed-2026-10-28-with-cosigner.pdf",
+  page_count: 12 + i,
+  size_bytes: 2_400_000 + i * 150_000,
+  has_companion: i % 2 === 0,
+  status: DOC_STATUSES[i % DOC_STATUSES.length],
+  error_code: i % 8 === 4 ? "pdf_encrypted" : null,
+  forms_found: i % 4,
+  completed_at: i % 8 === 1 ? null : new Date(Date.UTC(2026, 10, 24, 15, 52 - i)).toISOString(),
+  duration_seconds: i % 8 === 1 ? null : 120 + i,
+  uploaded_by: "Alexandra Richardson-Whitfield",
+}));
+const EVENTS = [
+  { step: "scan", status: "clean", at: "2026-11-24T15:01:00Z", error_code: null, viewer: null, attempt: 1 },
+  { step: "queued", status: "queued", at: "2026-11-24T15:02:00Z", error_code: null, viewer: null, attempt: 1 },
+  { step: "start", status: "started", at: "2026-11-24T15:02:05Z", error_code: null, viewer: null, attempt: 1 },
+  { step: "fingerprint", status: "continue", at: "2026-11-24T15:02:09Z", error_code: null, viewer: null, attempt: 1 },
+  // The processing task's first step (build step 6, second half): it opened the PDF.
+  { step: "inspect", status: "continue", at: "2026-11-24T15:03:20Z", error_code: null, viewer: null, attempt: 1 },
+  // Step 5 (stage 2): the page counts, with large numbers and a page that could not be read,
+  // to check the line fits and wraps in both views.
+  {
+    step: "text",
+    status: "continue",
+    at: "2026-11-24T15:03:26Z",
+    error_code: null,
+    viewer: null,
+    attempt: 1,
+    text_pages: { total: 1000, native: 612, ocr: 385, unread: 3 },
+  },
+  // Step 9 (build step 6, second half): the companion file's values were stored.
+  { step: "companion", status: "stored", at: "2026-11-24T15:03:30Z", error_code: null, viewer: null, attempt: 1 },
+  // Who opened it: sent to tenant admins only. A long address, to check it wraps.
+  { step: "viewed", status: "pdf_url", at: "2026-11-24T15:10:00Z", error_code: null, viewer: "alexandra.richardson-whitfield@infinityloans.example", attempt: 1 },
+];
+const MASTER_ROWS = DOCUMENTS.map((d, i) => ({
+  document_id: d.id,
+  tenant_id: TENANT_ID,
+  tenant_name: i % 2 ? "Infinity Loans" : "Northwind Credit",
+  batch_id: d.batch_id,
+  // The first row (opened in the detail check) failed before step-level codes existed.
+  status: i === 0 ? "failed" : d.status,
+  error_code: i === 0 ? "pipeline_error" : d.error_code,
+  page_count: d.page_count,
+  size_bytes: d.size_bytes,
+  has_companion: d.has_companion,
+  forms_found: d.forms_found,
+  received_at: d.received_at,
+  completed_at: d.completed_at,
+  duration_seconds: d.duration_seconds,
+}));
+
 function apiResponse(persona: Persona, mfaRequired: boolean, method: string, path: string): unknown {
   if (path === "/api/me") return me(persona, mfaRequired);
   if (method !== "GET") return null;
@@ -119,6 +227,85 @@ function apiResponse(persona: Persona, mfaRequired: boolean, method: string, pat
   }
   if (/^\/api\/admin\/tenants\/[^/]+\/models$/.test(path)) {
     return { catalog: CATALOG, available: { ingest: [HAIKU, SONNET], query: [HAIKU, SONNET, OPUS] }, selected: { ingest: HAIKU, query: SONNET } };
+  }
+  if (path === "/api/batches") {
+    const summary = { id: BATCH.id, name: BATCH.name, status: BATCH.status, opened_by: BATCH.opened_by, mine: true };
+    return { batches: [{ ...summary, opened_at: BATCH.opened_at, closed_at: null, pdf_count: BATCH.pdf_count }] };
+  }
+  if (path === `/api/batches/${BATCH_ID}`) return BATCH;
+  if (path === "/api/documents") {
+    return { documents: DOCUMENTS, total: DOCUMENTS.length, page: 1, page_size: 50, start: "2026-11-17T16:00:00Z", end: "2026-11-24T16:00:00Z" };
+  }
+  if (/^\/api\/documents\/[^/]+$/.test(path)) {
+    const row = DOCUMENTS[0];
+    return {
+      ...row,
+      // Passed fingerprint, so the panel shows the "later steps not available yet" note.
+      status: "processing",
+      duplicate_of: null,
+      pdf_available: true,
+      attempt: 1,
+      // The companion file's values, with long ones to check they wrap, and its uploads.
+      companion: {
+        version: 2,
+        application_ref: "APP-2026-00123",
+        loan_number: null,
+        cosigner_name: "Bartholomew Featherstonehaugh-Montgomery",
+        package_created_on: "2026-10-28",
+        package_completed_on: "2026-11-02",
+        loan_term_months: 360,
+        loan_maturity_date: "2056-12-01",
+        loan_interest_rate: 6.125,
+        signers: [
+          { name: "Alexandra Richardson-Whitfield", email: "alexandra.richardson-whitfield@infinityloans.example", phone: "+14045550100", location: "Atlanta, GA" },
+        ],
+        labels: [
+          { key: "Branch", value: "Atlanta" },
+          { key: "UnderwritingQueueAssignmentReference", value: "a-long-value-without-any-spaces-in-it-to-check-wrapping-0123456789" },
+        ],
+      },
+      companion_files: [
+        // Two rejected uploads (owner, 2026-11-25): their problems show in plain words and wrap.
+        { id: "00000000-0000-4000-8000-000000000a04", name: "smith-package-second-try.json", status: "invalid", error_code: "companion_invalid", errors: [{ code: "must_be_a_number", key: "LoanInterestRate" }, { code: "must_be_a_date", key: "LoanMaturityDate" }, { code: "invalid_key", key: "Underwriting Queue Assignment Reference" }], replacement: true, registered_at: "2026-11-24T15:30:00Z", applied_at: null, current: false },
+        { id: "00000000-0000-4000-8000-000000000a03", name: "smith-package-first-try.json", status: "invalid", error_code: "companion_invalid", errors: [{ code: "not_json", key: null }], replacement: true, registered_at: "2026-11-24T15:25:00Z", applied_at: null, current: false },
+        { id: "00000000-0000-4000-8000-000000000a02", name: "smith-package-corrected.json", status: "clean", error_code: null, errors: [], replacement: true, registered_at: "2026-11-24T15:20:00Z", applied_at: "2026-11-24T15:21:00Z", current: true },
+        { id: "00000000-0000-4000-8000-000000000a01", name: "smith-package.json", status: "clean", error_code: null, errors: [], replacement: false, registered_at: "2026-11-24T15:00:00Z", applied_at: "2026-11-24T15:03:30Z", current: false },
+      ],
+      events: EVENTS,
+      parts: [
+        { start_page: 1, end_page: 4, form_type: "LoanApplication", method: "rule", confidence: null },
+        { start_page: 5, end_page: 12, form_type: "GeneralForm", method: "model", confidence: 0.82 },
+      ],
+    };
+  }
+  if (path === "/api/admin/ingestion") {
+    return { documents: MASTER_ROWS, total: MASTER_ROWS.length, page: 1, page_size: 50, start: "2026-11-17T16:00:00Z", end: "2026-11-24T16:00:00Z" };
+  }
+  if (/^\/api\/admin\/ingestion\/[^/]+$/.test(path)) {
+    return {
+      document_id: MASTER_ROWS[0]?.document_id,
+      events: [
+        // The master view never has `viewed` events.
+        ...EVENTS.filter((e) => e.step !== "viewed").map((e) => ({
+          step: e.step,
+          status: e.status,
+          at: e.at,
+          error_code: e.error_code,
+          error_type: null,
+          text_pages: "text_pages" in e ? e.text_pages : null,
+        })),
+        // The text step's own stops: a document over the page limit, and a page a sandbox
+        // limit stopped (the master view also shows which).
+        { step: "text", status: "failed", at: "2026-11-24T15:03:36Z", error_code: "too_many_pages", error_type: null },
+        { step: "text", status: "failed", at: "2026-11-24T15:03:38Z", error_code: "page_unreadable", error_type: "sandbox.cpu_limit" },
+        // Both kinds of failure, to check both fit: a row from before step-level codes, and one after.
+        { step: "failed", status: "failed", at: "2026-11-24T15:03:40Z", error_code: "pipeline_error", error_type: null },
+        { step: "failed", status: "failed", at: "2026-11-24T15:04:40Z", error_code: "fingerprint_failed", error_type: "Lambda.TooManyRequestsException" },
+        // The processing task's own marks and codes: a step that stopped, and why.
+        { step: "inspect", status: "error", at: "2026-11-24T15:05:10Z", error_code: null, error_type: "TssRequestError" },
+        { step: "failed", status: "failed", at: "2026-11-24T15:05:12Z", error_code: "inspect_failed", error_type: "TssRequestError" },
+      ],
+    };
   }
   if (path === "/api/admin/audit") {
     return { events: AUDIT_EVENTS, total: AUDIT_EVENTS.length, page: 1, page_size: 50, start: "2026-11-17T16:00:00Z", end: "2026-11-24T16:00:00Z" };

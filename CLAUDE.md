@@ -7,7 +7,9 @@ change. Where this file and the spec differ, the spec wins.
 
 - **AWS:** profile `pilar-dev`, Region `us-east-1`.
 - **Pulumi:** organization `pilartech`, project `assay-platform`, stack `dev`
-  (`pilartech/assay-platform/dev`). The program lives in `infra/`.
+  (`pilartech/assay-platform/dev`). The program lives in `infra/`. The organization moved
+  to Pulumi Cloud's Free plan on 2026-11-27 (its trial had ended, and previews printed a
+  notice saying so). Nothing in the code or the stack's name changed.
 - **One build step at a time.** Work on exactly one step from BUILD_SPEC.md section 12.
   Stop when it is done and report back. Do not start the next step unasked.
 - **One branch per build step.** Each step's work goes on its own branch, `build-step-N`,
@@ -34,7 +36,1116 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6–9 | Not started |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) complete and verified in dev** (2026-11-27). After it, the upload screen's fixes and the scan role's limit to `inbox/`, deployed and verified in dev (2026-11-27). Then the worker's companion-read narrowing and the probe's usage price, deployed and verified in dev (2026-11-27). Then "Process again" straight after a companion replacement, and its message: **built, not deployed** (2026-11-27; it deploys with stage 3's first deploy). Stages 3 and 4 not started. Next: stage 3, which needs its plan first. See "Start here" below |
+| 7–9 | Not started |
+
+## Start here: stage 2 and four later changes are verified in dev; one small fix waits for stage 3's first deploy; stage 3 needs its plan (state on 2026-11-27)
+
+A new session starts from this section and BUILD_SPEC.md section 8. Everything below it is
+the record: read the part a task touches. **Stage 2 (step 5, text) is built, deployed and
+verified in dev, and so are the four changes made after it** (the upload screen's fixes,
+the scan role's limit to `inbox/`, the worker's companion-read narrowing and the probe's
+usage price). **One small fix is built and waits for a deploy**: "Process again" is accepted
+straight after a companion replacement, and its refusal has a new message. By the owner's
+decision it deploys with stage 3's first deploy, not alone ("Built, not deployed" under
+"Where things stand", and "Process again after a companion replacement" below). Stage 3 is
+not started and needs its own plan first: "For stage 3" below is where that plan starts.
+
+### Where things stand
+
+- **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
+  against `main`. **Pull request #5 stays open until stage 4 is complete and verified: both
+  halves of step 6 merge together** (owner, 2026-11-27). So `main` is not fast-forwarded
+  before then, and that is not an open item. Stages 3 and 4 continue on `build-step-6`.
+- **Deployed: stack update 43** (2026-11-28 00:34 UTC, which is 2026-11-27 19:34 Eastern;
+  commit 3346624, 1 minute 3 seconds; owner), with Aurora at migration `0012`. It carried
+  the worker's companion-read narrowing and the probe's usage price: 8 updated, 8 replaced,
+  349 unchanged ("The worker's companion read and the probe's usage price" below says why
+  the preview's 9 and 9 became 8 and 8). Before it: update 41 (commit 524a0aa) was stage 2,
+  and update 42 (2026-11-27 22:55 UTC, commit c9b70a1) the scan role's policy and the portal
+  build with the upload screen's fixes.
+- **Verified in dev by the owner (2026-11-27).**
+  - Stage 2. The isolation suite passes: 73 in the isolation Lambda, 28 in the provisioning
+    role's probe, 101 in the worker probe, 28 Cognito checks. The Text line is right for the
+    five synthetic files: 01 and 04 all from the text layer; 08 three pages by OCR; 09 one
+    from the text layer and two by OCR; 10 one by OCR. The 1,000-page file was read in 7
+    minutes 48 seconds ("The 1,000-page run" below).
+  - The scan role's limit to `inbox/`, after update 42 ("The scan role's reach" below): the
+    deployed policy ends in `/inbox/*`; on Isolation Test A a clean file was scanned and
+    processed, and EICAR was quarantined with its security notice; all four plans `ACTIVE`;
+    the isolation suite again 73, 28, 101 and 28; `check_deployment.py` clean. **One check
+    is still due: the plans' status again on 2026-11-28** ("Open items").
+  - The worker's companion-read narrowing and the probe's usage price, after update 43: the
+    isolation suite passes 73, 28, **102** and 28, and the new check reads
+    `denied:s3:GetObject`; "Process again" works for a document whose companion file was
+    replaced, which it could not before (attempt 2 of `04-with-companion.pdf`, every step
+    passed), and for a plain one (`01-normal.pdf`).
+- **Tested (2026-11-27), the code that is deployed** (commit e70eaea). The whole suite with
+  the test PostgreSQL and the image tests required (`ASSAY_REQUIRE_DB_TESTS=1`,
+  `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,796 passed, none failed, none skipped (1,792 at stage 2,
+  and four new tests of the scan role's policy). The portal's type check, lint and 118 unit
+  tests pass, and the rendered check passes, 58 of 58 (the 48 layout checks and the 10 new
+  upload checks). CI passed on commits e70eaea, c9b70a1 and 20d0fb9 (`python`, `portal`,
+  `portal-render`).
+- **The two changes of update 43** (2026-11-27; the owner approved both that day; neither
+  has a migration, a grant or a permission change):
+  1. **The worker's credentials reach its PDF's upload and no companion upload** (commit
+     054d6f1). The worker probe gained one check: its count is **102**.
+  2. **The probe's Textract usage row carries the configured price of a page** (commit
+     41fa401).
+- **Tested (2026-11-27), the code that is deployed now** (commit 41fa401). The whole suite,
+  with the test PostgreSQL and the image tests required: 1,832 passed, none failed, none
+  skipped (1,796 before; the new ones are the tests of these two changes). CI passed on
+  commits 41fa401, 3346624 and 4033506 (`python`, `portal`, `portal-render`).
+- **Built, not deployed** (2026-11-27, commit e90b479; the owner's decisions of that day).
+  **It deploys with stage 3's first deploy, not alone.** No migration, no grant, no
+  permission change.
+  1. **"Process again" is accepted straight after a companion replacement.** The event the
+     scan step writes for a replacement is marked as written outside an attempt's run and
+     no longer counts as the attempt's activity. The pipeline's own companion step still
+     counts. The five minutes stay as they are; stage 4 replaces the rule.
+  2. **The refusal's message** is now "This document is being processed, or was a few
+     minutes ago. Try again shortly."
+  What was built, the preview and the checks after the deploy: "Process again after a
+  companion replacement" below.
+- **Tested (2026-11-27), with that fix in.** The whole suite, with the test PostgreSQL and
+  the image tests required: 1,838 passed, none failed, none skipped (1,832 before; the new
+  ones are the fix's tests). Ruff, the format check and mypy pass. The portal, in its
+  pinned Node container: the type check, lint and the build pass, and 120 unit tests (118
+  before; the two new ones are the message's). The rendered check passes, 58 of 58.
+  **CI passed on commit e90b479, on the third attempt of its `python` job** (`portal` and
+  `portal-render` passed first time). Neither failed attempt was the change ("Two CI
+  failures that were not the change" under "Open items and known gaps").
+- **Tested (2026-11-27), the tests and CI themselves** (commits 6d1e29a and 248a9f7: the
+  mock tests' wait, and CI's base images; no product code, nothing to deploy). The whole
+  suite, with the test PostgreSQL and the image tests required: 1,863 passed, none failed,
+  none skipped (1,838 before; the 25 new ones are the tests of these two changes). Ruff,
+  the format check, mypy and Bandit pass. **CI passed on commit 248a9f7, first time**, and
+  again when its `python` job was run a second time to see the cache at work.
+- **Rule 6** (checked 2026-11-27, before stage 2 was built): the AI services opt-out policy
+  in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
+  UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is the
+  first part of `uv run scripts/check_deployment.py` in every mode;
+  `uv run scripts/check_deployment.py --ai-services` runs it alone. **Run it again, and read
+  it, before stage 3's deploy:** Bedrock is the next service to get tenant content.
+- **What the pipeline does now.** Upload, scan, close, fingerprint (Lambda), claim, the
+  worker task's `inspect` and `text` steps, release, `companion` (Lambda). Then the
+  execution ends and the document stays `processing`: steps 6 to 8 and 10 do not exist yet,
+  and the steps panel says so (`laterStepsPending`, keyed on the text step's result).
+  **Textract is the first AI service that gets tenant content**, since 2026-11-27.
+
+### Stage 2: what was built
+
+Step 5 of BUILD_SPEC.md section 8, in the worker task, after `inspect`
+(`workers/assay_workers/worker/text.py`):
+
+1. **The text layer.** Sandbox children read it, 25 pages a child, and send one record a
+   page down the **page channel**. The parent scores each page as it arrives
+   (`worker/quality.py`).
+2. **Textract.** Pages that fail the score are drawn by sandbox children as greyscale PNGs,
+   8 pages a child, and the task's main process sends each to `DetectDocumentText`, as
+   bytes, two calls at a time (`worker/ocr.py`). One `ai_usage` row per successful call,
+   written at once: every call that succeeded is recorded before the step fails, also a
+   page that succeeded after its neighbour had failed. Once a call has failed the step, no
+   page that was not yet under way is sent.
+3. **The text object.** `derived/text/{doc}.json`, uploaded from a file with fresh
+   credentials for that one document. Its S3 version ID goes into the step's event and into
+   `documents.text_version_id`.
+4. **The rows.** One `pages` row a page for the attempt, and the content pointer
+   (`documents.content_attempt`), in the transaction that writes the step's result.
+
+**The page channel** (`sandbox/runner.py`, `sandbox/jobs.py`). A sandbox child's standard
+output keeps its rule: one JSON object of numbers and codes, at most 64 KB. The two page
+jobs (`text`, `render`) also get one inherited descriptor, the write end of a pipe, and write
+one JSON record per line to it. The parent reads the pipe as the child writes and holds one
+record at a time. The child still writes no file (the file-size limit stays 0), has no
+network and no credentials, and the seccomp filter and the limits are unchanged. The parent
+never opens a PDF or a picture: a picture is checked for its first eight bytes and its
+length, and forwarded.
+
+| Cap | Value |
+| --- | --- |
+| One page's text | 256 KB |
+| One page record (text and word positions) | 1 MB |
+| One page's picture | 5,000,000 bytes (AWS's pages say 5 MB in one place and 10 MB in another) |
+| One picture record (the picture in base64) | 8 MB |
+| One `text` child | 25 pages, so 25 MB at most |
+| One `render` child | 8 pages, so 64 MB at most |
+| The text object | 128 MB (`text_too_large` above it) |
+| Textract calls in flight from one task | 2 |
+
+**What an attacker who controls the PDF, and by exploit the child, can now get out:** text
+of their choosing (256 KB a page), which is stored in that tenant's own text object, and
+bytes of their choosing that begin as a PNG does (5 MB a page), which go unopened to
+Textract and nowhere else. No credentials, no other document, no network, no path or key.
+
+**The quality score** (`worker/quality.py`). 1.0 for a blank page; 0.0 for a page with
+annotations that draw content (form fields, stamps, free text, ink) or with content and no
+text; otherwise `legible x (1 - image coverage)`. `legible` is the share of ordinary
+characters times the share of longer words that contain a vowel (English only; it needs 30
+such words before it says anything). A page below the threshold goes to Textract.
+
+**A page is `native` or `ocr`.** An `ocr` page's text is what Textract read on its picture,
+the typed parts included. When such a page's text layer reads well by itself (it went to
+Textract because of an image or annotations), the text layer's text is kept in the text
+object too, as `text_layer`, with `is_source: false` and no word positions.
+
+**What stops a document at this step:**
+
+| Case | Status | Code |
+| --- | --- | --- |
+| More pages than `textMaxPages` | `failed` | `too_many_pages` (before any text is read) |
+| A sandbox child did not end well | `failed` | `page_unreadable`, error type `sandbox.<ending>`; ERROR line, `worker-errors` |
+| The child could not be started | the step fails | `text_failed`, `SandboxNotStarted` |
+| Textract busy for 5 minutes on one page, or refusing the task | the step fails | `text_failed`, error type Textract's own (`ThrottlingException`, `AccessDeniedException`, ...) |
+| The text object over 128 MB | `failed` | `text_too_large` |
+| The task over 30 minutes | the step fails | `text_failed`, `States.Timeout` |
+
+A page Textract will not take (`UnsupportedDocumentException`, `BadDocumentException`,
+`DocumentTooLargeException`, `InvalidParameterException`) is recorded as unread and the
+document goes on. The Text line of both step panels shows the count.
+
+### The owner's decisions on stage 2 (2026-11-27)
+
+1. **How page text leaves the sandbox:** the page channel, above.
+2. **An `ai_usage` row for Textract:** `service` `textract`, `operation`
+   `DetectDocumentText`, no `model_id`, Textract's own `model_version`, the `attempt` and
+   `page_no`, tokens 0, `units` 1, `unit` `page`, `unit_price` and `cost` from stack config,
+   and the request ID. One row per successful call.
+3. **The threshold is 0.90** (`textQualityThreshold`), and the vowel factor stays.
+4. **Permissions** (all six approved; "New grants and permissions" below).
+5. **A document may have 1,000 pages** (`textMaxPages`). The spec had no page limit.
+6. **A page with images over about a tenth of it, or with form fields or stamps, always goes
+   to Textract**, even when its text layer is good: the text is then what a person sees.
+   **Only a page's source text (`text`) feeds extraction, search and embedding.** The stored
+   `text_layer` is there to compare with; nothing in stage 2 reads it.
+7. **A document with unread pages goes on**, and stage 4 makes it `needs_review`. The unread
+   count shows in the Text line of the step panel in the tenant view and the master view.
+8. **The price of a page** is the owner's, in stack config (`textractPricePerPage`). No
+   price is in code.
+9. **The stored companion file left the worker's session policy**
+   (`originals/{doc}.companion.json`): the companion step writes it, not the task.
+10. **Every version of the text object is kept.** Object Lock's default (governance, 1 day)
+    applies to `derived/text/` as to everything in the bucket, no role may delete a version,
+    and there is no lifecycle rule. "Process again" writes a new version; the old one stays.
+    Each attempt's version ID is in its `text` event (`detail.version_id`), so an old
+    version can be found without listing. No lifecycle rule and no delete permission were
+    added. (A discarded document never has a text object: only an open batch can be
+    discarded.)
+11. **The spend guard:** an alarm on Textract pages in 24 hours across the account
+    (`textractDailyPagesAlarm`, 2,000), sent to the alarms topic.
+12. **The Textract endpoint's policy admits the worker task's role only.** The plan's table
+    said "plus the role in 3" (the isolation Lambda's); that would have defeated the test the
+    role exists for, so it was built the narrower way: the isolation role holds the same IAM
+    permission, with the same `aws:SourceVpce` condition, and the endpoint must refuse it.
+
+### New grants and permissions (stage 2; also in the pull request)
+
+- **IAM, worker task role:** `textract:DetectDocumentText` on `*` (Textract has no
+  resource-level permissions), only with `aws:SourceVpce` equal to the Textract endpoint.
+- **IAM, isolation Lambda's role:** the same statement, word for word, so that the endpoint's
+  policy is the only thing that can refuse it.
+- **Textract endpoint policy:** from the default (allow everything) to one statement:
+  `textract:DetectDocumentText` for the worker task's role. Narrower than before. It is a
+  `VpcEndpointPolicy` resource: never delete or recreate it (an endpoint without one allows
+  everything).
+- **Database (migration `0012`):**
+  - `app_worker`: INSERT on 8 columns of `pages` and 15 of `ai_usage`, each with a policy
+    that admits only its bound tenant, document and attempt. It can read neither table.
+  - `app_worker`: UPDATE on `documents.content_attempt` and `documents.text_version_id`. A
+    trigger (`worker_content_pointer_guard`) refuses the worker any value but its bound
+    attempt, and an empty version.
+  - `app_worker`: EXECUTE on the new `pipeline.bound_attempt()` (owned by `pipeline_lookup`).
+  - `platform_reader`: four more integer columns of `platform.ingestion_events_v`, for a
+    `text` event only: `pages`, `pages_native`, `pages_ocr`, `pages_unread`. Counts, shown
+    only if the stored value is a plain whole number.
+- **Narrowed:** the worker's session policy lost `originals/{doc}.companion.json`.
+- **No change** to the tenant role, any bucket, key or vector bucket policy, any KMS key or
+  grant, security groups, the set of endpoints, queues, topics, the state machine's role or
+  any Lambda's role. No `update_tenants.py` run: no tenant stack resource changes.
+
+### How stage 2 was deployed and checked (the owner, 2026-11-27)
+
+Done in this order on 2026-11-27, and every check passed. Kept as the order for a later
+stage.
+
+Stack config, all four required (a stack without one fails `pulumi preview`):
+`textractPricePerPage` (set by the owner: `0.0015`), `textQualityThreshold` (`0.90`),
+`textMaxPages` (`1000`), `textractDailyPagesAlarm` (`2000`). All four are in
+`infra/Pulumi.dev.yaml`.
+
+1. `uv run scripts/check_deployment.py --ai-services` and read the output. Both must be ok.
+2. Deploy when no document is in progress: `pulumi up --cwd infra --stack pilartech/assay-platform/dev`.
+3. Straight away: `uv run scripts/migrate.py` (to `0012`). Until it is in, the text step
+   fails, so upload nothing in between. Then `uv run scripts/migrate.py --command verify`.
+4. `uv run scripts/run_isolation.py --tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`.
+   **If "textract: reads a synthetic page (the task's role)" is refused with
+   `AccessDeniedException`, stop and tell the owner:** it would mean Textract does not
+   honour the `aws:SourceVpce` condition, and removing it is the owner's decision.
+   (2026-11-27: allowed in both runs. Textract honours the condition.)
+5. `uv run scripts/make_test_files.py --fresh`, upload as Infinity Loans, and read each
+   document's Text line: 01 and 04 all from the text layer; 08 three read by OCR; 09 one
+   from the text layer and two by OCR; 10 one by OCR.
+6. Compare the pages read by OCR with Textract's own count: CloudWatch, `AWS/Textract`,
+   `SuccessfulRequestCount`, `Operation` `DetectDocumentText`. (`ai_usage` has no read path
+   from outside the VPC.)
+7. Check the alarms are `OK`, then `uv run scripts/check_deployment.py`.
+8. The 1,000-page run: `uv run scripts/make_test_files.py --fresh --pages-1000`, upload
+   `11-scanned-1000-pages.pdf` alone, and compare with the figures below. It sends 1,000
+   pages to Textract, half the spend alarm's threshold.
+
+### The 1,000-page run (measured 2026-11-27)
+
+`11-scanned-1000-pages.pdf`, uploaded alone as Infinity Loans (owner). 1,000 pages read by
+OCR, none unread. Read from AWS afterwards, read-only. The estimates made before the run are
+kept beside each figure.
+
+| What | Measured | The estimate |
+| --- | --- | --- |
+| The text step | **7 minutes 48 seconds** (the task's log: `inspected` 20:50:25.9 UTC, `text read` 20:58:13.7 UTC). About 2.1 pages a second; Textract answered 133 to 142 pages in each full minute | 12 to 17 minutes; the task's limit is 30 |
+| The task's memory | **Peak 102 MB of 4,096 MB**. Container Insights, one sample a minute: 57, 96, 102, 102, 101, 96, 98, 97 MB | Near 0.5 GB; worst case near 2.3 GB |
+| CPU | 280 to 330 of the task's 1,024 units (461 in the first minute) | - |
+| Task storage in use | 0.3 GB | 40 MB of pictures, and the text |
+| Textract calls | **1,000 successful** (`AWS/Textract` `SuccessfulRequestCount`, `Operation` `DetectDocumentText`; per minute 20, 133, 137, 136, 140, 138, 138, 142, 16). Response time 600 ms on average, 1,352 ms at most | 1,000 |
+| Throttling | **None.** `ThrottledCount`, `ServerErrorCount` and `UserErrorCount` have no data point in the run's minutes | - |
+| The spend alarm | `OK`. The day's total was 1,008 successful calls, accounted for below | Half the threshold |
+
+- **The day's 1,008 successful calls, all accounted for** (2026-11-27 UTC, by the minute;
+  CloudTrail names the caller of each):
+  - 1,000 for this file (20:50 to 20:58 UTC).
+  - 6 for the first batch's 08, 09 and 10 (3, 2 and 1 pages; 20:29 UTC).
+  - 2 that no document accounts for: the worker probe's positive control, "textract: reads
+    a synthetic page (the task's role)", once in each of the day's two isolation runs
+    (20:14:25 UTC, task `77ae943c…`, and 20:25:58 UTC, task `26f0e421…`). Both came from the
+    worker task's role through the Textract endpoint. The page is one the probe draws, never
+    a tenant's. Each call wrote its `ai_usage` row for the probe's fixture document in
+    Isolation Test A, at no price (the probe did not know the price), and AWS bills the
+    page all the same. **Every isolation run costs one Textract page.** Since update 43
+    (2026-11-28 00:34 UTC) the row carries the configured price ("The worker's companion
+    read and the probe's usage price" below).
+  - The 8 user errors are the probes' deliberate refusals, four in each run.
+- **Retries: none that reached Textract.** The task tries a call again only after throttling,
+  a server error or no answer, and Textract counted no throttling and no server error. A
+  call that Textract completed and the task then repeated would have been counted twice, and
+  the count is exactly 1,000. **Not visible:** a connection that failed before it reached
+  Textract. The task does not log a retry, so nothing else can show one.
+- **`ai_usage` rows: not counted.** No read path reaches `ai_usage` from outside the VPC
+  (the migration Lambda's `verify` reads no rows; `platform_reader` has no view over it).
+  The evidence is indirect: 1,000 successful calls, one row written for each success, and a
+  failed insert fails the step, which ended well. Counting them needs a new read path.
+- **What the memory figure does not show.** One sample a minute, so a spike between two
+  samples is not seen. And the synthetic scans are small one-bit pictures: a real scan's
+  page picture is larger (up to the 5,000,000-byte cap), so real documents will use more.
+  The caps still bound the worst case near 2.3 GB.
+- Where to read these again: Container Insights' performance log group
+  `/aws/ecs/containerinsights/assay-dev-pipeline-worker/performance` (filter on the task's
+  ID), and CloudWatch's `AWS/Textract` metrics.
+
+### Not verified, and how and when each gets settled
+
+| What | Settled by | When |
+| --- | --- | --- |
+| `aws:SourceVpce` on the worker's Textract permission: whether Textract honours it | **Settled 2026-11-27: it does.** The worker probe's "textract: reads a synthetic page (the task's role)" was allowed in both isolation runs, and CloudTrail shows both calls coming through the Textract endpoint | Done |
+| The words of the endpoint policy's refusal ("VPC endpoint policy" in the message) | **Settled 2026-11-27:** the isolation Lambda's suite passed (73 of 73, `test_textract.py` included), so the message is as the test requires | Done |
+| Textract's answer when it is pointed at an object the caller cannot read | **Settled 2026-11-27: `InvalidS3ObjectException`**, for the task's own document and for another tenant's alike (the worker probe's log, both runs) | Done |
+| Textract's size limit for one picture (5 MB or 10 MB) | Not needed: pictures stay under 5,000,000 bytes | - |
+| PDFium: greyscale drawing without an image library, form fields, image coverage | **Settled 2026-11-27:** `tests/unit/test_worker_image.py`, with the real child in the task's image (the four synthetic files) | Done |
+| That Textract reads the dot-matrix letters of the synthetic scans well | **In part (2026-11-27):** the owner's check of 08, 09 and 10 shows every scanned page read by OCR and none unread. How well is not known: `ocr_confidence` is in `pages`, which has no read path yet | With the first screen that shows a page's text |
+| 1,000 scanned pages inside 30 minutes, and the memory figures | **Settled 2026-11-27:** 7 minutes 48 seconds, peak memory 102 MB ("The 1,000-page run" above) | Done |
+| How soon the spend alarm fires | **Settled 2026-11-27** from AWS's alarm evaluation page: with no evaluation window set, an alarm slides. It is checked every minute against the 24 hours before it, so it fires within minutes of the 2,001st page, and stays in ALARM until those 24 hours hold 2,000 or fewer. It notifies on the change of state only. Not seen firing | Read |
+
+### Upload: files that went missing on 2026-11-27, and what the screen does now
+
+**What happened** (owner, as Infinity Loans, four additions between 15:28 and 15:42
+Eastern). Twice, fewer files appeared in the batch than were selected, with nothing on the
+screen to say so: six selected and three listed, then three selected and two listed.
+
+**What the server saw** (the load balancer's access log and the API's own log, read-only).
+One registration request per batch, each answered 201, none failed and none repeated. By
+their sizes (about 123 bytes a file in the request, about 2,075 in the answer) the two short
+batches registered three files and two. So the missing files were never sent to the API:
+never registered, never given an upload link, never uploaded. Request bodies are not logged,
+so no file name can be seen, and nothing shows what the browser was handed.
+
+**Verdict: unproven, and the evidence points away from the portal.**
+
+- No path in the code registers fewer files than the page is handed without saying so.
+- A rendered test adds the same six files 60 times at each of two widths (chosen 40 times,
+  dropped 20), in a different order each time, against a stand-in API that answers after
+  varying delays. All six were registered and listed every time, on that day's code too.
+- What no test and no log can show is what the Windows file picker handed the page. In both
+  short batches the missing files are the first in name order, which is what a click
+  without Ctrl partway through a selection leaves. That fits. It is not proof.
+
+**One real defect was found on the way. It was not the cause** (no registration was refused
+that day). A refused action's reason vanished: the screen read the batch again after a
+refused registration or close, and that reload cleared the error. "The batch already has a
+file with that name." showed for a moment and then nothing, with the files not added. The
+first reading of the code missed it; the test written for it fails on the old code.
+
+**What the screen does now** (owner's decisions, 2026-11-27; `portal/src/pages/Upload.tsx`,
+`portal/src/upload.ts`):
+
+1. **The line.** Every addition says how many files the page was handed and how many are
+   now in the batch: "6 files chosen: 6 added." or "6 files chosen: 4 added, 2 not added."
+   The number chosen shows at once ("6 files chosen: adding them."), before the API has
+   answered. The line stays until the next addition or until it is dismissed. A short
+   selection is seen the moment it happens.
+2. **"Not added" keeps every entry until it is dismissed.** A later addition adds to the
+   list and never clears it.
+3. **No picker while an addition runs.** The file input has no disabled state in this
+   Cloudscape version, so a disabled button stands in its place. A drop made then is not
+   queued and not ignored: each of its files is listed under "Not added" ("Other files were
+   still being added. Add it again.").
+4. **Each file goes to the link registered under its own name**, never by its position in
+   the answer (`matchRegistered`). The API stores a name without surrounding spaces, so
+   names are compared that way. A file the answer left out is listed under "Not added".
+5. **No silent return.** Adding files with no batch loaded shows an error.
+6. **A refused action's reason stays** until it is dismissed or the next action succeeds.
+   Reading the batch again clears only an error that reading it raised.
+
+**The tests** (`portal/e2e/upload.e2e.ts`, part of the `portal-render` job, about a minute
+more): the additions above, the line, "Not added", an addition made while another runs, and
+a refused registration. Each fix was shown to be guarded: the tests were run against a copy
+of the portal with that one fix undone, inside the container only, and failed there.
+`portal/src/upload.test.ts` covers the two helpers.
+
+**Lessons.**
+
+- A reload after an action must not erase what the action reported. Look for "set the
+  error, then read again" where the read clears errors.
+- Playwright's `getByText` matches a substring and ignores case: "Not added" also matched
+  "1 not added." Give an element a test ID when its words can appear elsewhere.
+- The server's logs can show how many files a request registered, by its size, and never
+  which files.
+
+### The scan role's reach: `inbox/` only, behind a switch (deployed and verified in dev 2026-11-27)
+
+The owner's decision (2026-11-27), as its own change after stage 2.
+
+**Verified in dev on 2026-11-27, after stack update 42** (owner; the test below, in its
+order):
+
+| Check | Result |
+| --- | --- |
+| The deployed policy | `AllowMalwareScan` and `AllowPostScanTag` both end in `/inbox/*` |
+| A clean file, Isolation Test A | Scanned clean, and processed after the batch was closed |
+| EICAR, Isolation Test A | Quarantined, and the security notice arrived |
+| The malware protection plans | All four `ACTIVE` |
+| The isolation suite | 73, 28, 101 and 28: the counts of stage 2 |
+| `check_deployment.py` | Clean |
+
+- **Read again from AWS at 23:29 UTC the same day** (read-only): both statements'
+  `Resource` is `arn:aws:s3:::assay-dev-t-*/inbox/*`; the four plans (`assay-dev-t-36b4e055`,
+  `-3f2d2180`, `-cfd08356`, `-db2a578b`) are each `ACTIVE`, with the prefix `inbox/` and no
+  status reason, about half an hour after the deploy.
+- **What this settles.** GuardDuty scans an upload, and tags it or not, with read and tag
+  access to `inbox/` alone: a clean result and a threat result both arrived, and the threat
+  was really read (EICAR was quarantined, not passed).
+- **What it does not settle.**
+  1. **Whether GuardDuty checks a plan's role again later**, and needs its validation
+     object for that (the role can still write that object, and can no longer read or tag
+     it). Every plan was `ACTIVE` half an hour after the change; it is not known when
+     GuardDuty next checks. **The owner reads the plans' status again on 2026-11-28**
+     (step 5's command, below). A plan in `WARNING` or `ERROR` then: stop, record the status
+     reason, and go back ("Going back" below) unless the owner decides otherwise.
+  2. **Whether the object tags are still written.** The pipeline does not use them, and
+     nobody has looked. The policy allows tagging under `inbox/`, so they should be.
+  3. Only Isolation Test A was tried. The role and its policy are one for every tenant, so
+     nothing differs for another tenant but the bucket's name.
+
+- **What changes.** Two statements of the GuardDuty scan role's IAM policy:
+  `AllowMalwareScan` (read an object and its versions) and `AllowPostScanTag` (read and
+  write an object's tags). They go from every object of every tenant bucket to the objects
+  under `inbox/`, the one prefix each tenant's protection plan scans
+  (`provisioning.scan_role_policy`, `inbox_only`). Before, the role could read originals
+  and text objects, and decrypt them through S3. Only GuardDuty can assume it.
+- **What does not change.** `s3:ListBucket`, the validation object's write, the
+  notification and managed-rule statements, and the key statement (decrypt through S3 on a
+  tenant key, which reaches only what S3 lets the role read). No tenant bucket policy
+  changes: every statement there is a Deny, so the role's own policy does the allowing and
+  narrowing it is enough. No tenant stack run, no migration, no image.
+- **The switch.** Stack config `malwareScanInboxOnly`, `"true"` in dev. `"false"`, or the
+  key left out, is the policy as it was. Either way it is one `pulumi up` that updates one
+  role policy. Stack outputs: `malware_scan_role_name`, `malware_scan_inbox_only`.
+- **One policy for every tenant.** The role is shared, so the switch narrows every tenant's
+  bucket at once. "Isolation Test A first" is the order of testing: nothing is uploaded to
+  another tenant until a clean file and EICAR have gone through Isolation Test A.
+- **Checked before the deploy** (IAM's policy simulator, read-only, 2026-11-27, one object
+  key at a time):
+
+  | Request | Switch on | Switch off |
+  | --- | --- | --- |
+  | The six read and tag actions on an `inbox/` key | allowed | allowed |
+  | The same on `originals/`, `derived/text/` and `quarantine/` keys | `implicitDeny` | allowed |
+  | The same on the validation object | `implicitDeny` | allowed |
+  | `s3:PutObject` on the validation object | allowed | allowed |
+  | `s3:ListBucket` and the two notification actions on the bucket | allowed | allowed |
+
+- **Not known before the deploy, and the risk** (the first is settled by the test: scans
+  work; the second is what the check of 2026-11-28 is for). AWS's page for the role says
+  that with an object prefix its access should be limited to the targeted prefixes, and
+  shows no such policy. Two things were not known:
+  1. That GuardDuty reads and tags nothing outside the prefix when it scans.
+  2. Whether GuardDuty reads or tags its validation object
+     (`malware-protection-resource-validation-object`, at the bucket's root) after writing
+     it. With the switch on the role can still write that object, and can no longer read or
+     tag it: the owner's instruction was to change the two statements and nothing else.
+  Either would show as uploads that are not scanned, or as a plan that leaves `ACTIVE`.
+  Nothing is lost silently, and `"false"` undoes it.
+- **The baseline** (read 2026-11-27, before the change): all four tenants' plans are
+  `ACTIVE`, with the prefix `inbox/` and no status reason.
+
+**The test, in this order** (owner; PowerShell, one line each). Done on 2026-11-27, and
+every step passed; step 5 is to be run once more on 2026-11-28. Kept as the order for
+Staging and Production, where the role's and the policy's names will differ:
+
+1. Deploy when nobody is uploading: `pulumi up --cwd infra --stack pilartech/assay-platform/dev`.
+   Its preview (2026-11-27) showed one role policy updated (`assay-dev-malware-scan-policy`,
+   the two statements' `Resource`), the portal build replaced (the upload screen's fixes)
+   and two new stack outputs: 2 changes, 363 unchanged. Anything else: stop and ask.
+2. Read the deployed policy. Both statements must end in `/inbox/*`:
+   `aws iam get-role-policy --role-name assay-dev-malware-scan-role-cf2a8e2 --policy-name assay-dev-malware-scan-policy-4c8a356 --profile pilar-dev --query "PolicyDocument.Statement[?Sid=='AllowMalwareScan' || Sid=='AllowPostScanTag'].[Sid,Resource]" --output text`
+   (the deployed names in dev, read on 2026-11-27; the role's name is also the stack output
+   `malware_scan_role_name`).
+3. **A clean file, Isolation Test A.** `uv run scripts/make_test_files.py --fresh`, sign in
+   to the tenant portal as Isolation Test A's admin, open a batch and add `01-normal.pdf`.
+   It must show "Scanned, clean", normally within a minute or two. Close the batch: the
+   document goes to Processing and its Text step passes.
+4. **EICAR, Isolation Test A**, in AWS CloudShell:
+   `python3 ingest_check.py eicar --host dev.assayinsights.ai --tenant cfd08356-aac4-4dfe-a3f5-32a2f3294c4e`.
+   The file must end `infected` and the document `quarantined`, and the security notice
+   must arrive.
+5. Every plan still `ACTIVE`, with no status reason:
+   `(aws guardduty list-malware-protection-plans --profile pilar-dev --region us-east-1 --query "MalwareProtectionPlans[].MalwareProtectionPlanId" --output text) -split "\s+" | ForEach-Object { aws guardduty get-malware-protection-plan --malware-protection-plan-id $_ --profile pilar-dev --region us-east-1 --query "[ProtectedResource.S3Bucket.BucketName,Status,StatusReasons]" --output json }`
+   Run it again the next day: it is not known when GuardDuty next checks a plan's role.
+6. `uv run scripts/run_isolation.py --tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`,
+   then `uv run scripts/check_deployment.py`.
+7. Only then upload as another tenant.
+
+**What a failure looks like.**
+
+| What is seen | What it means |
+| --- | --- |
+| The file shows "On hold: could not be scanned", with "The malware scan could not read the stored file." (`scan_access_denied`), within a minute or two | GuardDuty's read was refused: it needs more than `inbox/` |
+| The file stays "Waiting for its scan"; after 30 minutes it is on hold (`scan_timeout`) and `assay-dev-pipeline-sweeper-errors` fires | No scan result came at all |
+| "The malware scan failed." (`scan_failed`) | GuardDuty gave up on the object; read the plan's status reasons |
+| The EICAR file shows "Scanned, clean" or is held, not quarantined | The scan did not really read the file |
+| A plan's status is `WARNING` or `ERROR`, with a status reason | GuardDuty's check of the role failed (the validation object, or tagging) |
+| Everything works and only the object tags are missing | Tagging was refused quietly. The pipeline does not use the tags; record it and decide |
+
+**Going back** (one config change and a `pulumi up`):
+
+1. `pulumi config set malwareScanInboxOnly false --cwd infra --stack pilartech/assay-platform/dev`
+   (it writes `"false"` into `infra/Pulumi.dev.yaml`; commit that).
+2. `pulumi up --cwd infra --stack pilartech/assay-platform/dev`
+3. Read the policy again with the command of step 2 above: both statements end in `/*`.
+4. A file that was put on hold is not scanned again: discard its batch and upload it anew.
+
+**The worker's read of its document's companion upload: dropped. Approved by the owner as
+written here, built on 2026-11-27 (commit 054d6f1), deployed and verified in dev the same
+day.** What was built, and how it was checked, are under "The worker's companion read and
+the probe's usage price" below. The proposal, as it was approved:
+
+- The task never reads that object. It reads the PDF, and the companion's `batch_files` row
+  to say whether the document has one. The `companion` step, a Lambda with its own PIPELINE
+  context, reads and stores the companion file.
+- Today the grant's row lists every clean inbox file of the document, the PDF and the
+  companion, and the session policy admits both for reading.
+- **Proposed:** the TSS admits one inbox key for a worker, `inbox/{batch}/{document ID}`.
+  A PDF's upload has the document's own ID, so the TSS can tell it from the companion's
+  without a database change, and refuses a grant row that lists anything else for the
+  worker's policy. `WORKER_MAX_INBOX_KEYS` becomes 1. The worker probe gains "reading its
+  document's companion upload is refused", by S3's own answer.
+- **What it takes:** the TSS and worker images, so one `pulumi up`. No migration, no grant,
+  no tenant stack run. The alternative, changing `pipeline.worker_grant` to list only the
+  PDF, needs a migration for the same effect.
+
+### The worker's companion read and the probe's usage price (deployed and verified in dev 2026-11-27)
+
+Both approved by the owner on 2026-11-27 and built that day, each as its own commit.
+Deployed as stack update 43 and verified the same evening.
+
+**Verified in dev after update 43** (owner; times Eastern, 2026-11-27):
+
+| Check | Result |
+| --- | --- |
+| The isolation suite | 73, 28, **102** and 28 |
+| The new check | "storage: reading its own document's companion upload" reads `denied:s3:GetObject` |
+| The three-keys defect | Fixed. Infinity Loans, `04-with-companion.pdf` in batch "Batch 1 and 4": a replacement rejected (19:47), a corrected one accepted (19:50), then "Process again" ran attempt 2 from 20:00:59 to 20:01:58 with every step passed |
+| "Process again", a plain document | `01-normal.pdf` in "batch doc 1": attempt 2 from 19:57:20 to 19:58:31, all passed |
+
+- **Read again from the logs** (read-only, 2026-11-28 UTC, which is the same evening):
+  - The probe: "probe finished", 102 checks, none failed (00:38:56 UTC). The new check's own
+    line: expected `denied:s3:GetObject`, outcome `denied:s3:GetObject` (00:38:31). So S3
+    names the read itself to a worker session on Fargate, as it does to READ and UPLOAD
+    sessions.
+  - The fixture's inbox object: GuardDuty scanned it (`NO_THREATS_FOUND`) and the scan
+    function logged "a later version is never used" at INFO (00:38:10). The three scan
+    alarms never left `OK`.
+  - The 04 document's attempt 2: execution `…-2` started 01:01:00, inspected 3 pages, text
+    read (3 from the text layer), "companion values stored" as version 3, grant released
+    01:01:58. Its row listed three inbox keys, and the worker got its credentials.
+- **Not read directly:** the price on the probe's new `ai_usage` row (no read path reaches
+  the table). The check "database: a usage row for its own Textract call" passed, the task
+  would not have run without a usable price, and the unit tests show the row.
+
+**The deploy made 8 updates and 8 replacements; the preview said 9 and 9.** The API's task
+definition was not replaced, and so the API service was not updated.
+
+- The preview was right about the API image's build (it ran again at 00:34:57 UTC): the
+  image's tag is a hash of its sources, and those include the whole `tss/assay_tss` tree
+  (`api.IMAGE_TREES`), where `policies.py` and `service.py` had changed.
+- But `api/Dockerfile` copies only five files of that package (`__init__`, `client`, `keys`,
+  `models`, `naming`), and none of them changed. Every layer came out as before, so the
+  build produced **the same image digest** (`sha256:f7b0dfd5…`; ECR now shows two tags on
+  that one image, pushed at 20:06 UTC). The task definition names the image by digest, so it
+  did not change: still revision 16, and the service's last rollout is still update 41's.
+- A preview cannot know this: the digest is an output of the build, unknown until it runs,
+  so everything that depends on it shows as changing. **Nothing went wrong, and the API was
+  spared a restart.** The other five images did change, with everything that depends on
+  them.
+- **The owner's decision (2026-11-27): the API image's tag keeps hashing the whole
+  `tss/assay_tss` tree.** So a preview can show the API's image build, task definition and
+  service as changing when only TSS code changed that the API's image does not hold; the
+  deploy then leaves the task definition and the service alone. **A deploy that changes
+  fewer resources than its preview, by an image and what depends on it, is this, and is
+  not a fault.** The same can happen to any image whose tag hashes more than its Dockerfile
+  copies.
+
+**1. The worker's credentials reach its PDF's upload and no companion upload** (commit
+054d6f1; `tss/assay_tss/policies.py`, `service.py`).
+
+- The grant's row (`pipeline.worker_grant`) still lists every clean inbox file of the
+  document. No database change.
+- `policies.worker_pdf_upload_keys` keeps the one key registered under the document's own
+  ID (`inbox/{batch}/{document ID}`: a PDF's upload has its document's ID) and leaves every
+  other upload key out. A listed key that is not an upload key at all refuses the request,
+  as before.
+- `worker_session_policy` checks again: at most one inbox key (`WORKER_MAX_INBOX_KEYS` is
+  1), and that one the document's own. So nothing else can be put into a worker's policy,
+  whoever calls it.
+- **The worker probe's new check:** "storage: reading its own document's companion upload",
+  expected `denied:s3:GetObject`. S3 must name the read itself as what the session policy
+  does not allow, which it does only for an object that exists (for a missing key it names
+  `s3:ListBucket`). The probe's count goes from 101 to **102**.
+- **The fixture** (`tests/isolation/worker_fixture.py`): the probe's own document gets a
+  clean `batch_files` row of kind `companion` and one small object at its inbox key in
+  Isolation Test A's bucket, written once. **This is the first fixture object under a real
+  upload key, so GuardDuty scans it.** Its row is committed before the object is written
+  and already has a result, so the scan function logs "a later version is never used" at
+  INFO and changes nothing: no alarm (tested for every scan result).
+- **Found on the way: a defect in what was deployed before update 43.** A replaced
+  companion file and its replacement both stay `clean` with the document's ID, so such a
+  document's row lists three keys. The TSS refused a row of more than two, so a document
+  whose companion file was replaced could get no worker credentials: "Process again" would
+  have failed for it at the task's first read. Shown by a test against PostgreSQL and by
+  the old policy's own test (three upload keys raised); never seen failing in AWS, because
+  nobody tried that case before the fix. The new code serves the row whatever its length,
+  and the owner's check after update 43 shows it working.
+
+**2. The probe's Textract usage row carries the configured price** (commit 41fa401;
+`workers/assay_workers/worker/probe.py`, `__main__.py`).
+
+- The probe's one Textract call is real and billed. Its `ai_usage` row now has
+  `textractPricePerPage` as its `unit_price` and its `cost`, as the text step's rows have,
+  so `ai_usage` is a true cost record, the isolation runs included.
+- The task's entry point reads the text step's settings for a probe run too and hands the
+  probe the price. A probe task without a usable price does not run. The price is still
+  read in `__main__.py` only and written in no worker module (tested).
+- **Rows already written stay at no price.** Every isolation run before update 43 wrote
+  its row with `unit_price` 0 and `cost` 0 (at least three on 2026-11-27, on the probe's
+  fixture document in Isolation Test A). Nothing can change them: `app_worker` has no
+  UPDATE on `ai_usage`, and nothing is deleted. The usage and cost view, when it is built,
+  will show them.
+
+**The preview** (2026-11-27, commit 41fa401): **9 to update, 9 to replace, 347 unchanged.**
+
+- Replace: six image builds (`api`, `tss`, `pipeline`, `pipeline-worker`, `provision`,
+  `isolation-tests`: every image that holds `assay_tss`, the worker's code or the isolation
+  tests) and the API, worker and provisioning task definitions.
+- Update: six functions for their images (`assay-dev-tss`, the pipeline's `scan`, `steps`,
+  `starter` and `sweeper`, `isolation-tests`), the API service, and the pipeline and
+  provisioning state machines (each definition names a replaced task definition).
+- No role, policy, endpoint, queue, topic, alarm or database change. No migration. No
+  `update_tenants.py` run.
+- The owner deployed them alone, before stage 3 (update 43), and the deploy changed one
+  pair of resources fewer than this preview: see "8 updates and 8 replacements" above.
+
+**After the deploy** (owner; PowerShell, one line each; deploy when no document is in
+progress). Done on 2026-11-27; kept as the order for another stack:
+
+1. `pulumi up --cwd infra --stack pilartech/assay-platform/dev`. Anything beyond the
+   preview above: stop and ask.
+2. `uv run scripts/run_isolation.py --tenant-a cfd08356-aac4-4dfe-a3f5-32a2f3294c4e --tenant-b 3f2d2180-2e99-4991-8cee-de1fd53bcbb5`.
+   Expect 73, 28, **102** and 28.
+3. The scan function's alarms stayed `OK` after that run (the fixture's inbox object is
+   scanned once, on the first run):
+   `aws cloudwatch describe-alarms --alarm-name-prefix assay-dev-pipeline-scan --profile pilar-dev --region us-east-1 --query "MetricAlarms[].[AlarmName,StateValue]" --output text`
+4. In a browser, as a tenant admin: a document with a companion file, replace the companion
+   file, wait until it has taken effect, then "Process again". It must pass Inspection and
+   Text. (This is the case that failed before update 43.) **Wait five minutes after the
+   replacement takes effect**, or "Process again" is refused: see the next section.
+5. `uv run scripts/check_deployment.py`.
+
+**What a failure of the new check means.**
+
+| The check's outcome | What it means |
+| --- | --- |
+| `allowed` | The worker can read the companion upload: the old TSS image is still serving. Stop |
+| `denied:s3:ListBucket` | The fixture's object is not there (the isolation Lambda could not write it). Nothing is shown either way |
+| `denied:no_reason` | S3 refused, in words the check does not know. Seen so far only for READ and UPLOAD sessions from the isolation Lambda (2026-11-24). The read was still refused; record S3's message before changing the check |
+
+### "Process again" after a companion replacement: it was refused for five minutes (fixed 2026-11-27; built, not deployed)
+
+Found by the owner on 2026-11-27 and diagnosed from the logs, read-only. The owner decided
+on the fix the same day and it is built (commit e90b479). **It is not deployed: it goes out
+with stage 3's first deploy.** Until then, in dev: wait five minutes after a replacement
+takes effect before "Process again".
+
+**What happened** (Infinity Loans, `04-with-companion.pdf`, document `1e6adb9b-…`; the
+API's log and the pipeline's logs; UTC, with Eastern in brackets):
+
+| Time | What |
+| --- | --- |
+| 20:38:35 (15:38:35) | Attempt 1's last event: the companion step stored version 1. Its grant was released a second before. Nothing ran for the document after this |
+| 00:47:36 (19:47:36) | A replacement companion registered (201). 00:47:44: the scan function refused it (`companion_replace_rejected`, `companion_invalid`). No document event |
+| 00:50:52.8 (19:50:52) | The corrected replacement registered (201) |
+| 00:50:55 (19:50:55) | The scan function: "companion values stored", version 2. In the same transaction it wrote a `companion`/`stored` document event, stamped with attempt 1 |
+| 00:51:58.325 (19:51:58) | "Process again": **409** |
+| 00:53:24.497 (19:53:24) | "Process again": **409** |
+| 00:55:55 (19:55:55) | The hold ends: five minutes after the event, by the clock alone |
+| 01:00:59.971 (20:00:59) | "Process again": 202, attempt 2. It would have been accepted from 19:55:55 on; nobody asked in between |
+
+- **The reason for both refusals: `attempt_running`.** The API's log has the status (409)
+  and not the code. The code is known from the message the owner saw, which the portal
+  shows for that code only, and from the code path below.
+- **What held the document.** `batches._under_way`: a `processing` document counts as under
+  way while it has a live worker grant, or while any event of its current attempt is less
+  than five minutes old (`RUNNING_GRACE`; `viewed` events excepted). `document_event`
+  stamps every event with the document's current attempt. So the replacement's `stored`
+  event, written by the scan function at 00:50:55, counted as the attempt's activity. No
+  grant was live, and attempt 1 had ended four hours before.
+- **How it ended.** Nothing ended it but time: at 00:55:55 the event was five minutes old.
+  No row changed and nothing ran.
+- **Is it by design?** The rule is (part 2 of stage 1: `processing` whose attempt has
+  ended, "no live worker grant and nothing recorded for the current attempt in the last 5
+  minutes"), and it is needed until stage 4, because a document that passed its steps
+  stays `processing` and its status cannot say whether an attempt runs. **That it catches a
+  companion replacement is a side effect nobody decided.** The replacement was complete at
+  00:50:55, in one transaction: nothing was still finishing, so the message was wrong, and
+  "the companion replacement is still finishing" would be wrong too.
+- **The rejected replacement held nothing:** a refused file writes an audit row and no
+  document event.
+
+**The owner's decisions (2026-11-27)**, and what was built (commit e90b479; no migration, no
+grant, no permission):
+
+1. **An event written for a companion replacement is marked and does not count as the
+   attempt's activity. The pipeline's own companion step still counts.**
+   - `batches.OUTSIDE_ATTEMPT` (`"outside_attempt"`): a key in a document event's detail.
+     `_under_way` leaves out an event whose detail has that key with the JSON value `true`,
+     and nothing else: any other value still counts.
+   - `companion_data.apply` takes `in_attempt`, with no default, so each caller says which
+     it is. The scan step passes `False` (a file attached or replaced after ingestion) and
+     every event it writes there carries the key. The pipeline's `companion` step passes
+     `True` and writes its events as before.
+   - A live worker grant and the attempt's own events hold a document as before: a
+     replacement applied while an attempt runs frees nothing.
+   - Events already written are not marked. That matters for five minutes at most.
+2. **The message** for `attempt_running` is "This document is being processed, or was a few
+   minutes ago. Try again shortly." (`portal/src/errors.ts`). It still shows for up to five
+   minutes after an attempt's own last step, with every step shown as passed: that is the
+   rule, below.
+3. **The five minutes stay as they are (`RUNNING_GRACE`). Stage 4 replaces the rule:** the
+   final status is then set inside the task, `processing` means running, and "under way"
+   no longer has to be guessed from the age of the last event. Why it could be shortened,
+   for stage 4's plan: nothing's correctness rests on it (a superseded attempt writes
+   nothing, and a document waiting for a worker slot writes no event at all, so the rule
+   already does not cover a long wait). What it guards is a second start in the gaps
+   between a live attempt's events with no live grant: the queue, the starter, about 75
+   seconds of Lambda retries, the 30 and 60 second waits.
+4. **The API image's tag hashing stays as it is** ("8 updates and 8 replacements" above).
+
+**The tests** (no existing test was changed or weakened):
+
+- `tests/unit/test_pipeline_part2.py`: a replacement applied by the scan step does not hold
+  the document (accepted at once); the same event without its mark, or with any value but
+  `true`, holds it as before; the pipeline's own companion step still holds it, with or
+  without a companion file; a replacement applied while an attempt runs does not free it
+  (its own fresh event, then its live grant alone); a file attached to a document that had
+  none does not hold it either.
+- `tests/unit/test_api_part2.py`: through the API, a replacement followed at once by
+  "Process again" answers 202, and the new attempt is then held.
+- `portal/src/errors.test.ts`: the message.
+- **A lesson from writing them:** the API tests share one document for the whole module. A
+  new test placed in the middle changed it for a later one. The new test is the module's
+  last.
+
+**The preview** (2026-11-27, with the fix in): **12 to update, 12 to replace, 341
+unchanged.**
+
+- Replace: eight image builds (`api`, `ops`, `db-migrate`, `tss`, `provision`, `pipeline`,
+  `pipeline-worker`, `isolation-tests`: every image whose tag hashes `db/assay_db`, where
+  `batches.py` changed), the API, worker and provisioning task definitions, and the portal
+  build (the message).
+- Update: nine functions for their images (`db-migrate`, `auth-events-consumer`, `seed`,
+  `tss`, `isolation-tests` and the pipeline's four), the API service, and the two state
+  machines.
+- No role, policy, endpoint, queue, topic, alarm or database change. **The deploy may
+  change fewer than this**, where an image builds to the digest it had.
+- Stage 3 will change more of the same resources and add its own: this preview is only
+  what the fix alone would do.
+
+**The checks after the deploy that carries it** (owner; with stage 3's first deploy):
+
+1. **A companion replacement followed at once by "Process again" must be accepted.** In a
+   browser, as a tenant admin: a document that was processed more than five minutes ago,
+   replace its companion file, wait until the replacement shows as stored, then "Process
+   again" straight away. It must start a new attempt, and every step must pass.
+2. **The new message.** Click "Process again" a second time while that attempt runs: it
+   must be refused with "This document is being processed, or was a few minutes ago. Try
+   again shortly."
+3. The isolation suite's counts do not change for this fix (73, 28, 102 and 28, before
+   stage 3's own additions).
+
+### For stage 3 (steps 6 to 8: split, signer details, field extraction)
+
+**Stage 3 needs its plan first, approved by the owner, as stage 2 had.** Nothing of it is
+built. The plan lists the decisions for the owner by number, every new grant and
+permission, and what goes to Bedrock. What to read: BUILD_SPEC.md section 8 (steps 6, 7
+and 8, and "The worker"), section 7 (the tables), section 7b (models) and section 14;
+"Step 6, second half" further down for the plan's decisions (6, C and D most of all);
+"Stage 2: what was built" above for the pattern to follow.
+
+**The owner's rules for it** (each recorded; none is new here):
+
+- **Extracted text is content chosen by whoever made the PDF. It must be handled as data,
+  never as instructions, when it is shown to a model** (owner, 2026-11-27). That holds for
+  the text layer and for what Textract read alike: either can say "ignore your instructions".
+  Forced tool choice and schema validation stay (decision D), and nothing a model returns
+  chooses a tenant, a bucket or a SQL statement.
+- **Only a page's source text (`text`) is the page's text.** Stage 3's plan may propose using
+  the stored `text_layer` to cross-check a value that OCR also read, for the owner's decision
+  then. Nothing uses it before that.
+- **Read the text at `documents.text_version_id`**, never "the latest" version of the key.
+- **The content pointer** moves in the text step today, because that is the last content
+  step. When a later step writes content, the pointer moves after the last of them.
+- **Unread pages** (the text event's `pages_unread`) make the document `needs_review` in
+  stage 4 (decision 7).
+- Each stage adds `app_worker`'s grants and policies for the tables its steps use, bound to
+  tenant, document and attempt (`pipeline.bound_attempt()` exists now). A SQL check passes on
+  NULL: require each value outright (`units IS NOT NULL AND units >= 1`).
+- Add each step to `progress.WORKER_STEPS`, the portal's `STEP_TEXT` and `RESULT_TEXT`.
+- **Model IDs are never in code** (working rules): the model comes from the tenant's
+  selection in `tenant_models` and the catalog in `ai_models`, and Bedrock is called only
+  through a `us.` inference profile from us-east-1 (BUILD_SPEC.md section 2).
+- **PDFs are opened only in a sandbox child** (decision B). `pyHanko` reads the PDF, so its
+  check runs there, not in the task's main process and not in a Lambda.
+- **Every AI call writes an `ai_usage` row; no prompt or response content is logged
+  anywhere; throttling is retried with backoff** (decision C). A test uses a document that
+  contains instructions (decision D).
+- **The tenant's document panel shows each form's extracted fields with page and
+  confidence; no master view ever shows an extracted value, and a test says so** (decision
+  6).
+- **Rule 6 before the deploy:** `uv run scripts/check_deployment.py --ai-services`, read
+  with the owner. Bedrock gets tenant content for the first time in this stage.
+
+**What stage 3 starts from** (read from the repository and from AWS on 2026-11-27):
+
+| What | State |
+| --- | --- |
+| The worker's steps | `progress.WORKER_STEPS` is `("inspect", "text")`; `worker/run.py` runs them in that order. The new steps follow `text` |
+| The tables | `document_parts`, `signature_check`, `signing_events` and `extracted_fields` exist since migration `0001`, empty, **with no `attempt` column**. `signers` has one (`0011`); its `source` may be `audit_trail` or `companion`, and only companion rows are written today. `app_worker` has no grant on any of the five |
+| The next migration | `0013`. It also owes what `0011` left for this stage: the `attempt` columns, and the master view's count of current parts (`platform_view_owner` reading `content_attempt` and `document_parts.attempt`) |
+| `ai_usage` for a model call | The table's check already admits `service = 'bedrock'` with a `model_id` (`0012`). `app_worker`'s INSERT is on 15 columns, and `model_id` is not one of them: a Bedrock row needs that grant |
+| The model the worker calls | `app_worker` can read neither `tenant_models` nor `ai_models`. How the task learns its tenant's `ingest` model and that model's prices is for the plan |
+| The catalog | Three Claude profiles in stack config with prices set, loaded into `ai_models`; `defaultIngestModel` is the Haiku 4.5 profile. Each profile was test-called by `seed.py` on 2026-11-23 with fixed text, by the script itself with the owner's credentials: no call has yet gone through the VPC's endpoint or from the worker task's role |
+| The Bedrock endpoint | `bedrock-runtime` is an interface endpoint since step 2, `available`, **with the default policy (allow everything)**. Textract's was narrowed to one action for the worker task's role when stage 2 first used it |
+| Bedrock permissions | None: the worker task's role has no Bedrock action, and neither has the isolation Lambda's |
+| `pyHanko` | Not in `uv.lock`. Its native dependencies had Python 3.14 Linux x86-64 wheels on 2026-11-23; check again when it is added. A lock change rebuilds all eight images and needs `uv run scripts/image_packages.py --write` |
+| The fields object | `derived/fields/{doc}.json` (`keys.fields_key`) is already in the worker's session policy, read and write. Nothing writes it yet |
+| The worker's inbox access | One object: the PDF's upload (deployed 2026-11-27, update 43). A step that needs a companion file's content reads the stored values, not the inbox |
+| The isolation suite's counts | 73, 28, 102 and 28 (2026-11-27, after update 43). Stage 3's new checks add to these |
+| The suites' counts | Python 1,863 with nothing skipped; portal 120 unit tests; rendered check 58 of 58 (2026-11-27). Stage 3's tests add to these |
+| New infrastructure mock tests | Apply each check to `conftest.after_settled(...)`, never to `pulumi.Output.all(...)`: `registered()` refuses to answer before every resource of the test is registered |
+| CI | No AWS credentials and no registry sign-in. The pinned base images come from the workflow's cache, with retried pulls. A new pinned base image needs no workflow change |
+| Built, waiting for stage 3's first deploy | "Process again" straight after a companion replacement, and its message (above, with the two checks to run after the deploy). Stage 3's first preview will therefore show the portal build and every image changing, whatever stage 3 itself touches |
+| The text to read | `derived/text/{doc}.json` at `documents.text_version_id`: per page `text` (the source), and for some `ocr` pages `text_layer` (`is_source: false`) |
+| The steps panel | `laterStepsPending` is keyed on the text step's result. It stays until stage 4, and must then be keyed on stage 3's last step |
+| Statuses | A document that passes every step stays `processing` until stage 4. "Mark as reviewed" and its route exist, and no document can be `needs_review` yet |
+| Test files | `make_test_files.py`'s package is three pages: a loan application, a paystub and a "Certificate of completion" (an e-signature audit trail with an envelope ID, a signer, a time, an IP address and an authentication method). 08, 09 and 10 are scanned, mixed and filled-form variants. None has an ID document, a PDF signature or seal, a "Page 1 of 3" marker, or text that gives instructions |
+
+**Questions the plan must answer** (a list made on 2026-11-27 from the facts above, not
+owner decisions; the plan may find more):
+
+1. **The Bedrock permission.** Which ARNs the worker role's `bedrock:InvokeModel` names
+   (the inference profile, and the foundation model in each Region the profile routes to),
+   whether `aws:SourceVpce` holds for Bedrock as it did for Textract (not known), and the
+   endpoint's policy narrowed to the worker task's role. The isolation Lambda's role then
+   gets the same statement so that only the endpoint can refuse it, as in stage 2.
+2. **Which model, and how the task learns it** without a model ID in code and without
+   `app_worker` reading the catalog: a column grant, a lookup function, or a value the
+   `claim` step hands over.
+3. **The `ai_usage` row for a Converse call:** `model_id`, tokens, cost from the catalog's
+   prices, `model_version`, the request ID, and which part or page it was for. One row per
+   call that Bedrock billed, the retry of a failed validation included.
+4. **`needs_review` before stage 4.** Section 8 says a validation that fails twice, or a
+   field below 0.7, sets `needs_review`; final statuses are stage 4's. So stage 3 must
+   record the reasons where stage 4 can read them, or set the status itself: the owner
+   decides.
+5. **Where each step's rows go and when the content pointer moves** (after the last content
+   step), and what a "Process again" leaves behind (nothing is deleted; rows by attempt).
+6. **The sandbox jobs:** `pyHanko`'s check as a child job with a result of numbers and
+   codes, and whether the split's rules need anything from the PDF beyond the stored text.
+7. **What goes into a prompt:** only a page's source text; how it is marked as data; the
+   size of a part against the model's limits; a part too long for one call.
+8. **A spend guard for Bedrock**, as `textractDailyPagesAlarm` is for Textract, and what an
+   isolation run will then cost (stage 2's positive control is one billed page a run).
+9. **Throttling and quotas:** the account's Bedrock limits for the ingest model have not
+   been read; two Textract calls in flight was stage 2's answer.
+10. **New test files:** a signed PDF (and one changed after signing), an ID document, a
+    form no schema fits (`GeneralForm`), page markers for the split's rules, and a document
+    that contains instructions.
+11. **Whether `text_layer` is used to cross-check a value** OCR also read (the owner's
+    decision, offered above).
+12. **The panel and the master view:** the extracted fields in the tenant's document panel,
+    and what the master step view may show for the new steps (counts and codes only).
+
+### For stage 4: the 30 seconds after a task's last step (owner's decision, 2026-11-27)
+
+Every document shows about 30 seconds between the Text step's result and the Companion
+step's, with or without a companion file. None of it is our code working. It is Fargate
+stopping the task, inside the `Worker` state, which waits until the task is `STOPPED`
+(`ecs:runTask.sync`). Measured on 2026-11-27, seven tasks:
+
+| From | To | Seconds |
+| --- | --- | --- |
+| The task's last write | The process exits | about 0.4 |
+| The process exits | ECS begins stopping the task | 10.0 (10.04 to 10.06 every time) |
+| Stopping | The task is `STOPPED` | 13 to 18 |
+| `STOPPED` | Step Functions hears of it | about 1.2 |
+| `release` | Done | 0.13 warm, 3.2 after nine idle minutes |
+| `companion` | Done | 0.3 to 0.4 |
+
+- **The plan for stage 4:** the final status is set inside the task, at its last write, and
+  the companion step runs before the task or beside it. The document then shows finished
+  when the work is finished, and the teardown happens out of sight. No new permission.
+- **Rejected by the owner:** a task-token callback (`.waitForTaskToken`). It would give the
+  worker task's role, the least trusted one, a Step Functions permission.
+- **Only if batch throughput ever matters:** a state machine that polls for the task's
+  result and releases the tenant's worker slot before the teardown ends.
+- **Change nothing before stage 4.**
+- **Stage 4 also replaces the five-minute rule for "Process again"** (owner, 2026-11-27;
+  `batches.RUNNING_GRACE` and `_under_way`). Today a `processing` document counts as under
+  way for five minutes after any event of its current attempt, because a finished document
+  still reads `processing`. Once the final status is set inside the task, `processing`
+  means running, and the rule can go or shrink to the gaps between a live attempt's steps
+  ("Process again after a companion replacement" above has what those gaps are). The mark
+  on a replacement's event (`batches.OUTSIDE_ATTEMPT`) is then no longer needed for this.
+
+### What a new session would otherwise rediscover
+
+Each is recorded in full further down; this is the index.
+
+| What | In one line | Where |
+| --- | --- | --- |
+| Cognito's refusals with rotation on | The old refresh flow answers `UnsupportedOperationException`, for a valid token and an invalid one alike; a rotated-out token answers `RefreshTokenReuseException` and revokes nothing else. Never give a client an empty flow list; no pool may have a custom-auth trigger | "Stage 1, part 2", "What Cognito answers on a client with rotation on" |
+| Lambda concurrency | A new account allows 10 concurrent executions. Development has 1,000, with 50 reserved for the scan function (a cap) and 300 for the TSS (a guarantee). Never cap a function whose caller is synchronous | "One scan result failed once" |
+| The TSS API's access log | The API Gateway logging role must admit a call with no source account (`StringEqualsIfExists`). Never change it to `StringEquals`: the log goes silent with no error | "The TSS API's access log received nothing" |
+| IAM propagation | A resource policy that names a role created in the same run as a principal can be refused for some seconds. Such a policy depends on `iam_propagation` (a 30-second wait) | "Policies that name a new role" |
+| Line endings | A file Git marks as LF must be LF on disk; images are built from the bytes on disk. `uv run scripts/check_line_endings.py --fix`. Scripted edits pass `newline="\n"` | "Line endings: files Git marks as LF" |
+| Image builds | "`<repository>@sha256:...`: not found" was the build's own check, not a missing image. Images are confirmed through ECR's API; dependencies and code are two layers | "not found" under "Step 2" |
+| Checks by name | A check that expects "refused" in general hides what was refused. Give each mechanism a case only it can end, and require the service's own answer | "First isolation run after the deploy", the rotation notes |
+| Write a resource as AWS stores it | Otherwise every preview shows a difference (ECS container definitions, API policies, bucket encryption) | Steps 3 and 4 |
+| Deployed names | They are not Pulumi resource names (`assay-dev-pipeline-scan`, not `...-fn`). List before writing a command | "Deployed names are not Pulumi resource names" |
+| Reading the database | Aurora is private. `uv run scripts/migrate.py --command verify` is the read-only way in; Audit history is the way to read `audit_log` | Step 2, "Reading audit_log" |
+| AWS sign-in | The owner's SSO session expires during a long session; `pulumi preview` then fails. The owner runs `aws sso login --profile pilar-dev` | - |
+| The page channel | A sandbox child's standard output is still one small object of numbers. Page text and pictures leave by a pipe the parent reads one record at a time; the child writes no file | "Stage 2: what was built" |
+| A SQL check passes on NULL | `units >= 1` admits a row with no units. Require the value outright; a database test as the role caught it | Stage 2, migration `0012` |
+| `SET col = col` proves nothing about UPDATE | It is refused for the missing SELECT alone. The probe sets a column to its default and rolls back | The worker probe, stage 2 |
+| The spend alarm slides | An alarm with a one-day period is checked every minute against the last 24 hours, not at midnight | "Not verified, and how and when" |
+| Shell edits with backslashes | A bash heredoc halves them and can hang on `python`. Write the script with the Write tool, then run it with `uv run python` | - |
+| One test session at a time | Each pytest session resets the test PostgreSQL when it starts (it drops every `assay_test_*` database and the roles). A second session started meanwhile destroys the first one's databases: 62 failures and 31 errors, all "does not exist", on 2026-11-27 | `tests/unit/pgtest.py` |
+| Two calls in flight | Answers from two threads do not arrive in page order. A test that assumes they do passes on one machine and fails on another (CI found it); and a page that succeeded after its neighbour failed was still billed | `worker/text.py`, `_send_to_textract` |
+| A reload that erases an error | The Upload screen read the batch again after every refused action, and the reload cleared the error: a refused registration showed its reason for a moment, then nothing | "Upload: files that went missing" |
+| What the file picker hands the page | Neither the server nor a test can see it. The screen now says how many files it was handed and how many it added | "Upload: files that went missing" |
+| The 30 seconds after the Text step | Fargate stopping the task, not our code. Stage 4 moves the final status into the task | "For stage 4" |
+| The policy simulator, several resources | With more than one `--resource-arns` it gives one decision for all of them together. Simulate each resource alone | "The scan role's reach" |
+| One Textract page per isolation run | **Each isolation run costs one Textract page.** The worker probe's positive control is a real, billed call on a synthetic page, with its own `ai_usage` row, at the configured price since update 43 (at no price before) | "The 1,000-page run", "The worker's companion read and the probe's usage price" |
+| A grant row longer than expected | A replaced companion file stays `clean`, so a document's row can list three inbox keys or more. A fixed maximum refused the whole row; the TSS now picks the one key it needs | "The worker's companion read and the probe's usage price" |
+| A preview counts an image's dependents | An image's digest is unknown until it is built, so a preview shows its task definition or function as changing. If the files the Dockerfile copies did not change, the build gives the same digest and nothing downstream changes (the API, update 43: 8 and 8 for a preview of 9 and 9) | The same section |
+| Every event counts as the attempt's activity | `document_event` stamps the current attempt, and "under way" looks at any event of it in the last five minutes: a companion replacement held "Process again" for five minutes with nothing running. An event written outside an attempt's run must carry `batches.OUTSIDE_ATTEMPT` | "Process again after a companion replacement" |
+| A module's shared test document | The API tests of part 2 use one document for the whole module: a new test goes last, or uses its own document | The same section |
+| A red `python` job that is not the change | Twice on 2026-11-27: ECR Public answered `429 Too Many Requests` for the pinned base image (39 image tests could not build; it had also failed CI during step 5), and one infrastructure mock test asserted on a resource it did not wait for. Both are fixed. Read the log before touching code | "Two CI failures that were not the change" |
+| A mock test's check must wait for `settled()` | A resource reaches the Pulumi mocks some time after its constructor returns. A check applied to a few chosen outputs can run first: it fails by chance, or "every registered X has ..." passes over a stack with resources missing. Use `conftest.after_settled(...)`; `registered()` refuses to answer too early | `tests/unit/conftest.py`, `test_mock_settling.py` |
+| Docker's save and load can lose a digest's name | On GitHub's runner an image loaded from a `docker save` file is not found under `name@sha256:...`, so it is pulled again (the manifest only: its layers are there). On Docker 29 with the containerd image store, as on the development machine, it keeps its name | `scripts/ci_base_images.py` |
+| "The latest row" by ID | IDs are random UUIDs: `ORDER BY id DESC LIMIT 1` is not the row written last. A test finds a run's own row as the one that was not there before | `tests/unit/test_worker_probe.py`, `usage_ids` |
+
+### Open items and known gaps
+
+Decisions the owner has still to make, or things to do:
+
+- **Check the malware protection plans' status again on 2026-11-28** (owner; the scan
+  role's limit to `inbox/` was deployed and verified on 2026-11-27, and it is not known when
+  GuardDuty next checks a plan's role). Every plan must be `ACTIVE` with no status reason:
+  `(aws guardduty list-malware-protection-plans --profile pilar-dev --region us-east-1 --query "MalwareProtectionPlans[].MalwareProtectionPlanId" --output text) -split "\s+" | ForEach-Object { aws guardduty get-malware-protection-plan --malware-protection-plan-id $_ --profile pilar-dev --region us-east-1 --query "[ProtectedResource.S3Bucket.BucketName,Status,StatusReasons]" --output json }`
+  Record the result under "The scan role's reach". A plan in `WARNING` or `ERROR`: stop,
+  keep the status reason, and see "Going back" there.
+- **The upload fixes are deployed** (stack update 42). Not reported yet: the line after an
+  addition, looked at in a browser ("6 files chosen: 6 added.").
+- **Deploy the fix for "Process again" after a companion replacement, with stage 3's
+  first deploy** (built 2026-11-27; owner's decision: not alone). Then run its two checks
+  ("Process again after a companion replacement" above): a replacement followed at once by
+  "Process again" must be accepted, and a refusal must show the new message. Until then, in
+  dev: wait five minutes after a replacement takes effect.
+- **When the usage and cost view is built: verify that `11-scanned-1000-pages.pdf`
+  (Infinity Loans, 2026-11-27) shows exactly 1,000 Textract rows** (owner, 2026-11-27). No
+  read path reaches `ai_usage` today, and none is to be added for this. The evidence so far
+  is indirect: 1,000 successful calls, one row written for each, and a step that ended well.
+- **Right-size the worker task only after real scanned documents have been measured**
+  (owner, 2026-11-27). It peaked at 102 MB of 4,096 MB on synthetic one-bit scans, which
+  says little about real ones.
+- **Stage 4: the final status inside the task, the companion step before or beside it**
+  (owner, 2026-11-27; "For stage 4" above). Nothing changes before then. Stage 4 also
+  replaces the five-minute rule for "Process again".
+- **Stage 3's plan** ("For stage 3" above): not written. It comes before any stage 3 code.
+- **Concurrency numbers**: 50 and 300 rest on a small sample (43 scan runs, 9 at once at
+  most). Measure again once real batches have run.
+- **The 74 files Git checks out with CRLF** on the owner's machine (the portal's `.ts` and
+  `.tsx`, `.json`, `.svg`; `text=auto` under `core.autocrlf=true`). Making them LF would
+  change the bytes of the SVGs Cognito's branding is built from, so it is a change to
+  deploy on purpose.
+- **Dependencies**: ESLint 10.15.0 and `typescript-eslint` 8.74.0 after 2026-12-07; the
+  `fastapi`, `pydantic`, `aws-lambda-powertools` and `pypdfium2` caps, deliberately.
+- **Before production**: VPC flow logs to the Log Archive account; an approval-gated
+  break-glass role; exercise the break-glass rule, log and alarm once; a Cognito signing-key
+  rotation needs a `pulumi up`. **Before Staging or Production**: raise the Lambda quota
+  first, then set the two reservations.
+- **Before production: there is no designed way to delete a tenant's data** (owner,
+  2026-11-27): offboarding, a retention period, a deletion request. No role may delete an
+  object version, there is no lifecycle rule, and every version of every object is kept
+  (inbox uploads, originals, text objects, noncurrent versions). It needs its own design
+  covering originals, derived objects and noncurrent versions together. **Not designed.**
+
+Two CI failures that were not the change (2026-11-27, commit e90b479, the `python` job; the
+same suite passed locally, 1,838 with nothing skipped). **Both are fixed** (owner's
+decisions of the same day; commits 6d1e29a and 248a9f7):
+
+- **Attempt 1: Amazon ECR Public refused the base image.** `429 Too Many Requests` for the
+  pinned `public.ecr.aws/docker/library/python:3.14-slim` manifest, 156 times in the log.
+  The image tests could not build: 36 errors and 3 failures in `test_api_image.py`,
+  `test_tenancy_images.py`, `test_worker_image.py` and `test_image_layers.py`; the other
+  1,799 tests passed. CI pulls from ECR Public without signing in, from GitHub's shared
+  addresses. **A repeat, not a first: the same 429 failed CI during build step 5** (owner,
+  2026-11-27; it was not written down then, which is why it read as new).
+- **Attempt 2: a race in an existing test.** 1,837 passed and
+  `test_infra_auth_api.py::test_pre_token_trigger_outside_the_vpc_reads_only_its_pool`
+  failed: "`c5-auth-pre-token-tenant-policy`: 0 registered". The test checks that role
+  policy, and what it waited for before checking did not include it, so the check could
+  run before the mock engine had registered the resource. It had always won that race
+  until then.
+- Attempt 3 passed, with no change to anything.
+
+**The 429: CI keeps the pinned base images in its cache and retries a pull** (commit
+248a9f7; `scripts/ci_base_images.py`, `.github/workflows/ci.yml`).
+
+- **No AWS credentials and no registry sign-in, on purpose** (owner, 2026-11-27). Every
+  base image is public and pinned by digest, so what is loaded or pulled can only be the
+  image a Dockerfile names. `test_ci_base_images.py` fails if the workflow gains a
+  credential, a sign-in or a secret.
+- The script reads the pinned names from the Dockerfiles (all but the portal's, which CI
+  never builds): the same three the image tests hold every build to. It loads them from
+  the workflow's cache, pulls what Docker still lacks under its pinned name, and saves what
+  is new. **A failed pull is tried again: seven tries, waiting 5, 15, 30, 60, 120 and 120
+  seconds (plus up to a quarter, at random), about six minutes at most.** Then the step
+  fails and says what the registry answered.
+- The `python` job runs it before the tests. The cache is `actions/cache` (restore and
+  save, one commit, v6.1.0), keyed on a hash of the pinned names, and saved as soon as the
+  images are there, so a later failure does not cost the next run its cache. The job's time
+  limit went from 15 to 25 minutes, to leave room for the retries.
+- **What it did on GitHub's runner** (2026-11-28 UTC, commit 248a9f7):
+  - First run: no cache; each of the three images pulled on its first try; 279 MB saved.
+  - Second run of the same job: the cache restored and all three loaded from it, and
+    **each was still pulled once.** Docker on the runner does not keep a digest's name
+    through save and load, so the loaded image is not found under `name@sha256:...`. The
+    layers were there: the whole step took five seconds, so each pull was a request for
+    the manifest alone.
+- **So the cache spares the downloads, and one small request per image remains on every
+  run. That request is what the retries cover.** Before, every build asked the registry
+  itself, with no retry of ours.
+- **Not proven:** that a build asks the registry for nothing once the image is in Docker
+  under its pinned name. That is how BuildKit treats a digest-pinned image it has. If a 429
+  ever fails a build after this step reported every image present or pulled, that is
+  wrong: record it.
+- **Not done (for the owner, if the 429 comes back in spite of the retries):** switching
+  the runner's Docker to the containerd image store, where a loaded image keeps its pinned
+  name and no request is made at all (as on the development machine, Docker 29).
+- A new pinned base image needs nothing here: the script finds it in the Dockerfile, and
+  the cache's key changes with it.
+
+**The race: a mock test's check waits until every resource of its test is registered**
+(commit 6d1e29a; `tests/unit/conftest.py`).
+
+- A resource is registered with the Pulumi mocks some time after its constructor returns,
+  when its inputs have resolved. Each test file had its own list of outputs to wait for,
+  and a check could read a resource that was on none of them.
+- `conftest.settled()` resolves once every resource the test constructed is registered,
+  also one constructed while it waits. `conftest.after_settled(...)` is
+  `pulumi.Output.all(...)` with the same values in the same order, resolved only then.
+  **Every wait in the nine mock test files goes through it**, and no assertion changed.
+- **`conftest.registered()` now refuses to answer while a resource of the test is still on
+  its way**, naming the first one. So the race cannot come back unseen: it fails every
+  time, on every machine, not by chance on one.
+- **The same race was in nine other tests.** Run alone, before any wait was changed, the
+  guard failed nine checks on the development machine that had been passing over an
+  incomplete stack: three in `test_infra_auth_api.py` (the rotation switch, the way back,
+  no custom-auth trigger), five in `test_infra_data.py` (subnets and routes, the interface
+  endpoints, security groups, the database writer, the migration role) and one in
+  `test_infra_pipeline.py` (the security-notice topic). The test that failed on CI was not
+  among them: here it won its race. Which tests lose it depends on the machine, which is
+  why every wait was changed and not only those ten.
+- **A check that iterates ("every registered X has ...") was the worse case:** over a stack
+  with resources missing it passes, having looked at fewer than it should.
+- `tests/unit/test_mock_settling.py` holds the rule, with a resource that is late on
+  purpose: an early check is refused by name, `after_settled` waits for it, a resource
+  constructed in a callback is waited for too, and a scan of the mock test files fails if
+  one combines outputs itself again.
+- **A new mock test:** apply its check to `after_settled(...)` (or a helper built on it),
+  never to `pulumi.Output.all(...)` or to one resource's output.
+
+Known gaps: things not proven, or proven only in part:
+
+- **The image build's "not found" failure.** The cause is inferred, not seen: CloudTrail
+  shows the check's request never reached ECR, and the registry client's source shows how
+  a failed request reads as "not found", but the failed request's own error was never kept.
+  The fix is deployed. On 2026-11-27 eight images were pushed together (update 39) and each
+  was confirmed by the first call to ECR's API, within a second. But that day their layers
+  uploaded in seconds, not minutes, so the condition behind both failures did not recur and
+  **the retry path has never run in AWS**. If it happens again the message now says whether
+  the request failed or ECR had no image; record which.
+- **`/oauth2/token`'s answer for a rotated-out refresh token** is not documented by AWS and
+  was not captured. The portal's tests assume `invalid_grant`. In a browser the stale tab
+  did show the session-ended message (owner, 2026-11-27).
+- **The worker's own password check has never been reached by an upload.** GuardDuty held
+  both protected PDFs tried (40-bit and 128-bit RC4) at the scan. AES-encrypted PDFs were
+  not tried. The probe runs the check on Fargate.
+- **The IAM propagation wait** has not been shown to work: only a run that creates a role
+  and such a policy together can show it, and the next one is a new stack.
+- **A RunTask refused for the vCPU quota**: how it reaches Step Functions is not known. The
+  design does not depend on it.
+- **The scan event's `versionId`**: not verified directly that it names the version scanned.
+- **Platform-pool MFA enrolment** is not recorded, and **failed sign-ins** are not audited
+  (both owner decisions; "Known limits").
+- **Cognito's `amr` claim**: whether it shows MFA has still not been checked.
+- **The scan role's limit to `inbox/`**: GuardDuty's later checks of a plan's role, and
+  whether object tags are still written, have not been seen ("The scan role's reach").
+- **The fix for "Process again" after a companion replacement has not run in AWS** (built
+  2026-11-27, not deployed). Its checks are listed with it.
+- **The price on the probe's `ai_usage` rows since update 43** has not been read: no read
+  path reaches the table. The usage and cost view will show it, beside the earlier rows at
+  no price.
+- **The break-glass log** is empty because the role has never been assumed.
 
 Step 1 was verified on 2026-11-23:
 
@@ -166,32 +1277,105 @@ Step 5 was completed and verified on 2026-11-24:
 - Known limits: "Known limits (owner decisions, build step 5)" below. What carries forward:
   "Carried forward to step 6" below.
 
+Step 6, first half, was verified on 2026-11-24 (evening, US Eastern; 2026-11-25 UTC):
+
+- Deployed through 99bd9d1: `pulumi up`, `uv run scripts/migrate.py` (`0008`, then `0009`),
+  `uv run scripts/update_tenants.py` (bucket CORS, inbox-only malware scanning, plans `ACTIVE`).
+  `uv run scripts/migrate.py --command verify` (read-only, after the evening's checks):
+  revision `0009`, `rls_verified: true`, `roles_verified: true`. All 19 alarms `OK`; the ingest
+  queue and both dead-letter queues empty.
+- `run_isolation.py` passed with the inbox fixture (69 of 69 in the Lambda; owner).
+- In a browser and with `scripts/ingest_check.py` (owner, Infinity Loans):
+  - A normal upload passed fingerprint after the `TaggingDirective=REPLACE` fix, with no
+    permission added.
+  - A rejected companion: the PDF flagged, all four errors listed, Close blocked, and the
+    dialog offered fix, remove or close without the companion.
+  - `06-not-a-pdf.pdf`: `failed`, "The file is not a PDF.", no alarm.
+  - `ingest_check.py bad-companion`: six errors from the server; close refused with
+    `409 batch_not_ready`.
+  - `ingest_check.py eicar` (CloudShell): batch `0c490d9d-…`, document `21b2e1ee-…`, file
+    `infected` (`threats_found`), document `quarantined`. The tenant view shows the reason and
+    no Open PDF. GuardDuty raised `Object:S3/MaliciousFile` (severity 8, "EICAR-Test-File (not
+    a virus)") a second after the upload. The finding's object hash is EICAR's SHA-256. Its
+    `VersionId` is the inbox version, so the infected version was identified without reading
+    it. Organization alerting did not email it; that is the foundation stack's, not this
+    project's.
+  - Throttle test (reserved concurrency 0 on `assay-dev-pipeline-steps`): document
+    `16998f40-…` failed. Tenants see "The fingerprint step failed."; master admins see
+    `fingerprint_failed · Lambda.TooManyRequestsException`. The throttle was removed
+    (`get-function-concurrency` empty) and `pulumi preview` showed 337 unchanged.
+- How each part of the EICAR document's handling is known (read-only, 2026-11-25 UTC; no
+  object content read), and what can't be read directly: see "Quarantine evidence" in the
+  step 6 notes.
+- Known limits carried into the second half: "Known limits (owner decisions, build step 5)"
+  and the step 6 notes. What is still open: "Carried forward to step 6", "Still open".
+
 ### Carried forward to step 6
 
-- **Isolation and storage (step 4 notes):** no file name in any S3 key
-  (`StorageContext.inbox_key(batch_id, file_id)`); move the reserved fixture document ID into
-  `assay_tss.keys`, make the isolation tests import it, refuse it in the pipeline, and test
-  both refusals; work only from database rows and scan events, never from a listing.
-- **New callers need their grants:** the API and the workers become TSS callers (`callers` in
-  `TenantStorage`, `infra/__main__.py`); every pipeline queue goes into `sqs_endpoint_policy`
-  (today it admits only the auth-event trigger); a new platform KMS key goes into
-  `platform_key_arns`; a new alarm passes the alarm topic.
-- **Bucket CORS for browser uploads** reaches existing tenants only when their stacks run
-  again: step 6 needs an "update every tenant" command (step 4 note).
-- **Rule 6:** re-check the AI services opt-out policy and that Bedrock invocation logging is
-  off before any content first goes to Bedrock, Textract or Rekognition.
+Done in the first half of step 6 (see "Step 6, first half" below): inbox keys by opaque file ID;
+the reserved fixture ID in `assay_tss.keys`, imported by the isolation tests and refused by
+the API and the pipeline (tested); no listing anywhere (session policies and a source test);
+the API and the pipeline functions as TSS callers, each with its own accesses; the ingest
+queue in the SQS endpoint's policy; bucket CORS and the "update every tenant" command
+(`scripts/update_tenants.py`); every new alarm on the alarm topic; the new screens in
+`SCREENS`. No new KMS key, so `platform_key_arns` is unchanged.
+
+Still open:
+
+- **Rule 6, before stage 3's deploy:** re-check the AI services opt-out policy and that
+  Bedrock invocation logging is off, and show the owner the output, before any content first
+  goes to Bedrock (last checked 2026-11-27: `optOut` for every service, logging off). The
+  check is `uv run scripts/check_deployment.py --ai-services`, and it runs first in every
+  mode of that script. Stage 2 sends page pictures to Textract since 2026-11-27.
+- **The second-half plan** (owner, 2026-11-24) is approved; its decisions are under "Step 6,
+  second half". What it had to include is all built in stage 1: one worker task per document
+  (owner decision 1), reprocessing with attempt numbers, attaching or replacing a companion
+  file after ingestion, the quarantine notice (the threat name comes from the scan event
+  itself: `detail.scanResultDetails.threats[0].name`, with no GuardDuty permission), and
+  refresh-token rotation on both app clients.
+- **Titan Text Embeddings V2 (owner decisions 1 and 2):** called by model ID in us-east-1 (it
+  has no `us.` profile; a named exception to section 2), with an `ai_models` row (job
+  `embed`) and its price left blank for the owner. It arrives with stage 4, in that stage's
+  migration; `seed.py` refuses a catalog with a blank price.
+- **Remove the "later steps are not available yet" note** (`laterStepsPending` in
+  `portal/src/pages/ingestionFormat.ts` and its Alert in `Steps`, both marked
+  `TODO(build step 6, second half)`) once steps 5 to 10 exist (stage 4). Until then a document that
+  passed fingerprint stays Processing, and the steps panel says why. Add each new step's
+  results to `RESULT_TEXT` (plain words; the stored codes are never shown).
 - **Portal:** add every new screen to `SCREENS` in `portal/e2e/layout.e2e.ts` (and its data
-  to `e2e/fixtures.ts`); use `RowActions` for any row menu; the navigation width follows the
-  longest title (a title such as "Ingestion history" widens it to 218 px), and the rendered
-  check catches one that no longer fits. Run `uv run scripts/check_portal_render.py` after any
-  visible change and look at the screenshots. Not covered by it: the CloudFront CSP.
+  to `e2e/fixtures.ts`); use `RowActions` for any row menu. The navigation is now 218 px
+  ("Ingestion history"). Run `uv run scripts/check_portal_render.py` after any visible change
+  and look at the screenshots. Not covered by it: the CloudFront CSP.
 - **Still to check:** whether Cognito's `amr` claim shows MFA (it could replace the
   pre-token trigger's `AdminGetUser`, step 3 note).
 - **Dependencies:** bump ESLint to 10.15.0 and `typescript-eslint` to 8.74.0 after
   2026-12-07 (dev-only `minimatch` advisory). Raise the `fastapi` and `pydantic` caps
-  deliberately.
+  deliberately. New in step 6: `aws-lambda-powertools` capped below 3.40 and `pypdfium2`
+  below 5.16 (releases younger than two weeks on 2026-11-24).
 - **Before production (unchanged):** VPC flow logs to the Log Archive account; an
   approval-gated break-glass role; a Cognito signing-key rotation needs a `pulumi up`.
+- **Before production (owner, 2026-11-25): the break-glass rule, log and alarm have never
+  been exercised in AWS; test once deliberately.** Nobody has assumed the role, so the
+  EventBridge rule has matched nothing, `/aws/events/assay-dev-break-glass` is empty and
+  `break-glass-assumed` has never fired. `check_deployment.py` reports the log as not proven.
+- **Before deploying to Staging or Production (owner, 2026-11-25): request the Lambda
+  concurrent-executions quota increase in that account first.** A new account allows 10
+  concurrent executions (Service Quotas L-B99A9384), which is too few for the pipeline: see
+  "One scan result failed once" in the step 6 notes. Request 1,000, as for Development:
+  `aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --profile <profile> --region us-east-1`,
+  and wait until it is granted before the first `pulumi up`.
+  - **The two reserved-concurrency settings cannot be set before the quota is raised.**
+    `scanReservedConcurrency` (50) and `tssReservedConcurrency` (300) need an account that
+    allows at least 750: the two of them, and 400 unreserved. Lambda always keeps 100
+    unreserved, so in an account that allows 10 it refuses the setting and `pulumi up`
+    fails. Leave both keys out of a new stack's config until the quota is granted, then
+    set both (the program refuses one without the other) and deploy.
+  - `uv run scripts/check_deployment.py --before-deploy --stack <stack>` reads the account's
+    limit and warns if it is below what the stack's settings need.
+- **After every deploy's checks, run `uv run scripts/check_deployment.py`** (read-only): it
+  fails if a configured log destination has received nothing, or if the scan function's or
+  the TSS's reserved concurrency in AWS is not what the stack's config says, and repeats the
+  concurrency warning. See the step 6 notes.
 
 ### Reading audit_log
 
@@ -211,6 +1395,18 @@ views, not to the audit record.
 ## Known limits (owner decisions, build step 5)
 
 These stay as they are into step 6 unless the owner decides otherwise.
+
+- **Inbox objects stay in the bucket** (owner decision 10, build step 6). No lifecycle rule
+  expires them: it would need `s3:PutLifecycleConfiguration`, a setting that can destroy data,
+  for the provisioning role. A PDF moved to `originals/`, an infected file moved to
+  `quarantine/`, a removed file and a discarded batch's files all leave their inbox versions
+  (or a delete marker over them). They are never read again: only pipeline sessions can read
+  `inbox/`, and the pipeline works only from database rows.
+- **The portal's CSP admits every virtual-hosted S3 bucket in the Region**
+  (`https://*.s3.<region>.amazonaws.com`; owner decision 11, build step 6). CSP cannot name
+  only the tenant buckets (`<prefix>-t-*` is not a valid source). The browser reaches a bucket
+  only through a presigned link, which names one key of one tenant's bucket for 15 minutes at
+  most.
 
 - **A sign-out from a session already ended by an MFA reset or a disable is not recorded**:
   the account check refuses the token (`session_revoked`), so `POST /auth/signed-out` answers
@@ -258,6 +1454,32 @@ These stay as they are into step 6 unless the owner decides otherwise.
   carries neither (without threat protection). Rows the API writes take the viewer's IP
   from `CloudFront-Viewer-Address`. The portal's `session_started` row, written right after
   the sign-in, carries both; the trigger's `sign_in` row stays the record of the sign-in.
+- **Two tabs that share one refresh token: the second to refresh is signed out** (a known
+  effect of refresh-token rotation; owner, 2026-11-27). With rotation on, a refresh returns
+  a new refresh token and the old one stops working 10 seconds later.
+  - **Who it affects.** Only tabs that hold the same refresh token: a duplicated tab, or one
+    the browser restored (both copy the tab's sessionStorage). Tabs that signed in
+    separately each have their own tokens and never meet it.
+  - **What happens.** Whichever of the two refreshes second, more than 10 seconds after
+    the first, is refused (`RefreshTokenReuseException`; `invalid_grant` is what the
+    portal's tests assume `/oauth2/token` answers, which AWS does not document). The first
+    tab stays signed in: on the replica, reusing a rotated-out token revoked nothing else
+    (the isolation run checks that every time). Inside the 10 seconds both are accepted.
+  - **What the user sees in the second tab.** The sign-in screen with "Your session has
+    ended. Sign in again to continue." and a Sign in button. Not an error page, not the app
+    left open over a dead token, and no retry loop (`Root.tsx`, `SESSION_ENDED`; tested in
+    `Root.test.tsx`). If the refusal comes in the background, a minute before the access
+    token expires, the tab goes to that screen then. If the tab is reloaded later, it gets
+    there after one failed refresh. Sign in usually needs no password: managed login's own
+    session is still open, unless someone signed out.
+  - The same screen shows for the other two ways a session cannot be renewed: 8 hours after
+    the sign-in, and after an admin's disable or MFA reset. The tab cannot tell which it
+    was, so the message does not say.
+  - It writes no audit row (there is no valid token left to report with) and does not sign
+    out the portal's other tabs.
+  - A refresh that got no answer (offline, a timeout) is not a refusal: the app stays open
+    until the access token expires, the portal tries once more, and only then shows the
+    sign-in screen, keeping the stored tokens so a reload can try again.
 - **A portal tab that is closed or offline when the user signs out in another tab keeps its
   refresh token** until it expires or is revoked by an admin action (a disable or an MFA
   reset, which also ends its sessions through `sessions_revoked_at`). Sign-out signals only
@@ -366,7 +1588,9 @@ Owner decisions on these rules (2026-11-23):
   Textract included), last updated 2026-11-24 04:37:58 UTC, and Bedrock model invocation
   logging is off (`aws bedrock get-model-invocation-logging-configuration` returns no
   configuration). The policy ID is the owner's; a member account cannot list the policies
-  attached to it. Check both again before any content first goes to Bedrock, Textract or
+  attached to it. Checked again on 2026-11-24 for the step 6 plan: the same effective policy,
+  last updated 2026-11-24 04:37:58 UTC, and no invocation logging configuration. Check both
+  again before any content first goes to Bedrock, Textract or
   Rekognition:
   `aws organizations describe-effective-policy --policy-type AISERVICES_OPT_OUT_POLICY --profile pilar-dev`.
 
@@ -403,6 +1627,14 @@ assets/     Logo and favicon SVGs
   every image rebuilds on the next `pulumi up`.
 - CI (`.github/workflows/ci.yml`) runs ruff (lint and format), mypy (strict), pytest,
   pip-audit and Bandit. It never deploys.
+- **CI has no AWS credentials and signs in to no registry** (owner, 2026-11-27). Before the
+  image tests, `scripts/ci_base_images.py` loads the pinned base images from the workflow's
+  cache and pulls what is missing, retrying a failed pull with growing waits (ECR Public's
+  `429 Too Many Requests` failed the job during step 5 and on 2026-11-27). A test fails if
+  the workflow gains a credential or a sign-in.
+- **A Pulumi mock test's check waits for `conftest.after_settled(...)`**, never for
+  `pulumi.Output.all(...)` or one resource's output: a resource is registered with the
+  mocks some time after its constructor returns (`tests/unit/test_mock_settling.py`).
 - **GitHub Actions pinning (SOC 2).** Pin every action to a full 40-character commit
   SHA, with the release in a trailing comment:
   `uses: owner/repo@<sha> # vX.Y.Z`. Never use a tag or branch alone. Before using or
@@ -498,6 +1730,113 @@ assets/     Logo and favicon SVGs
   provenance attestations by default, which pushes an OCI image index that Lambda
   rejects. The `pulumi-docker-build` provider cannot turn attestations off, so don't use it
   for Lambda images. Base images in Dockerfiles are pinned by digest.
+- **"`<repository>@sha256:...`: not found" during `pulumi up` was the build's own check, not
+  a missing image** (diagnosed 2026-11-25, read-only). It failed twice in 99 pushes:
+  `assay-dev-isolation-tests` on 2026-11-24 19:54 UTC and `assay-dev-pipeline-worker` on
+  2026-11-25 16:52 UTC (stack update 37).
+  - **What CloudTrail shows.** Both times ECR accepted the manifest (`PutImage`, tagged,
+    with the digest the error names; the image has been in the repository ever since). The
+    check (`docker buildx imagetools inspect`, on the host) came 37 and 38 seconds later,
+    and its request for the manifest never reached ECR: there is no `BatchGetImage` for the
+    digest, where every successful push has two. ECR saw only a
+    `BatchCheckLayerAvailability` for the manifest's digest, which is the registry client's
+    fallback (it asks for the digest as a layer), and a manifest is never a layer.
+  - **Why it read as "not found".** In the resolver buildx 0.38.1 ships, a manifest request
+    that fails to connect is ranked below a 404, and the fallback still runs; its 404 then
+    replaces the real error. The client gives a connection 30 seconds.
+  - **Why the connection failed.** Both were runs in which every image rebuilt: eight
+    builds push at once and fill the uplink for minutes (below). In those runs the check
+    waited 2 to 33 seconds when it passed; the two failures are the two longest waits. In
+    runs that upload little it answers in 0 to 2 seconds. **Not seen directly:** the
+    failed request's own error, which the script did not keep.
+  - **Ruled out:** a lifecycle rule expiring it (the rule expires the oldest images beyond
+    10 by push time; CloudTrail's `PolicyExecutionEvent`s show only old tagged images
+    going, and no repository holds an untagged manifest); a cache or attestation manifest
+    (attestations are off, no cache is exported, and the digest in the error is the pushed
+    image's own); a wrong reference.
+  - **The fix** (`scripts/build_image.py`): the pushed image is confirmed through ECR's own
+    API (`BatchGetImage` by digest, up to 7 tries over about 90 seconds), and a failure
+    says whether the request failed or ECR had no image. No registry client is used for
+    the check. And an image already in the repository under its tag is used as it is: the
+    tag is the hash of the sources and tags cannot be overwritten, so a run that failed
+    after its push costs nothing to repeat.
+  - **What the next full rebuild showed (stack update 39, 2026-11-27 14:41 UTC; CloudTrail,
+    read-only).** Eight images were pushed within four seconds of each other, and each was
+    confirmed by the first `BatchGetImage` from the build script, 0 to 1 second after its
+    `PutImage`. The update succeeded first time. **It does not prove the fix**: that day
+    the layers uploaded in 2 to 6 seconds, not minutes, so the connection was never full
+    and no confirmation had to be retried. Why the upload was so much faster than on
+    2026-11-25 (about 5 Mbit/s then) is not known. The retry path is covered by unit tests
+    only.
+  - **Why a full rebuild takes 6 to 7 minutes: it is the upload, not the build.** In update
+    37 all eight builds finished within 23 seconds (their layers were cached). Then 259 MB
+    went to ECR over about 7 minutes, roughly 5 Mbit/s. Each image's last layer holds every
+    Python dependency and the code together (`COPY --from=build /out ...`: 26 to 53 MB
+    compressed), so one changed source file uploads the dependencies of every image again.
+    **Done (owner decision, 2026-11-25): the dependencies and the code are two layers**
+    in every Dockerfile that installs locked dependencies (eight; the three Cognito
+    trigger images have none). The build stage installs the wheels to `/deps` and copies
+    the code to `/code`; the final stage copies `/deps`, then `/code`, to the same place
+    with the same modes. A code change now uploads the code layer only.
+  - **The owner's conditions: image contents and the pinned base image digests must not
+    change.** Checked once, by building every image from its Dockerfile as it was and as
+    it is, from the same sources, and comparing every file in them (path, type, mode,
+    owner, size, SHA-256), the installed packages, the image's settings (environment,
+    command, user, working directory, ports, volumes) and the `FROM` lines.
+    **Result (2026-11-25): identical in all eight.** The same packages (21 to 40 an
+    image), the same files (10,402 to 23,898 an image) with the same modes, owners, sizes
+    and hashes, the same settings and the same `FROM` lines; one more layer each. The one
+    path that differed in every image is `/etc/hostname`, which is not in an image: Docker
+    writes each container's own ID there when it starts.
+  - The code layers are small: all the code trees together are about 840 KB, 220 KB
+    compressed, against 26 to 53 MB for the old layer.
+  - **The lasting test** is `tests/unit/test_image_layers.py`. `tests/unit/image_packages.json`
+    records every distribution each image's interpreter could see **before** the split;
+    the test builds each image and fails if one is gained, lost or at another version. It
+    also holds every base image to the three pinned digests, and the two `COPY` lines to
+    their order. **After a deliberate change to `uv.lock` or a base image, run
+    `uv run scripts/image_packages.py --write`** and read what the record gained and lost
+    before committing it. A new Dockerfile that installs dependencies must be added to
+    `IMAGES` in that script.
+  - This changes every one of those Dockerfiles, so all eight images rebuild and upload
+    once more on the next `pulumi up` (the slow kind, for the last time for code changes).
+- **Line endings: files Git marks as LF must be LF on disk** (owner, 2026-11-27, after it
+  happened twice). On 2026-11-25, 18 files in the working tree had CRLF although Git stores
+  them with LF (`git ls-files --eol`: `i/lf w/crlf`): `.dockerignore`, `api/pyproject.toml`
+  and sources that go into images among them. Git shows no difference for such a file, but
+  an image is built from the bytes on disk and tagged with their hash, so the image holds
+  the CRLF copy under a tag no clean checkout produces.
+  - **Git did not write them, and `core.autocrlf` is not the cause.** It is `true` on the
+    owner's machine (Git for Windows' system default), but a file marked `eol=lf` is
+    checked out with LF whatever it says: a fresh clone under that setting had no such
+    file with CRLF (2026-11-27). All 18 were last saved one at a time, most on 2026-11-24
+    between 12:42 and 15:23, so an editor or a tool saved them with the platform's line
+    endings. Which one is not known. Two known ways: VS Code creates new files with CRLF
+    on Windows (`files.eol` is `auto`), and Python's `Path.write_text()` writes CRLF on
+    Windows unless it is given `newline="\n"`. **Scripted edits must pass `newline="\n"`.**
+  - What `core.autocrlf=true` does do: every file that is only `text=auto` (the portal's
+    `.ts` and `.tsx`, `.json`, `.svg`, 74 files) is checked out with CRLF. That is
+    harmless to Git; the portal build's hash and the branding SVGs then depend on the
+    machine. **Not changed:** making them LF would change the bytes of the SVGs Cognito's
+    branding is built from, which is a change to deploy on purpose.
+  - **Prevention, four layers.**
+    1. `uv run scripts/check_line_endings.py` lists the files (`--fix` rewrites them with
+       LF; line endings only, and Git sees no change). `tests/unit/test_line_endings.py`
+       runs it, so `uv run pytest` fails on the development machine, where the problem
+       arises.
+    2. CI runs the same script. A Linux checkout has no CRLF, so there it can only catch
+       CRLF that was committed.
+    3. `assay_infra.images.source_tag` refuses an image source with CRLF, so `pulumi
+       preview` and `pulumi up` stop before an image is built from one.
+    4. `.editorconfig` sets LF for exactly the patterns `.gitattributes` marks (a test keeps
+       the two lists in step). VS Code needs the EditorConfig extension for it
+       (`.vscode/extensions.json` recommends it); without the extension, set
+       `"files.eol": "\n"` in VS Code's user settings.
+  - `*.md` is now marked `eol=lf` too: `tests/isolation/README.md` goes into the isolation
+    image, and was the one image source Git could check out with CRLF. A test fails if
+    anything that goes into an image is not marked.
+  - After `--fix`, `git status` lists the rewritten files as modified until they are
+    staged once, although `git diff` shows nothing: Git's cached file sizes are stale.
 - **ECR login on Windows.** An ECR token (about 3,100 characters) is too long for the
   Windows Credential Manager ("The stub received bad data"). `scripts/build_image.py`
   logs in, builds and pushes with `DOCKER_CONFIG` pointing at a temporary directory that
@@ -778,14 +2117,16 @@ assets/     Logo and favicon SVGs
   database, not by listing keys. BUILD_SPEC.md section 6 has the layout.
 - **For step 6 (pipeline): ignore the isolation tests' fixture object.** Each test tenant's
   bucket holds one object the isolation tests wrote, kept by Object Lock:
-  `derived/text/00000000-0000-4000-8000-0000000000f1.json` (`FIXTURE_DOCUMENT` in
-  `tests/isolation/conftest.py`). It is outside `inbox/`, so no upload or scan event ever
+  `derived/text/<reserved ID>.json` (since build step 6: `assay_tss.keys.RESERVED_DOCUMENT_ID`,
+  `keys.isolation_fixture_text_key()`). It is outside `inbox/`, so no upload or scan event ever
   refers to it, but it sits under `derived/text/`, which the pipeline writes. That document
   ID is reserved: it has no `documents` row and must never get one. The pipeline must work
   only from database rows and scan events, never from a listing of `derived/` or any other
   prefix, so it never treats this object as a document's text. Owner's condition
   (2026-11-23): the fixture is never in the inbox, and the pipeline ignores it. The owner
-  decided to keep it at this key. Step 6 must also do the following:
+  decided to keep it at this key. (2026-11-24: the owner asked for a separate inbox fixture
+  for the inbox refusals; see "Reserved fixture objects" under "Step 6, first half". This
+  text fixture stays where it is.) Step 6 must also do the following:
   - **Define the reserved document ID as a constant in one place.** Today it is defined
     only in `tests/isolation/conftest.py`, which the pipeline cannot import. Move it to
     code that both the pipeline and the isolation tests import (`assay_tss.keys` is the
@@ -1122,3 +2463,1274 @@ Audit-trail follow-ups (owner decisions and conditions, 2026-11-24):
   (`mfa_not_enabled`, 409, otherwise). No IAM change: the function's role already had
   `AdminGetUser`; the API may now ask it for one more operation, which changes nothing in
   Cognito.
+
+### Step 6, first half (batches, uploads, scan routing, fingerprint, ingestion history)
+
+Owner decisions on the plan (2026-11-24), by number:
+
+- **1, 2.** Titan Text Embeddings V2 by model ID in us-east-1, a named exception to section 2
+  (it has no `us.` inference profile: `aws bedrock list-inference-profiles`, 2026-11-24). It
+  goes into `ai_models` with job `embed`, price left blank for the owner (second half).
+  **The three Claude profiles were test-called by `scripts/seed.py` on 2026-11-23** (section
+  7b's "verify each profile with a test call before seeding"), successfully.
+- **3.** A GuardDuty scan event is a pipeline job message for rule 4: the tenant comes from
+  the database (`pipeline.tenant_for_upload`, a registered upload's key), and the event's
+  bucket must be that tenant's bucket (`naming.bucket_name`), or the event is refused.
+- **4 (changed on the owner's later answer), e.** The API never reads `inbox/`. The scan
+  Lambda (a PIPELINE caller) validates each companion file once its scan is clean: size
+  checked first, at most 64 KB read, strict JSON with a depth limit, never logged, errors by
+  key only. Close reads only the database and waits for every file's scan result.
+- **5.** A batch open 24 hours is closed by the sweeper anyway: files never uploaded and
+  companions with no PDF are dropped (`removed`), a PDF whose companion is invalid fails
+  (`companion_invalid`), files still waiting for a scan wait on in the closed batch.
+- **6, 7.** New table `batch_files`; extra routes `GET /batches` (status and mine filters; any
+  tenant member, for the history's batch filter) and `DELETE /batches/{id}/files/{file_id}`.
+- **8.** Deferred: the worker is not built (see "Carried forward to step 6").
+- **9.** Each tenant's malware protection plan covers `inbox/` only (`object_prefixes`).
+- **10, 11.** Known limits: inbox objects stay; the CSP admits every S3 bucket in the Region.
+- **12, a.** The upload link signs `Content-Length`, `Content-Type` and
+  `x-amz-checksum-sha256` (botocore puts all three in `X-Amz-SignedHeaders`; checked offline).
+  The scan step checks the stored version's size and SHA-256 against the registration again.
+- **13.** The fingerprint step holds a password-protected PDF (`on_hold`, `pdf_encrypted`;
+  PDFium's `FPDF_ERR_PASSWORD`), whatever GuardDuty said.
+- **14, g.** A `failed` document is not an original; a duplicate is within one tenant only
+  (advisory lock on tenant and hash, an explicit tenant condition, row-level security, and a
+  partial unique index per tenant).
+- **15.** Status `discarded` (a discarded batch's documents, a removed file's), left out of
+  both history views unless the status filter asks for it. A quarantined document keeps its
+  status when its batch is discarded.
+- **16.** Each TSS caller gets only its accesses (`TSS_CALLERS`: role name -> service and
+  accesses; `api`: read and upload; `scan`, `pipeline`, `sweeper`: pipeline). No session may
+  list a bucket.
+- **17.** No database CHECK for the reserved ID (the literal would be written a second time).
+- **18.** Textract and Bedrock will be called with the worker's own role and bytes (second
+  half); Rekognition only with tenant credentials (step 8).
+- **19.** A suspended tenant's documents get no new execution: the starter drops the job and
+  the document stays eligible; the sweeper queues it again once the tenant is active (within
+  about 20 minutes). Executions already running finish.
+
+Conditions, and where each is met:
+
+- **a.** Limits: 100 MB a PDF, 64 KB a companion file, 200 PDFs and 200 companion files a
+  batch, 50 files a registration request, names up to 255 characters, `.pdf` and `.json`
+  only (`assay_db.batches`). Signed headers as in 12. A stored size or hash that differs fails
+  the file (`mismatch`, `size_mismatch` or `checksum_mismatch`) and its PDF.
+- **b.** The first decisive scan result pins `batch_files.version_id`; fingerprint downloads,
+  hashes and copies that version only. A later version's event is logged and ignored
+  (`later_version_ignored`). Tested: `test_only_the_version_that_scanned_clean_is_ever_used`.
+- **c.** READ sessions read `originals/`, `derived/` and `chat/` only; UPLOAD writes `inbox/`
+  only; only PIPELINE reads `inbox/` and `quarantine/`. Isolation tests: a quarantine fixture
+  (`keys.isolation_fixture_quarantine_key()`) read current and by version; the inbox by S3's
+  AccessDenied reason (see the notes). `pdf-url` refuses anything whose key is not the
+  context's `original_key`.
+- **d.** A registered file with no scan result 30 minutes after registration: `scan_timeout`
+  and `on_hold` if it is in the bucket (HEAD by key), with an ERROR line (alarm); otherwise
+  `not_uploaded`. An event for an unregistered inbox key: ERROR line (alarm), ignored.
+- **f.** `GET /documents/{id}/pdf-url`: a `viewed` event with the user's ID and email, the IP
+  address (`CloudFront-Viewer-Address`) and the browser; five minutes; `response-content-type`
+  `application/pdf`, `inline`. `platform.ingestion_events_v` leaves `viewed` events out.
+- **h.** `api_task_role()` creates the role outside `ApiService` with an alias to its old
+  parent. The preview (2026-11-24) shows no change to it at all.
+- **i.** Titan's price stays blank (second half).
+
+How it works (first half):
+
+- `POST /batches/{id}/files` -> a `batch_files` row per file, a `documents` row per PDF (its ID
+  is the file's ID), and a presigned PUT to `inbox/{batch_id}/{file_id}`, signed with an
+  UPLOAD context. GuardDuty scans it -> EventBridge -> the scan Lambda records the result.
+  Close (or a scan result for a closed batch) makes clean PDFs `processing` and sends one job
+  each to the ingest queue after the commit. The starter starts one execution per document,
+  named after it. Fingerprint (step 4) hashes, checks duplicates, holds encrypted PDFs and
+  copies the PDF and its companion to `originals/`. The execution then ends; documents stay
+  `processing` until the second half adds steps 5 to 10.
+- Statuses: `uploaded` (batch open), `scanning` (closed, a scan still due), `processing`
+  (queued or running), `quarantined`, `on_hold`, `failed`, `duplicate`, `discarded`.
+- Database: migration `0008` (see its docstring). The two `pipeline` functions belong to the
+  new NOLOGIN role `pipeline_lookup`, which the bootstrap creates; they answer with tenant
+  IDs only and read no file name and no `tenant_storage`.
+- Shared logic is in `assay_db.batches` (the API and the pipeline both use it); the
+  companion validator in `assay_schemas.companion`; the pipeline in `workers/assay_workers`
+  (one Lambda image, `workers/lambda.Dockerfile`, four handlers); the infrastructure in
+  `infra/assay_infra/pipeline.py`.
+
+Deploy order (owner): `pulumi up`; `uv run scripts/migrate.py` (bootstrap creates
+`pipeline_lookup`, then 0008); `uv run scripts/update_tenants.py` (CORS, malware plan
+prefix: needed before any browser upload); `uv run scripts/run_isolation.py ...`; browser
+checks. After the copy and error-code fixes: `pulumi up`, then `uv run scripts/migrate.py`
+(0009) straight away. Until 0009 is in, the admin route's query names a column the view
+does not have, so the master view's step panel fails (the tenant view is unaffected).
+
+Notes:
+
+- **Verified by the first browser upload** (Infinity Loans, 2026-11-24 21:32 UTC): the
+  presigned PUT with the signed `x-amz-checksum-sha256` is accepted under Object Lock default
+  retention, and the scan event maps to the registered upload.
+- **Since verified in AWS** (2026-11-24): S3 cites `s3:GetObject` and `s3:GetObjectVersion`
+  for a session-policy refusal of an object that exists (the inbox fixture, isolation run
+  69 of 69), and a copy with `TaggingDirective` `REPLACE` and no tags passes with the tenant
+  role's permissions (fingerprint, next bullet).
+- **Not verified directly:** that the scan event's `versionId` names the version scanned
+  (AWS's example has it; it does not say so in words). The scan Lambda does not log the
+  version ID. For the EICAR upload, the GuardDuty finding's `VersionId` was the inbox
+  version GuardDuty scanned, and its hash was EICAR's.
+- **Pipeline copies take no tags** (owner-approved fix, 2026-11-24). The first browser
+  upload failed at fingerprint: `CopyObject` from `inbox/` to `originals/` was refused
+  (`AccessDenied`, generic message) on all three attempts. GuardDuty tags every object it
+  scans (the plan's tagging is on), and `CopyObject` copies the source's tags by default.
+  That needs `s3:PutObjectTagging` (a `CopyObject` dependent action in the Service
+  Authorization Reference) and reading the source's tags. The policy simulator
+  (2026-11-24) shows `s3:GetObjectVersionTagging` and `s3:PutObjectTagging` as
+  `implicitDeny` in the deployed tenant role's policy and in the PIPELINE session policy, and
+  `explicitDeny` in the tenant bucket policy (as the program writes it), while
+  `GetObjectVersion`, `PutObject` and `GetObjectTagging` are allowed in all three. Every
+  copy (`runtime.S3Objects.copy`: fingerprint's originals and the scan step's quarantine)
+  now sends `TaggingDirective=REPLACE` with no tags. No permission changed. **If S3 still
+  refuses, stop:** the alternative is a widening the owner must approve first (both actions
+  for the tenant role, in its policy, the PIPELINE session policy and every tenant's bucket
+  policy).
+- **A failed step names itself** (owner decision, 2026-11-24). Each step's catch goes through
+  a Pass state that sets `failed_step` to that step's name (fixed text in the definition);
+  `Failed` receives only that and the error's name (`$.error.Error`), never its `Cause`. The
+  document's code is `{step}_failed` (`steps.PIPELINE_STEPS`; anything else is
+  `pipeline_error`), which is all a tenant user sees ("The fingerprint step failed."). The
+  `failed` event also keeps `error_type`, the error's name, if it matches
+  `^[A-Za-z0-9_.]{1,64}$`. Master admins see the code and the error type: migration `0009`
+  adds `error_type` to `platform.ingestion_events_v` (a read widening for
+  `platform_reader`), and the view shows it only if it matches the same pattern. The
+  tenant's document detail reads only `detail.error`. **Second half: add every new step to
+  `PIPELINE_STEPS` and give it its own Pass state** (`test_infra_pipeline.py` checks every
+  catch goes through one).
+- **Who opened a PDF is shown to tenant admins only** (owner, 2026-11-24): `GET
+  /documents/{id}` returns each `viewed` event's `viewer` only when the caller is a tenant
+  admin; a tenant user sees "Opened" with no name. The steps panel shows plain words for
+  every result (`RESULT_TEXT`: `continue` is "Passed", `pdf_url` is "Opened").
+- **Every ingestion CSV export is audited** (owner decision, 2026-11-24), like an Audit
+  history export: category `audit`, action `exported`, target type `ingestion_history`
+  (tenant view, written as `app_tenant` in the request's transaction, which commits before
+  the file is sent) or `ingestion_history_all_tenants` (master view, as `platform_writer` in
+  a transaction of its own). Each row has the actor, role, tenant, filters, sort, row count,
+  IP address and browser, and no file name. No permission changed: `app_tenant` and
+  `platform_writer` already had INSERT on `audit_log`.
+- **On-hold wording** (owner, 2026-11-24): every on-hold code says why and what to do
+  (`ERROR_TEXT` in `portal/src/pages/ingestionFormat.ts`; the Upload screen shows it under the
+  file's status). GuardDuty reports a password-protected PDF only as `UNSUPPORTED`, with no
+  reason, so `scan_unsupported` says "most likely because it is password-protected".
+  `pdf_encrypted`, from PDFium at fingerprint, says it for certain.
+- **Master admins always see the stored code**, also on rows from before step-level codes:
+  `pipeline_error` with no error type reads "pipeline_error · the failed step was not
+  recorded".
+- **A failed document cannot be re-run; upload the file again.** Nothing restarts a `failed`
+  document (the sweeper requeues only `processing` documents with no execution), and Step
+  Functions does not reuse a Standard execution's name, which is the document ID, for 90
+  days. A re-upload is a new document and an original: the duplicate check and the
+  per-tenant unique index both skip `failed`. Reprocessing (for extraction changes) is to be
+  proposed in the second-half plan.
+- **S3 refuses a missing key for `s3:ListBucket`** (first isolation run after the step 6
+  deploy, 2026-11-24). Its AccessDenied message to a READ or UPLOAD session reading a key
+  that was never written was "not authorized to perform: s3:ListBucket ... because no
+  session policy allows the s3:ListBucket action", not the read. So the reason shows whether
+  the object was there. The first version of `test_only_pipeline_sessions_read_the_inbox`
+  read a random, missing key, proved nothing, and failed; it now reads the inbox fixture.
+- **Reserved fixture objects** (keys in `assay_tss.keys`, all under `RESERVED_DOCUMENT_ID`,
+  written once by `tests/isolation` with a PIPELINE session and kept by Object Lock):
+  - `derived/text/{id}.json` (build step 4), in both test tenants' buckets;
+  - `quarantine/{id}.pdf` (build step 6), Isolation Test A;
+  - `inbox/{id}/{id}` (owner's request, 2026-11-24), Isolation Test A, **two versions**. The
+    current one's body names the noncurrent one's version ID, because no tenant session may
+    list versions. It shows that READ and UPLOAD sessions are refused both versions, with
+    S3 citing `s3:GetObject` and `s3:GetObjectVersion`.
+  - **The inbox fixture raises no alarm, and real uploads lose none.** GuardDuty scans its
+    two writes (first run only). The scan Lambda ignores results for exactly
+    `keys.isolation_fixture_inbox_key()` at INFO. No upload can have that key: `inbox_key`
+    refuses the reserved ID, and no `batch_files` row has it. Any other inbox key that is
+    not a registered upload still logs at ERROR. That now includes keys under `inbox/` that
+    are not upload keys at all (the reserved ID in another position, a file name), which
+    were INFO "outside the inbox" before. Tested in
+    `test_only_the_isolation_inbox_fixture_is_ignored_without_an_alarm`.
+  - None of them ever gets a `documents` or `batch_files` row, and the pipeline works only
+    from rows and scan events, so none is ever processed.
+- **GuardDuty's event** (user guide, read 2026-11-24): `detail.s3ObjectDetails.bucketName`,
+  `objectKey`, `versionId`; `detail.scanResultDetails.scanResultStatus` is
+  `NO_THREATS_FOUND`, `THREATS_FOUND`, `UNSUPPORTED`, `ACCESS_DENIED` or `FAILED`.
+  `ACCESS_DENIED` with `statusReasons` `OBJECT_E_TAG_CHANGED` means a newer version will be
+  scanned, so the scan Lambda waits for that one.
+- **A missing key answers 403** to every tenant session now (none may list), so `head()` in
+  the pipeline treats 403 and 404 alike as "not there".
+- **Portal:** Upload, Ingestion history (tenant), Ingestion history (all tenants). The
+  navigation is 218 px on both portals. At 1280 px the ten sortable columns did not fit
+  legibly, so the histories use Cloudscape's full-page table, compact times (no year when it
+  is this year's; full time in the row's panel), short IDs in the master view (first 8
+  characters; full in the panel), and column preferences: Size and Duration are hidden by
+  default on a window narrower than 1600 px, kept in the row's panel, and every column can be
+  shown (kept per browser in localStorage). Audit history's Time column drops the year when
+  it is this year's, so the table still fits at 1280 px beside the wider navigation.
+- **Tenant ID in the admin portal** (owner, 2026-11-24). A tenant's detail shows its full
+  tenant ID with a copy button. The Tenants table has an optional Tenant ID column, hidden by
+  default (Preferences): it shows the first 8 characters, as the master ingestion view does,
+  and its copy button copies the full ID. The full ID plus the button made the table 175 px
+  too wide at 1280 px. Master roles already saw tenant IDs; nothing new is exposed.
+- **Deployed names are not Pulumi resource names.** Functions are `assay-dev-pipeline-scan`,
+  `-starter`, `-steps` and `-sweeper`, each logging to `/aws/lambda/<function>`. The Pulumi
+  resource is `<function>-fn`, and that name exists nowhere in AWS. The state machine is
+  `assay-dev-pipeline` (log group `/aws/vendedlogs/states/assay-dev-pipeline`). The queues
+  are `assay-dev-pipeline-ingest`, `-ingest-dlq` and `-scan-dlq`. List them with
+  `aws lambda list-functions` before writing a command (the owner caught a `-fn` name in a
+  throttle command, 2026-11-24).
+- **Which pipeline alarm fires when.** Each function has two:
+  - `<function>-errors` (`assay-dev-pipeline-<function>-errors`): any `ERROR` log line
+    (metric filter).
+  - `<function>-failed`: the `AWS/Lambda` `Errors` metric, an invocation that ran and raised.
+  - The state machine adds `assay-dev-pipeline-executionsfailed` and
+    `-executionstimedout`.
+  - **Every failed document fires `steps-errors` and `executionsfailed`**: the `failed` step
+    logs "document failed" at `ERROR`, and the execution ends in `FailedEnd`.
+  - **`steps-failed` fires only if the function itself raised.** In the first upload's
+    `CopyObject` refusal it did (16:33 Eastern, 2026-11-24). In the throttle test
+    (22:06 Eastern) it did not: with reserved concurrency 0, Lambda refuses the invoke
+    before the function runs, which counts in `Throttles`, not `Errors`. That alarm stayed
+    `OK`.
+  - A handled outcome (`not_a_pdf`, duplicate, `pdf_encrypted`) fires nothing.
+  - A quarantine fires nothing in this stack; see the second-half quarantine notice.
+- **Step failure check** (owner decision D, run 2026-11-24). On a quiet system:
+  1. Throttle the steps function:
+     `aws lambda put-function-concurrency --function-name assay-dev-pipeline-steps --reserved-concurrent-executions 0 --profile pilar-dev`
+  2. Upload a new PDF and close its batch.
+  3. Wait for the `FingerprintFailed` Pass state (about 75 seconds of Lambda retries) in
+     `aws stepfunctions get-execution-history --execution-arn arn:aws:states:us-east-1:<account>:execution:assay-dev-pipeline:<document id> --profile pilar-dev --query "events[?type=='PassStateEntered'].stateEnteredEventDetails.name" --output text`.
+  4. Remove the throttle:
+     `aws lambda delete-function-concurrency --function-name assay-dev-pipeline-steps --profile pilar-dev`.
+  5. Confirm it is gone: `aws lambda get-function-concurrency --function-name assay-dev-pipeline-steps --profile pilar-dev`
+     prints nothing.
+  - The `Failed` state's own invoke retries until the throttle is gone. So remove the throttle
+    within about 75 seconds of `FingerprintFailed`, or that invoke fails too and the document
+    stays `processing` with no `failed` event.
+- **Quarantine evidence** (EICAR document `21b2e1ee-…`, read-only, 2026-11-25 UTC):
+  - **Infected version:** the GuardDuty finding names
+    `inbox/0c490d9d-…/21b2e1ee-…`, version `02cnIxi9XNq7ognqYcV4PgFNzFGeEHFe`, with EICAR's
+    SHA-256.
+  - **Scan result:** the scan Lambda logged `scan result recorded`, `THREATS_FOUND`,
+    `infected`, `threats_found` at 02:52:21, two seconds after the finding. It logged no
+    `ERROR` line; `scan-errors` and `scan-failed` never left `OK`; the scan dead-letter
+    queue is empty.
+  - **Copy and delete marker:** `scan.quarantine` copies the scanned version to
+    `quarantine/{document id}.pdf` (`ctx.quarantine_key`) and then deletes the inbox key
+    without a version (a delete marker; the role cannot delete a version). It does both
+    before the database write that line reports, and either one failing raises. So the line
+    shows both returned success. Nothing records the object, its version or the marker
+    directly:
+    - the organization trail has no S3 data events;
+    - the tenant bucket's policy refuses the administrator even `GetBucketPolicy`;
+    - the scan Lambda does not log the key or version.
+    Only the break-glass role could list the versions, and that raises its alarm.
+  - **View link:** `pdf-url` refuses a `quarantined` document (`NOT_VIEWABLE`;
+    `pdf_not_available`, 409) before it asks for a storage context. The API log shows two
+    `GET /api/documents/21b2e1ee-…` requests and no `pdf-url` request for it, so the refusal
+    was never exercised in AWS. `ingest_check.py eicar` now asks for the link and fails
+    unless it is refused.
+- **Browser-check files:** `uv run scripts/make_test_files.py` writes synthetic ones to
+  `.test-files/` (git-ignored), including `06-not-a-pdf.pdf` (plain text: `failed`,
+  `not_a_pdf`). **The EICAR test file is never written to disk or kept in the repository.**
+  The owner's machine runs SentinelOne (Defender is off), which removes it on write, and the
+  owner adds no exclusions. `scripts/ingest_check.py eicar` assembles it in memory from a
+  masked form (each byte plus one, as hex) and uploads it through the normal API and
+  presigned link. `test_ingest_check.py` checks the masked form hashes to EICAR's published
+  SHA-256 one byte at a time, and that no tracked or untracked file holds the string. Run the
+  `eicar` case in AWS CloudShell, where SentinelOne is not involved. A quarantine raises
+  GuardDuty's own `Object:S3/MaliciousFile` finding (organization GuardDuty and Security
+  Hub); the pipeline raises no alarm for it.
+- **`scripts/ingest_check.py`** (owner decisions A3 and F, 2026-11-24) signs in with the
+  access token of the owner's portal tab, pasted at a hidden prompt (never echoed, logged,
+  stored or on a command line), refuses any tenant but `--tenant`, prints the tenant's name
+  and asks before creating anything. It calls only the portal's routes, through CloudFront,
+  so production code has no special case for it. Standard library only and Python 3.9+, so
+  it runs in CloudShell as well.
+- **Companion files are never left out for their content** (owner decisions A1 and A2,
+  2026-11-24). The portal uploads every companion of the right size and name. What it can see
+  is shown at once, and the scan Lambda's full list replaces that after the scan.
+  `companion.validate` checks every key and reports every problem (`CompanionError.errors`,
+  at most 50). A problem with the file as a whole still stops the check: too large, not
+  UTF-8, nested, not JSON, not one object, or a key twice. The PDF shows "Companion
+  rejected". The API still refuses to close while a companion is invalid. The portal's Close
+  asks, for each such PDF: fix the companion (the rejected one is removed and a corrected one
+  can be added under the same name), remove the PDF, or close without the companion. Each is
+  an existing file removal; no route or permission was added. Attaching or replacing a
+  companion after ingestion (A4) belongs to the second half's reprocessing design.
+- **Idle timeout** (owner decision, 2026-11-24): stack config `portalIdleTimeoutMinutes`
+  (5 to 480) reaches the portal in `config.json` as `idleTimeoutMinutes`. The decision was 30;
+  the owner set the dev stack to **60 for now** (2026-11-24). The stack value is required; the
+  portal's fallback, used only if `config.json` lacks it, stays 30.
+  - `portal/src/idle.ts` watches clicks, keys, wheel, touch and scroll in every tab. Tabs
+    share their last activity on the BroadcastChannel `assay-portal-activity`, at most every
+    15 seconds; pointer movement alone does not count.
+  - A warning shows 2 minutes before. Then exactly one tab, the first to take the Web Lock
+    `assay-portal-idle-sign-out`, signs out as the Sign out button does, other tabs included.
+    It records `sign_out` with `detail.reason: "idle_timeout"` and `idle_minutes`; a manual
+    sign-out records `reason: "user"`. The other tabs show why.
+  - A tab that timed out but did not get the lock waits 10 seconds for the other tab's
+    message, then ends its own session (with no second audit row).
+  - Hidden tabs have slowed timers, so they can sign out up to about a minute late.
+  - Refresh tokens still last 8 hours.
+- **Cognito refresh-token rotation (assessed, not built, 2026-11-24).** It is available on
+  the Essentials plan these pools use. With it on, every refresh returns a new refresh token
+  and invalidates the old one (a grace period of 0 to 60 seconds for retries). The new token
+  is valid only for the remainder of the original's lifetime, so sessions still end 8 hours
+  after the sign-in. It works through the `/oauth2/token` endpoint the portal uses, and
+  oidc-client-ts keeps the new token. It requires removing `ALLOW_REFRESH_TOKEN_AUTH` from the
+  clients' explicit auth flows ("You can't authenticate with REFRESH_TOKEN_AUTH in app clients
+  with refresh token rotation enabled"). It adds `jti` and `origin_jti` claims to access and ID
+  tokens. A stolen refresh token stops working once the portal has refreshed, or the portal's
+  own refresh fails if the thief refreshed first.
+- **`update_tenants.py` is guarded** (owner's request, 2026-11-24): each tenant is previewed
+  first and updated only if every planned change is in `update.ALLOWED_CHANGES` (build step
+  6: create `bucket-cors`; update `malware-protection`'s `protectedResource`), then with
+  `--target` set to exactly those resources. Anything else refuses that tenant. `--preview`
+  applies nothing; `--tenant <id>` limits it to one tenant. Change `ALLOWED_CHANGES` with
+  the tenant program.
+  - **The plan's `status` in the diff** (first `--preview` on Isolation Test A, 2026-11-24,
+    refused correctly). `status` is an output only: Computed in the provider, with no
+    UseStateForUnknown, so any update marks it unknown; it is not among
+    `MalwareProtectionPlanArgs`, and the program never sets it. AWS showed the plan `ACTIVE`
+    with no prefixes. `update.ALLOWED_OUTPUTS` admits `status` for `malware-protection`
+    only, and only while it is not an input the program sends and not an input difference
+    in the provider's detailed diff. Every planned change now logs each output's value
+    before and after.
+  - **Scanning during the update.** It is an in-place `UpdateMalwareProtectionPlan` (only
+    the bucket name forces a replacement), and the provider reads the plan once afterwards
+    with no waiter. AWS does not document whether scanning pauses during an update. So after
+    applying, the script reads each updated tenant's plan with the owner's credentials and
+    requires `ACTIVE` and exactly `inbox/`. It waits up to two minutes for the status to
+    settle, and otherwise prints a "MALWARE PROTECTION IS NOT ACTIVE" banner and exits 1.
+    A file that is never scanned is still caught: after 30 minutes the sweeper puts it
+    `on_hold` (`scan_timeout`) and raises an alarm.
+- **Every Dockerfile that runs `uv export --locked`** copies `schemas/` and `workers/`
+  manifests, and `.dockerignore` admits both packages; every image rebuilds on the first
+  `pulumi up` of step 6.
+
+### Step 6, second half (pipeline steps 5 to 10)
+
+Plan approved by the owner on 2026-11-24. Every later stage follows these.
+
+Stages, each one `pulumi up`, then `uv run scripts/migrate.py` if it has a migration, then the
+owner's checks:
+
+| Stage | Builds | Content to AI services | Status |
+| --- | --- | --- | --- |
+| 1, part 1 | The worker task, the attempt grant, the PDF sandbox, `app_worker`, migration `0010` | None | Complete (2026-11-25) |
+| 1, part 2 | Attempts and "Process again", step 9 (companion), companion attach and replace, the quarantine notice, refresh-token rotation, migration `0011` | None | Complete, verified 2026-11-27 |
+| 2 | Step 5: text layer, Textract for pages that fail the quality score (migration `0012`) | Textract | Complete, verified in dev 2026-11-27. See "Start here" |
+| 3 | Steps 6, 7, 8: split, signer details, `pyHanko`, field extraction | Bedrock (Claude) | Not started |
+| 4 | Step 10: chunk, embed, index; final statuses; Titan catalog row | Bedrock (Titan) | Not started |
+
+Owner decisions (2026-11-24):
+
+- **1. One ECS task per document**, started by Step Functions (`ecs:runTask.sync`), at most
+  `workerMaxPerTenant` (5) at once per tenant. A document never fails for lack of capacity:
+  it waits and tries again.
+- **2. Old results on reprocessing:** attempt columns and pointers; `app_tenant` still has no
+  DELETE anywhere.
+- **3. Two tenant-admin routes** (`POST /documents/{id}/reprocess`,
+  `POST /documents/{id}/companion`); no reprocessing by master roles. Multi-select "Process
+  again" in the tenant history. Each writes an audit row; a companion replace names both
+  versions. Confirm before reprocessing a `ready` document (it costs money).
+- **4. A second SNS topic for security notices**, apart from the alarm topic, with its own
+  endpoint policy statement. The address is stack config `securityNoticeEmail` (blank until
+  the owner sets it; SNS then sends a confirmation link to follow within 48 hours).
+- **5. Widenings approved:** the `sns` endpoint and the scan role's publish and
+  KMS-through-SNS permissions; the state machine's ECS permissions with `iam:PassRole` for
+  the worker's two roles only; the worker's Textract and Bedrock permissions, each only in
+  the stage that needs it; the database column grants.
+- **6. The tenant document panel shows each form's extracted fields** with page and
+  confidence. Master views never show extracted values; add a test.
+- **7. Only `ready` documents are retrieved.** A "Mark as reviewed" action for tenant admins
+  moves `needs_review` to `ready`, with an audit row naming the user. `needs_review`
+  documents are still indexed.
+- **8. No `pdfplumber`.**
+- **A. The worker is bound to one tenant, and to one document** (below).
+- **B. PDF parsing is isolated** in a sandbox child, and the worker's database session is
+  bound to its grant (below).
+- **C.** Every AI call writes an `ai_usage` row (tenant, model, tokens, document). No prompt
+  or response content is logged anywhere. Bedrock and Textract throttling is retried with
+  backoff.
+- **D.** Document text is untrusted input to the model: forced tool choice and schema
+  validation stay, and a test uses a document that contains instructions.
+- **E.** Before stage 2's deploy: re-run the opt-out and invocation-logging checks and show
+  the owner the output (done on 2026-11-27; the same again before stage 3's deploy). (Run on 2026-11-25 03:58 UTC for the plan: `optOut` for every
+  service, last updated 2026-11-24 04:37:58 UTC; no invocation logging configuration.)
+- **Conditions on part 1** (a to f): the token's visibility recorded as a known limit; the
+  isolation tests below, run in AWS; the sandbox image tests below; the parent distrusts the
+  child's output; stage 1 split in two; every new grant and permission listed in the pull
+  request's permission changes.
+
+#### Stage 1, part 1: the worker task, the attempt grant, the sandbox, `app_worker`
+
+Deployed on 2026-11-25 from commit 4518d32 (owner). Stack update 31 failed after creating 15
+resources, on `assay-dev-tss-api-policy`: "Invalid policy document ... ensure that
+Principals are valid", straight after `assay-dev-pipeline-worker-task-role` was created in
+the same run (see "Policies that name a new role" below); update 32 made the rest. A
+preview straight after showed 355 unchanged. `uv run scripts/migrate.py` moved Aurora to
+revision `0010`; `--command verify` (read-only, 2026-11-25) reported `0010`,
+`rls_verified: true`, `roles_verified: true`. All 20 alarms `OK` (the new one is
+`assay-dev-pipeline-worker-errors`).
+
+Deployed names: cluster `assay-dev-pipeline-worker`, task definition family
+`assay-dev-pipeline-worker`, log group `/aws/ecs/assay-dev-pipeline-worker` (streams
+`worker/worker/<task id>`).
+
+How it works:
+
+- **Fingerprint no longer opens a PDF** (owner decision B4). A Lambda has one user and its
+  credentials in its environment, so no Lambda may run a PDF parser, and the Lambda image
+  ships none (`pypdfium2` is the `worker` extra of `assay-workers`). Fingerprint keeps the
+  hash, the duplicate check and a comparison of the first bytes with `%PDF-`. Opening the
+  PDF (password-protected, not a PDF that opens, page count) and the copy to `originals/`
+  moved to the worker task's `inspect` step. So a password-protected PDF now waits for a
+  task before it shows On hold.
+- **State machine:** `Fingerprint` (Lambda), `Claim` (Lambda), `Worker`
+  (`ecs:runTask.sync`), `Release` (Lambda).
+  - `claim` takes one of the tenant's worker slots and creates the attempt grant
+    (`assay_db.grants`, table `worker_grants`): a random token of which only the SHA-256 is
+    stored. With no slot free it answers `wait`, and the execution waits 30 seconds and asks
+    again. A live grant is the slot.
+  - The task gets `DOCUMENT_ID`, `ATTEMPT` and `WORKER_TOKEN` as overrides and nothing else
+    about the document. Its result is discarded.
+  - `release` ends the grant. After a failed task it also says whether the task ever started
+    (the task writes a `worker`/`running` event when it has bound its session). If it never
+    did (no Fargate capacity, an image that could not be pulled), the execution waits 60
+    seconds and claims again; `release` logs that at WARNING, and at ERROR every tenth try.
+  - The execution's timeout (12 hours, inside a Standard execution's 25,000 history events)
+    is the only limit on waiting. It leaves the document `processing`, never `failed`, and
+    raises `executionstimedout`.
+- **Failed steps still name themselves.** The task writes a `running` mark before each of
+  its steps and an `error` mark, with the exception's type, when it can
+  (`assay_workers.progress`). For a failed task the `failed` handler reads the step from
+  those marks in the database (`inspect_failed`), never from the error; with no mark it is
+  `worker_failed`. The history views leave out a `running` mark once its step has a later
+  row (`assay_schemas.pipeline.visible_events`). **Later stages: add each new step to
+  `progress.WORKER_STEPS`, to the portal's `STEP_TEXT` and `RESULT_TEXT`, and to
+  `PIPELINE_STEPS`.**
+- **A sandbox child that does not end well fails the document** (`pdf_unreadable`) and
+  logs at ERROR, which raises `worker-errors`. How it ended is named: see "Every ending of a
+  sandbox child has its own name" below.
+
+Binding the worker (owner decisions A1, A2, B5):
+
+- **Storage.** The worker calls the TSS at `POST /resolve-worker` with the document ID, the
+  attempt and the token. It names no tenant. The TSS takes the tenant from the grant's row
+  (`pipeline.worker_grant`) and only while the grant is live: not ended, not expired, the
+  document's current attempt, the document `processing`. Access `worker`: a session policy
+  with that document's exact keys and no wildcard (its inbox files, read; its original,
+  companion, text and fields objects, read and write). No `quarantine/`, no other document,
+  no vectors (they arrive in stage 4, tenant-wide: S3 Vectors has no per-key permission), no
+  face collection. `/resolve` refuses the worker; `/resolve-worker` refuses every other
+  caller; each caller's IAM policy and the API's resource policy name one route per caller.
+- **Database.** The worker signs in as `app_worker`, not `app_tenant`. `app.tenant_id` means
+  nothing to it. It calls `pipeline.bind_worker(document, attempt, token)`, and its policies
+  read `pipeline.bound_tenant()` and `pipeline.bound_document()`, which check the grant
+  again on every use. An unbound session, or one whose grant ended, sees nothing. A bound
+  one sees one document. Column-level grants on `documents`, `batch_files` and
+  `document_events` only: no file name, no `users`, no chat tables, no `audit_log`. **Later
+  stages add `app_worker`'s grants and policies for each table their steps use, in that
+  stage's migration.**
+- The binding is a session setting that holds the token, checked against the stored hash.
+  A session cannot forge it without the token. It is set in its own committed transaction,
+  because a session setting made in a transaction that rolls back is undone.
+
+The sandbox (owner decisions B3, B4; `assay_workers.sandbox`):
+
+- The task's main process runs as root with CAP_SETUID, CAP_SETGID and CAP_KILL only, on a
+  read-only root filesystem. Fargate cannot add capabilities, so the task definition drops
+  the other 34 by name. It holds the credentials and the database session and never opens a
+  PDF.
+- Each job runs in a child: user `sandbox` (uid 10002), no groups, an empty environment,
+  `python -I -B`, its own session, limits (60 s wall clock, 45 s CPU, 2 GiB address space,
+  no file writes, 16 processes, 64 KB of output), `no_new_privs`, and a seccomp filter set
+  between fork and exec that refuses `socket` and the calls that reach other processes. The
+  child then forbids itself `exec`.
+- CPython sets `LC_CTYPE` for itself under the "C" locale, so a child's environment is not
+  literally empty; that one name is allowed (`runner.SET_BY_THE_INTERPRETER`).
+- The parent distrusts the child: one JSON object, at most 64 KB, validated against a model
+  with only numbers and codes from fixed sets. No path or key comes from the child. If the
+  child cannot be started as the sandbox user, the job does not run.
+- **Every ending of a sandbox child has its own name** (owner, 2026-11-25), so a limit that
+  did its job never reads the same as a child that died some other way
+  (`sandbox.runner.ending`):
+
+  | Ending | Name | Kind |
+  | --- | --- | --- |
+  | The kernel, at the CPU limit | `cpu_limit` | limit |
+  | The parent, at the wall clock | `wall_clock_timeout` | limit |
+  | The child reported that the address-space limit stopped it | `memory_limit` | limit |
+  | More output than the parent accepts | `output_limit` | limit |
+  | It tried to write a file | `file_size_limit` | limit |
+  | Any other signal (a crash, a kill from outside the sandbox) | `signal_SIGSEGV`, `signal_SIGABRT`, `signal_SIGKILL`, ... | unexpected |
+  | It exited with a failure status, or printed no valid result | `exit_<status>`, `bad_output` | unexpected |
+  | It could not be started as the sandbox user | `not_started` | the task's fault |
+
+  - The CPU limit warns before it kills: SIGXCPU at the soft limit, SIGKILL one second later
+    at the hard limit. SIGXCPU is the CPU limit by definition. A SIGKILL is named
+    `cpu_limit` only if the child had used its CPU time (it ignored the warning); any other
+    SIGKILL is `signal_SIGKILL`, which is what the task running out of memory would look
+    like.
+  - **Not distinguishable:** a native library that cannot get memory usually aborts, so the
+    address-space limit can also end as `signal_SIGABRT` or `signal_SIGSEGV`. Only a
+    Python-level failure to allocate is named `memory_limit`.
+  - **What a real document shows.** For every ending but `not_started`: status Failed, code
+    `pdf_unreadable`. A tenant user sees "The PDF could not be opened. Check the file and
+    upload it again." and nothing more. Master admins see the code and the ending on the
+    Inspection step: `pdf_unreadable · sandbox.cpu_limit`. It is kept in the event's
+    `error_type`, which `platform.ingestion_events_v` already shows them; the tenant's
+    document detail reads `detail.error` only. No migration and no grant changed.
+  - **Logs and the alarm.** One ERROR line per ending, with `ending` and `sandbox_limit`
+    (true or false), and two different messages: "the PDF check was stopped at a sandbox
+    limit" and "the PDF check ended unexpectedly". Both raise `worker-errors`: either is
+    what a broken file looks like, and what an attack on the parser looks like. The
+    execution succeeds (the task handled it), so `executionsfailed` stays quiet.
+  - `not_started` is not the file's fault: the step fails (`inspect_failed`, error type
+    `SandboxNotStarted`) and the document is not blamed. That raises `worker-errors`,
+    `steps-errors` and `executionsfailed`.
+- Not available on Fargate: a cgroup, network namespace or firewall rule for one process; a
+  task-level seccomp or AppArmor profile; a second container with another role.
+- Residual risk (accepted by the owner, 2026-11-24): a parser exploit runs as the sandbox
+  user for at most the timeout, with the one PDF it was given; it can return wrong values
+  for that document or make it fail. To reach credentials it needs a second exploit, against
+  the kernel in the task's microVM, and would then hold one document's worker credentials.
+
+Known limit (owner condition a, 2026-11-24):
+
+- **The grant's token is visible** in the execution's history (Step Functions keeps the
+  state), in the task's description (the container overrides) and in CloudTrail (the
+  `RunTask` request parameters), to principals that can read those. Accepted, because the
+  token is useless without the worker task's role (only that role may call
+  `/resolve-worker` or sign in as `app_worker`), and dead when the attempt ends (`release`)
+  or the grant expires (40 minutes at most). The state machine's log still records no
+  execution data (`includeExecutionData: false`, level `ERROR`; tested). Credentials issued
+  just before an attempt ends still last their 15 minutes, the STS minimum.
+
+New grants and permissions (all approved 2026-11-24; also in the pull request):
+
+- **Database (migration `0010`):** role `app_worker` (login, IAM) with SELECT on ten columns
+  of `documents`, nine of `batch_files`, five of `document_events`; UPDATE on six columns of
+  `documents`; INSERT on `document_events`; EXECUTE on `bind_worker`, `bound_tenant`,
+  `bound_document`. `tss`: USAGE on schema `pipeline`, EXECUTE on `worker_grant`.
+  `pipeline_lookup`: SELECT on `documents.attempt`, `batch_files.document_id` and six
+  columns of `worker_grants`. `app_tenant`: SELECT, INSERT, UPDATE on the new
+  `worker_grants`.
+- **IAM:** the worker task role (`rds-db:connect` as `app_worker`; `execute-api:Invoke` on
+  `/resolve-worker`); its execution role (pull its image, write its logs); the state
+  machine role gains `ecs:RunTask` (the worker task definition, its cluster),
+  `ecs:StopTask` and `ecs:DescribeTasks` (that cluster's tasks), `iam:PassRole` (those two
+  roles, to ECS tasks) and the three `events` actions on Step Functions' managed rule.
+- **Resource policies:** the TSS API admits the worker role on `/resolve-worker`; API
+  Gateway may invoke the TSS Lambda for that route.
+- No change to the tenant role, the bucket, key or vector bucket policies, any endpoint
+  policy or any queue. No new KMS key. No `update_tenants.py` run.
+
+Deploy order (owner): `pulumi up`; `uv run scripts/migrate.py` straight away (the bootstrap
+creates `app_worker`, then `0010`); `uv run scripts/run_isolation.py ...`; browser checks;
+`uv run scripts/check_deployment.py` (since 2026-11-25).
+Every image rebuilds (the lock file changed). Until `0010` is in, a document that reaches
+`claim` fails there, so upload nothing in between.
+
+Tests:
+
+- `tests/unit/test_db_worker.py`: the grant, the TSS's lookup and `app_worker`, against a
+  real PostgreSQL, signed in as each role.
+- `tests/unit/test_worker_image.py` (Docker; condition c): the real child, run as the task
+  runs it. No socket, no parent environment or memory, no AWS or database library, stopped
+  at the timeout and the limits, a malformed PDF, memory exhaustion. 16 of 16 pass locally.
+- `tests/unit/test_worker_probe.py`: the isolation probe passes every check on a correct
+  system and fails the right one when what it guards is broken. That includes its four
+  `inspection:` checks (see "A password-protected upload may never reach the worker").
+- **In AWS** (condition b): `scripts/run_isolation.py` also runs the worker task with
+  `WORKER_COMMAND=probe`. The isolation Lambda prepares three fixture documents with fixed
+  IDs in the two test tenants (`tests/isolation/worker_fixture.py`), each with a small
+  object at its `originals/` key (written once, kept by Object Lock), and ends one grant
+  while the probe watches. The fixture documents are `discarded` between runs and have a
+  `start` event, so the pipeline never queues them. They do have `documents` rows, unlike
+  the reserved ID. In Isolation Test A they are `955f3e3d-f39a-5962-bc37-4b37ae1a44c6` (the
+  probe's own) and its sibling.
+
+First isolation run after the deploy (owner, 2026-11-25, 11:33 UTC):
+
+- 71 of 71 in the isolation Lambda (the two new ones: `/resolve-worker` refuses the runner;
+  worker access cannot be asked for by name), 28 of 28 in the provisioning role's probe, 7
+  of 7 Cognito client checks.
+- **Worker probe: 64 of 65.** Every TSS, storage, database, confinement, inspection and
+  capability check held. The one failure was the check, not the sandbox: "a child that
+  tries to spin is stopped" expected the parent's wall-clock `timeout` and got
+  `signal_SIGKILL`. Its limits were 5 seconds of wall clock and 4 of CPU, so the kernel's CPU
+  limit ended the spinning child first, as it should (with the soft and hard limits equal,
+  the kernel sends SIGKILL, not SIGXCPU). The image test had accepted either ending, and
+  the unit test's stand-in answered `timeout`, so neither caught the wrong expectation. It
+  also meant the wall-clock timeout itself was never shown on Fargate.
+- **Fix (same day):** one check per ending, each with limits only one of which can be
+  reached, and each expecting that ending's own name: a child that spins, with the wall
+  clock far off (`limit:cpu_limit`); one that ignores the kernel's warning
+  (`limit:cpu_limit`); one that only waits, using no CPU time (`limit:wall_clock_timeout`);
+  one that crashes (`unexpected:signal_SIGABRT`). The image test requires exactly those.
+  **Lesson: a check that accepts several endings hides which mechanism worked; give each
+  mechanism a case only it can end.**
+- **Second isolation run** (owner, 2026-11-25 12:27 UTC, after stack update 34 deployed
+  commit 714ec8c): 71 of 71 in the isolation Lambda, 28 of 28 in the provisioning role's
+  probe, **68 of 68 in the worker probe**, 7 of 7 app client checks. So each ending is
+  reported by its own name on Fargate too: the CPU limit for a child that spins and for one
+  that ignores the warning, the wall-clock timeout for one that only waits, and an
+  unexpected signal for one that crashes.
+- **Policies that name a new role** (owner, 2026-11-25). IAM is eventually consistent: for
+  some seconds after a role is created, another service may refuse a resource policy that
+  names it as a principal. That is what failed update 31. A policy's dependency on the role
+  is not enough (Pulumi waits for the role, not for IAM to tell every service), so each
+  such policy also depends on `iam_propagation` (`infra/assay_infra/propagation.py`): a
+  local command that waits 30 seconds once the roles exist. It runs when first created and
+  again only when the set of roles changes, never on an ordinary `pulumi up` or a preview,
+  and changes nothing in AWS.
+  - The three policies with a role of this program in a `Principal` element: the TSS API's
+    resource policy (API Gateway; the provider does not retry it, and it is the one that
+    failed), the tenant role's trust policy and the tenant-state key's policy (IAM and KMS;
+    the provider retries both, and each was created with its role in build step 4 without
+    failing; they wait all the same).
+  - Policies that name a role only in a condition (`aws:PrincipalArn`) are not checked
+    against IAM and need nothing: the ingest queue's, the state bucket's and every VPC
+    endpoint's.
+  - **A new policy that names a role of this program as a principal must depend on the
+    wait.** Part 2's security-notice topic will not: the scan role publishes through its own
+    IAM policy, and the topic's policy names only services.
+  - Not shown to work: it can only be shown by a run that creates a role and such a policy
+    together, and the next one that does is a new stack.
+  - It had happened once before: CloudTrail shows the same refusal of the TSS API's policy
+    at 2026-11-24 19:36:07 UTC, in the first half's deploy, when the pipeline roles were new.
+
+Settled by that run and the deploy:
+
+- The switch of user and the seccomp filter work on Fargate as under Docker: the child ran
+  as uid 10002 with no groups, an empty environment and `Seccomp: 2`, and was refused a
+  socket, the parent's environment and memory, `exec` and every write.
+- The task's main process has exactly CAP_KILL, CAP_SETGID and CAP_SETUID: `CapEff`,
+  `CapPrm` and `CapBnd` all `00000000000000e0`, on a read-only root filesystem.
+- The task definition's container definition round-trips: 34 names in `drop`, and the
+  preview after the deploy showed no difference.
+- The real inspection job, on Fargate: the plain PDF opened with 3 pages; the 40-bit and
+  128-bit protected PDFs were both `pdf_encrypted`; the broken file was `not_a_pdf`.
+- A session whose grant ended while it was connected saw its document, then nothing.
+- **A worker task starts in about 18 seconds** (the probe task: created 11:33:03, image
+  pulled in 6 seconds, started 11:33:21 UTC), not the 30 to 90 estimated.
+
+Browser check (owner, Infinity Loans, `--fresh` set, batch received 2026-11-25 11:51 UTC,
+on stack update 33; update 34 deployed commit 714ec8c afterwards, at 12:21 UTC, and the
+isolation run has not been repeated on it yet):
+
+- 02 `processing`, Inspection: Passed (fingerprint 11:56:11, inspection 11:56:37: 26 seconds
+  from fingerprint to the inspection's result, the task's start included); 01 `duplicate`
+  (which of the two is the original depends on which is fingerprinted first).
+- 04 `processing` with its companion; 05 `processing` after "Close without the companion
+  file"; 06 `failed` at Fingerprint, "The file is not a PDF."
+- **03 and 07 `on_hold` at the scan: GuardDuty held both the 40-bit and the 128-bit
+  protected PDF** (`scan_unsupported`). So neither reached the worker; its own check was
+  shown by the probe on Fargate (both `pdf_encrypted`).
+
+**One scan result failed once, and Lambda's retry recovered it** (same batch):
+
+- `assay-dev-pipeline-scan-errors` (11:52 UTC) and `-scan-failed` (11:53 UTC) fired. One
+  invocation, request ID `61eaf513-114b-40cd-831b-0834a5b6bad0`, raised
+  `TssRequestError: TSS refused the request: 500 Internal server error` at its call for a
+  storage context (`scan.py`, `deps.storage.pipeline`). It was the result for 02's file
+  (`86845ddc-…`). Lambda retried it 59 seconds later with the same request ID and event,
+  and it was recorded clean at 11:52:24. Until then the file showed "Waiting for its scan".
+- **Cause: Lambda concurrency, not the files and not Aurora.** The account's quota is **10
+  concurrent executions** (`aws lambda get-account-settings`; Service Quotas L-B99A9384,
+  adjustable, never raised). Nine scan results arrived together, so nine scan functions ran
+  at once, each needing the TSS's function too. The account reached 10 concurrent
+  executions that minute and Lambda throttled one invocation of `assay-dev-tss`
+  (`Throttles` 1, `Errors` 0). API Gateway answered that call itself: 500 "Internal server
+  error" (its own `message`, not the TSS's `error`). The TSS's log has a "storage context
+  issued" line for each of the other eight files at 11:51:24 to 11:51:26 and none for this
+  one until 11:52:23: its function never ran for the failed call.
+  - Not the identical files: the failure came before anything about the file's content was
+    read, and 01's result, with the same bytes, was recorded with the others.
+  - Not Aurora: the invocation had already made its database lookup, and the other eight
+    were recorded within two seconds.
+- **What saved it:** only Lambda's retry of the asynchronous invocation (2 retries, events
+  kept an hour). Had all three attempts failed, the event would have gone to the scan
+  dead-letter queue (alarm), the file would have stayed `registered`, and after 30 minutes
+  the sweeper would have put its PDF `on_hold` (`scan_timeout`, alarm). Nothing is lost
+  silently, but a good document would have ended on hold.
+- **Fix in code** (no permission change): `TssClient.send` tries again, up to five times
+  over at most 20 seconds with jitter, when the answer is API Gateway's own (429, 502, 503,
+  504, or a 500 without the TSS's `error`). The TSS's own answers are never retried. It
+  logs a WARNING per retry. This covers every caller: the scan, step and sweeper functions,
+  the worker task and the API.
+- **That does not cure the limit.** With 10 concurrent executions, a batch of 200 PDFs
+  cannot work: scan functions would hold every slot while each waits for a TSS call that
+  cannot get one. Reserved concurrency cannot be set either, with a quota this low. The
+  same limit can throttle the Cognito triggers (a sign-in), the API's calls to the Cognito
+  admin function and the state machine's steps. **The owner asked AWS to raise the
+  quota to 1,000** on 2026-11-25 12:36 UTC (request `7902077dd06644889e37c4c5dde4b612UGimylpJ`,
+  `PENDING` when made; the usual default):
+  `aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000 --profile pilar-dev --region us-east-1`.
+  **Granted: the account allows 1,000** (owner, `get-account-settings`, 2026-11-25).
+  Staging and Production need the same request before their first deploy (see "Before
+  deploying to Staging or Production").
+  - **Reserved concurrency: 50 for the scan function, 300 for the TSS** (owner decision,
+    2026-11-25; built, in the next deploy). Stack config `scanReservedConcurrency` and
+    `tssReservedConcurrency`, both or neither, the TSS's at least the scan function's
+    (`config.validate_pipeline`). Reserved concurrency is both a cap and a guarantee, at
+    no charge; 650 of the account's 1,000 stay unreserved.
+    - **Why the scan function is capped.** It is the only function driven by outside
+      arrivals (every uploaded file's scan result), each run holds a database connection
+      and makes a TSS call, and it is the only one whose overflow is safe. At the measured
+      3.9 seconds a result, 50 at once is about 13 results a second: a full batch of 400
+      files is about 30 seconds of work.
+    - **Why the TSS has a reservation.** Every pipeline function needs it while it runs. On
+      2026-11-25 scan functions held every slot the account had, each waiting for a TSS
+      call that could not get one. A reservation is capacity nothing else can take. 300 and
+      not 200: a cold TSS call can take 14 seconds, so one full batch's 200 fingerprint
+      steps starting together can hold 200 TSS instances at once, beside the scan
+      function's 50. The TSS client's retry (five tries over 20 seconds) absorbs a brief
+      overflow.
+    - **What happens over the scan function's cap.** The result waits in Lambda's
+      asynchronous queue and is retried with backoff, from 1 second up to 5 minutes, for the
+      function's event age (1 hour here), then goes to the scan dead-letter queue, whose
+      depth raises an alarm (AWS's page on asynchronous invocation, read 2026-11-25; it
+      does not say whether those retries count against the function's two attempts). The
+      30-minute `scan_timeout` is the limit that matters: a result that waits longer finds
+      its file already on hold, and the document stays on hold.
+    - **No other function is capped, on purpose.** Their callers are synchronous: a
+      throttled pipeline step fails its document (`fingerprint_failed ·
+      Lambda.TooManyRequestsException`, the throttle test), and a Cognito trigger has 5
+      seconds. `test_only_the_scan_function_is_capped_and_only_when_the_stack_says_so`.
+  - **Measured** (CloudWatch, three days to 2026-11-25; small numbers, mostly cold starts):
+    the scan function ran 43 times, 3.9 seconds on average and 8.7 at the 99th percentile,
+    9 at once at most; the TSS 265 times, 0.9 seconds on average on the last day, 14
+    seconds at the 99th percentile (a cold start, or Aurora resuming from 0 ACU), 7 at
+    once at most. The account's peak was 20, during the 13 documents processed again
+    together. The steps function's 8 throttles are all from the deliberate throttle test.
+    **Measure again once real batches have run**, and change the two numbers in stack
+    config if the peaks say so.
+  - **`check_deployment.py` confirms both settings.** It reads each function's reserved
+    concurrency from Lambda and fails if it differs from the stack's config (also if one
+    was set by hand that the stack does not set). A stack that sets neither passes with a
+    warning. The account's limit must cover `concurrency_needed`: the two reservations
+    and 400 unreserved (a full batch's 200 pipeline steps and 200 for everything else);
+    750 for Development. **Staging and Production: raise the quota first** (see "Before
+    deploying to Staging or Production"); until then leave both keys unset.
+- **The TSS API's access log received nothing until its role's trust policy was changed**
+  (found on the way; investigated read-only on 2026-11-25). **Cause proven the same day:
+  API Gateway sends no source account when it assumes the logging role to write a log
+  entry.** The fix is permanent; see "The experiment" and "Outcome" below.
+  - It is configured as AWS documents. Stage `v1` has `accessLogSettings` (the log group
+    `/aws/apigateway/assay-dev-tss`, a format with `$context.requestId`). The account's
+    `cloudwatchRoleArn` is the stack's `assay-dev-tss-api-logs-role`, with
+    `AmazonAPIGatewayPushToCloudWatchLogs`. The log group exists, with no KMS key and no
+    stream. The API counted 176 requests in three days, and one 5XX at the time of the
+    throttled call.
+  - CloudTrail: API Gateway assumed the role only when the account setting or the stage was
+    updated (2026-11-23 21:35, 11-24 19:49, 11-25 11:25 UTC), each time to call
+    `DescribeLogGroups` on the group, and once to write its own test message to
+    `/aws/apigateway/welcome`, which worked. It never assumed the role at the time of a
+    request, and no `CreateLogStream` was ever made in the group.
+  - A refused `AssumeRole` by a service does not appear in this account's trail: the two
+    `UpdateAccount` calls refused at 21:34 on 2026-11-23 left none. So a refusal at request
+    time cannot be seen from here.
+  - **The one difference from AWS's documented setup** is the role's trust policy: ours adds
+    `aws:SourceAccount` (`_service_trust`, used for every service role). AWS's logging page
+    asks only for `apigateway.amazonaws.com` as the trusted entity. The control plane sends
+    the account (its assumes passed `StringEquals`); no AWS page says whether the part that
+    writes logs does. This was the candidate cause, and the change below proved it.
+  - **Ruled out:** a log delivery and a log group resource policy for
+    `delivery.logs.amazonaws.com`. That is how HTTP APIs log; the owner's credentials would
+    have created both when the stage was set up, and CloudTrail has no `CreateLogDelivery`.
+  - **The experiment (approved by the owner, 2026-11-25): a deliberate, narrow trust
+    widening.** On the API Gateway logging role only (`tss.api_logs_trust_policy`),
+    `StringEquals` becomes `StringEqualsIfExists` for `aws:SourceAccount`. A call from
+    `apigateway.amazonaws.com` that carries no source account is admitted; a call that
+    carries another account's is still refused. Every other service role keeps
+    `StringEquals` (`_service_trust`); `test_infra_tenancy.py` fails if `IfExists` appears
+    anywhere else in `infra/`. Why the risk is low:
+    - The role has only `AmazonAPIGatewayPushToCloudWatchLogs`: create log groups and
+      streams, write log events, and describe and read log events (`GetLogEvents`,
+      `FilterLogEvents`), all on `*` (read from IAM, 2026-11-25). So it is CloudWatch Logs
+      only, but not write-only. It reaches no bucket, key, queue, database or tenant data.
+    - To misuse it, another account would have to make this role its own API Gateway
+      logging role. Setting that needs `iam:PassRole` on the role (CloudFormation's schema
+      for `AWS::ApiGateway::Account` lists `apigateway:PATCH`, `iam:GetRole` and
+      `iam:PassRole`; `aws cloudformation describe-type`, 2026-11-25), and IAM lets a
+      principal pass only a role of its own account. The `UpdateAccount` API page does not
+      state the requirement itself.
+    - API Gateway checks the role when it is set, and that call carries the source account
+      (ours passed `StringEquals`), so another account's would still be refused.
+  - **What decides it** (owner): deploy, run the isolation suite, then
+    `uv run scripts/check_deployment.py`.
+    - Entries arrive: the cause is proven and the change stays.
+    - None arrive: put the condition back exactly as it was (`_service_trust`), say whether
+      a stage redeploy could matter, and prepare the evidence for an AWS Support case.
+    - **Outcome: proven, and the change is permanent** (owner, 2026-11-25). Stack update 35
+      deployed commit e3ccbfd; the isolation run after it passed (71, 28, 68, 7) and
+      `check_deployment.py` showed the access log receiving (last 13:55 UTC; 24 receiving,
+      the break-glass log not proven). CloudTrail shows the difference: from 13:22 UTC API
+      Gateway assumes the role at the time of each request and creates a log stream in the
+      group (`CreateLogStream`, 13:55:24), which it never did in the two days before.
+      Nothing else changed in that deploy that touches API Gateway.
+    - **Never change this role back to `StringEquals`**, and never "tidy" it to match the
+      other service roles: the access log would go silent again, with no error anywhere.
+      Two tests hold the form: `test_the_access_logs_role_keeps_the_trust_that_lets_api_gateway_write`
+      (the role in the program, and that no other role has the wider form) and
+      `test_only_the_api_gateway_logging_role_admits_a_call_with_no_source_account`.
+    - **Staging and Production need the same form.** It is in the program
+      (`tss.api_logs_trust_policy`), so a new stack gets it; `check_deployment.py` after the
+      first deploy's checks confirms the log is receiving.
+  - Until it is fixed, API Gateway's own record of a call (caller, integration status) does
+    not exist, and `uv run scripts/check_deployment.py` fails on this log.
+- **`uv run scripts/check_deployment.py`** (owner's request, 2026-11-25; read-only). For
+  every resource with the stack's tags it reads where the logs are configured to go, from
+  the resource itself, and fails if a destination has received nothing. It also warns if the
+  account's Lambda concurrency limit is below what the stack needs, and (since the caps
+  were decided, 2026-11-25) fails if the scan function's or the TSS's reserved concurrency
+  is not what the stack's config says: see "Reserved concurrency" above. With the caps the
+  need is 750 for Development (50, 300 and 400 unreserved), where it was 1,000 without.
+  - Run before the deploy that sets the reservations (2026-11-25), it failed on both, as
+    it should: each function reserved nothing and the stack says 50 and 300.
+  - First run (2026-11-25): 25 log destinations; 23 receiving; the TSS API's access log
+    `EMPTY` (fails); the break-glass log `not proven`.
+  - **The break-glass log is empty because the role has never been assumed** (the rule's
+    `MatchedEvents` is 0; CloudTrail has only the role's creation). So the rule, its log
+    and the `break-glass-assumed` alarm have never been seen to work in AWS (now on the
+    before-production list). An empty log whose source was idle is reported and fails only
+    with `--strict`; the owner keeps non-strict as the default (2026-11-25).
+  - A log whose source has no activity metric (an ECS task's, the flow log, WAF, Aurora) is
+    `EMPTY` until it has received something, so run the check after the isolation run.
+  - **A new kind of log destination in the stack needs a function in the script.** It
+    covers API Gateway access logs, Lambda, ECS, Step Functions, flow logs, WAF, Aurora's
+    exports, EventBridge rules that write to a log group, load balancer logs and CloudWatch
+    Logs deliveries (CloudFront). Not covered: API Gateway execution logs (none configured).
+
+Still not known:
+
+- How a RunTask refused for the vCPU quota reaches Step Functions. The design does not
+  depend on it: any failed task with no `worker`/`running` event is waited out.
+- Whether GuardDuty holds every kind of password-protected PDF at the scan. It held both
+  kinds tried (40-bit and 128-bit RC4); AES-encrypted PDFs were not tried.
+
+Notes:
+
+- **GuardDuty's scan result event carries the threat name**:
+  `detail.scanResultDetails.threats[0].name` (user guide, read 2026-11-25: "contains only
+  one threat ... the first detected threat"). The note under "Carried forward to step 6" says
+  the event lacks it; `scan.parse` just does not read it. Part 2 reads it there, with no
+  GuardDuty permission. Not yet seen in a real event here: the part 2 EICAR run confirms it.
+  The same page shows `scanStatus: SKIPPED` with `statusReasons` such as
+  `PASSWORD_PROTECTED`, which could make `scan_unsupported`'s wording certain.
+- **Linux-only code and mypy.** The sandbox uses `resource`, `os.killpg` and `signal.SIGKILL`,
+  which do not exist on the Windows development machine. Each function that uses them starts
+  with `if sys.platform != "linux": raise OSError(...)`, which mypy understands: it checks
+  the rest on Linux (CI) and skips it on Windows.
+- **`preexec_fn` runs after the switch of user** in CPython's `subprocess`, so the limits and
+  the filter are set by the sandbox user itself, before the child's interpreter starts.
+- **Bash heredocs halve backslashes** on this machine: write a script with the Write tool
+  and run it, or use Edit.
+- **Test files that are never duplicates** (owner's request, 2026-11-25).
+  `uv run scripts/make_test_files.py --fresh` adds a new run ID to every page of every PDF,
+  so a tenant that already holds the plain set (Infinity Loans does) gets new documents.
+  Within one run 02 is still byte for byte 01, so the duplicate check still shows.
+- **A password-protected upload may never reach the worker.** GuardDuty held
+  `03-password-protected.pdf` (40-bit RC4) at the scan on 2026-11-24 (`scan_unsupported`).
+  AWS documents that password-protected files are not scanned, and not how it recognises
+  one, so it is not known that it catches every kind. The worker's own check
+  (`pdf_encrypted`, owner decision 13: "whatever GuardDuty said") is the backstop for a kind
+  it misses. It is exercised three ways, none of which depends on GuardDuty missing one:
+  - `tests/unit/test_worker_step6.py`: the real job on the real protected file, with the
+    document ending `on_hold` in a real PostgreSQL;
+  - `tests/unit/test_worker_image.py`: the real sandbox child, in the task's image, on both
+    protected files;
+  - in AWS, the worker probe's four `inspection:` checks (`run_isolation.py`): the real job,
+    in the real sandbox, on Fargate, on a plain PDF, both protected PDFs and a broken one
+    (`assay_workers/worker/probe_files.py`, the test-file script's own output).
+  `07-password-protected-128.pdf` (128-bit RC4) is a second kind to try through the browser.
+  **Tried on 2026-11-25: GuardDuty held it too** (`scan_unsupported`, "Could not be
+  scanned"), as it holds 03. So no upload has yet reached the worker's own check.
+
+#### Stage 1, part 2: attempts and "Process again", step 9, companion replacement, the quarantine notice, "Mark as reviewed"
+
+Built on 2026-11-25 (owner's go-ahead once the access log was settled). **Deployed the same
+day** from commit ae46223: stack update 37 failed after creating 6 resources, on the worker
+image's build: "`<registry>/assay-dev-pipeline-worker@sha256:24069468...`: not found" (the
+owner kept the message; it was the build's own check, not a missing image: see "not found"
+under "Step 2"). Update 38 finished the rest.
+`uv run scripts/migrate.py --command verify` (read-only): revision `0011`,
+`rls_verified: true`, `roles_verified: true`. The security-notice address is confirmed.
+The owner's isolation run after the deploy: 71 of 71, 28 of 28, 68 of 68, 7 of 7.
+No content goes to any AI service in this part.
+
+**The rotation probe's result** (same run; replica pool, rotation on with a 10-second grace
+period). It settles decision 4 below; the real clients are unchanged until the owner decides:
+
+| Candidate | What Cognito stored | Programmatic sign-in |
+| --- | --- | --- |
+| No explicit flows | `[]`, rotation `ENABLED` | **`USER_SRP_AUTH` allowed** (it answered with the `PASSWORD_VERIFIER` challenge). Password, custom and `USER_AUTH` refused |
+| `ALLOW_CUSTOM_AUTH` only | `['ALLOW_CUSTOM_AUTH']`, rotation `ENABLED` | **All four refused.** Custom auth: "Custom auth lambda trigger is not configured for the user pool" |
+| The refresh flow kept | Refused: "ALLOW_REFRESH_TOKEN_AUTH is not a permitted ExplicitAuthFlow when refresh token rotation is enabled" | - |
+
+- **An empty flow list is not "no flows".** Cognito stores `[]` and still lets anyone start
+  an SRP sign-in against the client, outside managed login. Never give a portal client an
+  empty list.
+- **`ALLOW_CUSTOM_AUTH` alone leaves no programmatic sign-in**, but only while the pool has
+  no custom-auth triggers (`DefineAuthChallenge`, `CreateAuthChallenge`,
+  `VerifyAuthChallengeResponse`). Neither pool has one (read 2026-11-25: the tenant pool
+  has post-confirmation, post-authentication and pre-token-generation; the platform pool
+  the first two). A rule that goes with this setting: those three triggers are never added
+  to a pool whose client lists `ALLOW_CUSTOM_AUTH`.
+- Both real clients at the time of the probe: `['ALLOW_REFRESH_TOKEN_AUTH']`, no rotation.
+  (Since 2026-11-27 both have `['ALLOW_CUSTOM_AUTH']` with rotation on.)
+- **Not shown by the probe** (the replica has no managed login domain): that managed login
+  still signs a user in when the client's only flow is `ALLOW_CUSTOM_AUTH`, and that the
+  portal's refresh through `/oauth2/token` returns a new refresh token. Today's clients
+  list only the refresh flow and managed login works, which suggests it does not depend on
+  the list; the first real client to change shows it.
+
+**Rotation: the owner's decision (2026-11-25) and the rollout.** `ALLOW_CUSTOM_AUTH` as a
+client's only explicit flow, rotation on, a 10-second grace period. An empty list is
+rejected because it allows `USER_SRP_AUTH`. Two steps:
+
+1. **The tenant app client only** (stack config `tenantRefreshTokenRotation: "true"`).
+   **Deployed and verified by the owner on 2026-11-27**: tenant sign-in works in a browser
+   under rotation, and a forced refresh returned 200 from `/oauth2/token` with the session
+   continuing. So managed login does sign a user in on a client whose only explicit flow is
+   `ALLOW_CUSTOM_AUTH`. The same deploy set the reserved concurrency (`check_deployment.py`:
+   50 and 300, 650 unreserved) and the two-layer images; the isolation run passed 71, 28
+   and 68, and 24 of 26 Cognito checks (the two below).
+2. **The platform client** (`platformRefreshTokenRotation: "true"`). **Deployed and
+   verified by the owner on 2026-11-27** (stack update 40): a forced refresh returns 200 on
+   both portals, and the Cognito section of the isolation run passes 28 of 28. To go back
+   on either client: set its key to `"false"` and run `pulumi up`.
+
+**What Cognito answers on a client with rotation on** (isolation run of 2026-11-27, and
+AWS's pages read the same day). The run's two failures were refusals the checks did not
+recognise: they had been written for a guess (`InvalidParameterException`,
+`NotAuthorizedException`). **Lesson: a check that expects "refused" in general hides what
+was refused and why; require the service's own answer by name.**
+
+- **`REFRESH_TOKEN_AUTH` answers `UnsupportedOperationException`.** AWS: "You can't
+  authenticate with REFRESH_TOKEN_AUTH in app clients with refresh token rotation enabled",
+  and of the exception, "thrown when you attempt to perform an operation that isn't enabled
+  for the user pool client." So it is about the client, not the token. **AWS does not say
+  whether the token is looked at first.** The check now asks twice, with the user's current
+  refresh token and with one that is not valid (one character changed), and requires the
+  same answer: if the token were judged first, the second would answer differently.
+  **Settled by the owner's run of 2026-11-27 (28 of 28): Cognito gives the same
+  `UnsupportedOperationException` for a token that is not valid.** So the flow is refused
+  for the client, whatever the token: nothing about the token is judged.
+- **A rotated-out refresh token, used after its grace period, answers
+  `RefreshTokenReuseException`.** AWS: "thrown when your application requests token refresh
+  with a refresh token that has been invalidated by refresh-token rotation." **AWS's pages
+  say nothing of revoking anything else** (no token family, no session). The run showed it
+  on the replica: the check that the new refresh token works ran straight after the reuse
+  and passed. The checks now say so in words and add one: after the reuse, the new refresh
+  token still refreshes and the access token issued before it is still accepted.
+  - **Two tabs.** Tabs that signed in separately have their own tokens and never meet
+    this. Tabs that share one refresh token (a duplicated or restored tab): whichever
+    refreshes second, more than 10 seconds after the first, is sent to sign-in; the first
+    stays signed in. Inside the 10 seconds the second tab's refresh is accepted.
+  - Not checked: the same through `/oauth2/token`, which the portal uses (the checks call
+    `GetTokensFromRefreshToken`); AWS's token endpoint page does not say which error a
+    rotated-out token gets there. The portal does not depend on which: any answer from
+    Cognito that refuses the refresh ends the session on the sign-in screen (see "Two tabs
+    that share one refresh token" under "Known limits").
+  - **Before 2026-11-27 the portal did not handle a refused refresh in an open tab.** The
+    library raises `silentRenewError` and does not try again; nothing listened. The app
+    stayed open, and a minute later, with the access token expired, every request went out
+    without a token and each page showed its own error. A reload showed the sign-in screen
+    with no reason. Both now end on the sign-in screen with the message.
+- The old label "reached authentication" for an answer a check did not recognise was wrong:
+  nothing shows that anything was authenticated. It now reads "not refused as a flow
+  (`<code>`)", and still fails.
+
+How it is built:
+
+- **A switch per client in stack config**, read into `AuthConfig`: `"true"` (rotation on,
+  `ALLOW_CUSTOM_AUTH` only), `"false"` (rotation sent as `DISABLED` and the refresh flow
+  restored: the way back), or unset (the client is not mentioned, exactly as before
+  rotation existed here). Both keys are `"true"` in the dev stack since 2026-11-27.
+  `auth.explicit_auth_flows` never returns an empty list.
+- **Rule: no pool may ever have a custom-auth trigger** (`DefineAuthChallenge`,
+  `CreateAuthChallenge`, `VerifyAuthChallengeResponse`). That is what keeps
+  `ALLOW_CUSTOM_AUTH` from being a sign-in. Held by `test_no_pool_has_a_custom_auth_trigger`,
+  by a test that the three arguments appear nowhere in `auth.py` but the forbidden list,
+  and by the isolation run on the deployed pools.
+- **The isolation run** (`tests/isolation/cognito_clients.py`, which replaced the probe)
+  now checks, against Cognito: each deployed client's flows and rotation are what the stack
+  says (stack outputs `tenant_refresh_token_rotation`, `platform_refresh_token_rotation`);
+  neither pool has a custom-auth trigger; each deployed client refuses all four programmatic
+  sign-ins as "flow not enabled", asked for a user that does not exist (nobody is signed
+  in, no trigger runs); on the replica, a refresh returns a new refresh token, the old one
+  stops working after the grace period and `REFRESH_TOKEN_AUTH` is refused; and the way
+  back is rehearsed on the replica (rotation on, then in one update rotation off with the
+  refresh flow restored). `test_cognito_client_checks.py` shows these checks fail when what
+  they guard is broken.
+- **Preview for step 1 (2026-11-25):** 2 to update (the tenant app client: its flow
+  `ALLOW_REFRESH_TOKEN_AUTH` becomes `ALLOW_CUSTOM_AUTH`, and `refreshTokenRotation`
+  `ENABLED`, 10 seconds; the isolation function, for its rebuilt image), 1 to replace (that
+  image's build), 360 unchanged. The platform client is not touched.
+- **Rolling back** (if sign-in breaks): set `tenantRefreshTokenRotation: "false"` in
+  `infra/Pulumi.dev.yaml` and run `pulumi up`. Only the app client changes, so it takes
+  about a minute. Sessions already open keep their tokens.
+- **Known effects of rotation:** a duplicated or restored tab shares its original's refresh
+  token, and whichever refreshes second, more than 10 seconds after the first, is sent to
+  sign-in with a message; the first stays signed in (recorded under "Known limits": "Two
+  tabs that share one refresh token"). Sessions still end 8 hours after the sign-in. The portal's own refresh goes
+  through `/oauth2/token`, which works with rotation on; nothing in the portal changes.
+- **Checking the refresh in a browser** (owner, after step 1's deploy). The portal refreshes
+  by itself about a minute before the access token's 60 minutes are up. To see one at
+  once: sign in to the tenant portal, open the developer tools, and in Application,
+  Session Storage, edit the `oidc.user:...` entry's `expires_at` to `1`; then reload the
+  tab with the Network panel open. The portal finds the token expired and refreshes
+  (`Root.tsx`). What shows it works: a `POST .../oauth2/token` with
+  `grant_type=refresh_token` answers 200 and its response has a `refresh_token` (without
+  rotation it has none); the entry's `refresh_token` is now a different value; the portal
+  stays signed in. Do it twice: the second refresh uses the new token. Then sign out and
+  check that the next sign-in asks for the password.
+
+What it does:
+
+- **Attempts.** `documents.attempt` (part 1) is now used everywhere. Every event carries the
+  attempt it belongs to (`document_events.attempt`, stamped from the document's row when the
+  event is written). The starter names an execution after the document and its attempt
+  (`{document_id}` for attempt 1, `{document_id}-{n}` after) and puts the attempt in the
+  execution's input; every Lambda step and the worker task do nothing unless it is still the
+  document's current attempt. **A superseded attempt writes nothing** (tested for fingerprint,
+  claim, companion, failed, and a late release).
+- **"Process again"** (`POST /documents/{id}/reprocess`, tenant admins only; multi-select in
+  the tenant's ingestion history, and a button in the document's panel).
+  - Allowed for `failed`, `ready`, `needs_review`, and `processing` whose attempt has ended
+    (no live worker grant and nothing recorded for the current attempt in the last 5
+    minutes; `batches.RUNNING_GRACE`). Refused otherwise: `not_reprocessable` (quarantined,
+    on hold, duplicate, discarded, or a document whose PDF never scanned clean),
+    `attempt_running`. A suspended tenant is refused by the account check, as everywhere.
+  - Every attempt restarts at fingerprint, from the upload at the version that scanned
+    clean (inbox versions stay; known limit 10). The PDF is copied to `originals/` only by
+    the first attempt that gets there; a later one finds it and writes nothing.
+  - A `failed` document gives up its hash when it is processed again, so fingerprint
+    checks it afresh: if the same file became an original in the meantime it ends
+    `duplicate`.
+  - The portal asks before processing again, and says how many of the selected documents
+    are Ready ("runs the AI steps again, which costs money"; owner's condition).
+- **Step 9, the companion file** (`assay_workers.companion_data`): plain code, never the
+  model. The values are stored by version: `signers` (source `companion`),
+  `companion_loan_terms` and `document_labels` rows carry `attempt`, and
+  `documents.companion_attempt` points at the current version. The pointer moves in the
+  transaction that writes the rows, so readers see the previous values until then. Nothing
+  is deleted (owner decision 2). `documents.companion_file_id` is the upload the values
+  came from. The tenant's document panel shows the values (`GET /documents/{id}`,
+  `companion` and `companion_files`); **no master view shows any of them** (tested).
+- **Companion attach or replace** (`POST /documents/{id}/companion`, tenant admins only):
+  the file is registered against its document (`batch_files.purpose` =
+  `companion_replacement`), uploaded with a presigned link to the inbox under an opaque
+  file ID, and scanned like any upload. Clean and valid, it takes effect at once; invalid
+  or infected, the document is unchanged. One at a time (`companion_pending`).
+- **The quarantine notice.** A second SNS topic, "Assay Insights security notices"
+  (`alerts.SecurityNotices`), with the alarm topic's key (no new KMS key, so
+  `platform_key_arns` is unchanged). The scan function reads GuardDuty's threat name from
+  the event (`detail.scanResultDetails.threats[0].name`; kept only if it is a plain
+  printable name of at most 200 characters), writes an audit row (category `security`,
+  action `file_quarantined`) in the scan result's transaction, and publishes the notice
+  after the commit. Both name the tenant, the uploading user, the time, the batch and
+  document IDs and the threat; **never a file name or content** (tested). The quarantine
+  key and the source version ID are in the audit row and in an INFO log line, so the copy
+  can now be confirmed from logs. Nothing is logged at ERROR, so `scan-errors` stays quiet.
+  A publish that fails raises: Lambda retries the event, the retry finds the file infected
+  with `notice_sent_at` unset and sends it; after its retries the event is in the scan
+  dead-letter queue (alarm). While `securityNoticeEmail` is blank the topic has no
+  subscription.
+- **"Mark as reviewed"** (`POST /documents/{id}/reviewed`, tenant admins only):
+  `needs_review` becomes `ready`. No document can be `needs_review` before stage 3, so the
+  button cannot appear until then; the route and its tests are in place.
+- **Audit rows** (category `document`, tenant admin as the actor, IP address and browser,
+  no file name): `reprocess_requested`, `marked_reviewed`, `companion_replace_requested`
+  (the request), and `companion_replaced` or `companion_attached` (written by the pipeline
+  when the file takes effect, with the uploading user as the actor): `before` and `after`
+  name both files by ID and inbox version, and `after.stored_version_id` is the new
+  version of `originals/{document}.companion.json`.
+
+Decisions made while building. The owner confirmed 1, 2 and 3 on 2026-11-25, and decided
+that rotation (4) stays off on the real clients until they have read the probe's output:
+
+1. **Step 9 runs in the steps Lambda, after the worker task, not inside it.** Section 8
+   lists it among the worker's steps. It is plain JSON (the scan function already reads and
+   validates the same file), it needs no sandbox, and running it as a Lambda step needs no
+   new grant for `app_worker`. The worker task no longer copies the companion file; the
+   `companion` step does. Stage 4 must decide where the final status is set, since step 9
+   now follows the task.
+2. **A replacement companion takes effect in the scan function**, in the transaction that
+   records its clean result, not through a "companion-only" execution as the plan said. Same
+   outcome (no task, no AI call), with no extra queue message, execution name or sweeper
+   rule; a failure is retried with the scan event and then alarmed by its dead-letter queue.
+3. **Audit category `document`** is new (the plan named only `security`). Audit history's
+   category filter has both.
+4. **Refresh-token rotation was not switched on with part 2** (superseded: it is on for
+   both clients since 2026-11-27; see "Rotation: the owner's decision" above). AWS's pages
+   (read 2026-11-25) say rotation "isn't compatible with" `REFRESH_TOKEN_AUTH` and that a
+   client with no explicit flows gets `ALLOW_REFRESH_TOKEN_AUTH`, `ALLOW_USER_SRP_AUTH` and
+   `ALLOW_CUSTOM_AUTH` by default; they do not say what a client with rotation on and an
+   empty flow list ends up with. Every flow other than refresh is a programmatic sign-in,
+   which the portal clients must not allow. So, as the plan said, the replica goes first:
+   `run_isolation.py` now prints a **rotation probe** (replica pool; not pass or fail):
+   for three candidate settings, what Cognito stored and how it answered each kind of
+   programmatic sign-in. The owner's decision on the real clients follows that output.
+5. **Later-stage columns are not all here.** `documents.content_attempt` exists (NULL). The
+   `attempt` column for `pages`, `document_parts`, `signature_check`, `signing_events` and
+   `extracted_fields`, and the master view's count of current parts
+   (`platform_view_owner` reading `content_attempt` and `document_parts.attempt`), arrive
+   with the stages that first write those tables.
+
+Migration `0011` (see its docstring):
+
+- `document_events.attempt`; `attempt` on `signers`, `companion_loan_terms`,
+  `document_labels`, with their unique rules now per attempt; `documents.companion_attempt`,
+  `content_attempt`, `companion_file_id`; `batch_files.purpose`, `applied_at`,
+  `notice_sent_at`, and the one-live-file-per-name index limited to batch uploads; audit
+  categories `security` and `document`; `pipeline.tenants_with_work` replaced (a document
+  is started only if its current attempt has a `start` event).
+- **Grants: two, each one integer column** (approved with the plan, decision 5):
+  `pipeline_lookup` and `app_worker` may read `document_events.attempt`. No policy, role or
+  table changes. `app_tenant` already had table-level access to every table touched.
+- A downgrade deletes nothing (`migrator` sees no rows). If replacement files or a second
+  version of a document's companion data exist, the database refuses it.
+
+New permissions (all approved with the plan, decisions 4 and 5; also in the pull request):
+
+- **`sns` interface endpoint** in the VPC, with a policy that allows one role (the scan
+  function's), one action (`sns:Publish`) and one topic.
+- **Scan function's role:** `sns:Publish` on the security-notice topic; `kms:GenerateDataKey*`
+  and `kms:Decrypt` on the alarm topic's key, only through SNS (`kms:ViaService`).
+- **The topic's policy** has no Allow: it denies `sns:Publish` to every principal but the
+  scan function's role, and any call without TLS. The role is named in a condition, so the
+  policy needs no IAM propagation wait.
+- No change to the tenant role, any bucket, key or vector bucket policy, the TSS, any
+  queue, or any other endpoint policy. No `update_tenants.py` run.
+
+Deploy order (owner): deploy when no document is in progress (an execution started before
+the deploy keeps the old definition, without the attempt). `pulumi up`; then
+`uv run scripts/migrate.py` **straight away** (until `0011` is in, every pipeline step that
+writes an event fails, so upload nothing in between); `uv run scripts/run_isolation.py ...`
+(read the rotation probe); browser checks; `uv run scripts/check_deployment.py`. If
+`securityNoticeEmail` is set, follow SNS's confirmation link within 48 hours.
+
+What the preview showed (2026-11-25): 6 to create (the `sns` endpoint, the topic, its
+policy, its email subscription, the endpoint policy, the component), 16 to update, 12 to
+replace (every image, the three task definitions and the portal build), 329 unchanged. The
+steps, starter and sweeper role policies show as updated only because their text is built
+from the topic's ARN, which is unknown until the topic exists; their content is unchanged
+(tested: only the scan function's policy has the two new statements).
+
+**Verified in AWS by the owner on 2026-11-25** (Infinity Loans):
+
+- "Process again", one document and 13 selected at once (so a second execution of one
+  document, `{document_id}-2`, works);
+- a companion replacement taking effect;
+- rejected replacements (a file that is not JSON, and one with a field error) leaving the
+  document unchanged;
+- an EICAR quarantine with its security notice: the threat name is in the real scan event,
+  and the notice has no file name and no content;
+- audit rows for all of them; idle-timeout sign-outs and audited ingestion exports too.
+
+**Deployed by the owner on 2026-11-27 as stack update 39** (commit 3f2a073), in 1 minute 7
+seconds, first time: the three fixes, rotation step 1, the reserved concurrency, the build
+change and the two-layer images. Its preview: **13 to update, 12 to replace, 338
+unchanged**, and two new outputs.
+
+- Update: the tenant app client (`ALLOW_CUSTOM_AUTH`, rotation `ENABLED`, 10 seconds);
+  `assay-dev-pipeline-scan` (`reservedConcurrentExecutions` -1 to 50, and its image);
+  `assay-dev-tss` (-1 to 300, and its image); seven more functions for their images
+  (`pipeline-steps`, `-starter`, `-sweeper`, `db-migrate`, `auth-events-consumer`, `seed`,
+  `isolation-tests`); the API service; the pipeline and provisioning state machines (each
+  definition names a task definition that is replaced).
+- Replace: eight image builds (every image that installs dependencies: `api`, `ops`,
+  `db-migrate`, `tss`, `provision`, `pipeline`, `pipeline-worker`, `isolation-tests`); the
+  API, worker and provisioning task definitions; the portal build.
+- No role, policy, endpoint, queue, topic or database change, and no migration. The
+  platform app client and the three Cognito trigger images are untouched.
+- Deploy order: `pulumi up`; `uv run scripts/run_isolation.py ...`; browser checks (the
+  tenant client's refresh among them); `uv run scripts/check_deployment.py`, which must
+  now show both reservations as the stack says.
+
+Three things the owner found, fixed the same day (deployed 2026-11-27; no migration, no
+grant, no permission change):
+
+1. **A replacement that did not take effect left only its request in the audit trail.** Now
+   every `companion_replace_requested` row is followed by exactly one row that says how it
+   ended (`companion_data.audit_not_applied` and `ending_action`; category `document`, the
+   uploading user as the actor, `reported_by: pipeline`), written in the transaction that
+   records the ending:
+   - `companion_replaced` or `companion_attached`: it took effect;
+   - **`companion_replace_rejected`: only when the file was checked and refused** (owner,
+     2026-11-25). File status `invalid` (`companion_invalid`), `infected`
+     (`threats_found`; it also has its `file_quarantined` row, category `security`) or
+     `mismatch` (what was stored is not what was registered: `size_mismatch`,
+     `checksum_mismatch`, `version_missing`);
+   - **`companion_replace_expired`: the file never arrived or was never scanned**, with the
+     reason for which: `not_uploaded`, `scan_timeout` (both from the sweeper), or
+     GuardDuty's own "could not scan" results (`scan_unsupported`, `scan_failed`,
+     `scan_access_denied`; from the scan function).
+   - Two placements the owner confirmed on 2026-11-27: `mismatch` is rejected (it was
+     checked against its registration and refused), and GuardDuty's "could not scan" is
+     expired (it was never scanned).
+   - **The row holds codes and IDs only**: `reason`, `problems` (each problem's
+     `error_code`, and its `key` only if it is one of the format's reserved keys, in lower
+     case), `file` and `kept` (file IDs and inbox versions). **A custom key is never
+     named**: it is the tenant's own wording, and master roles read audit rows
+     (`assay_schemas.companion.audit_problems`). No file name and no value.
+   - **Never name a detail key `code`**: Audit history redacts any key ending in `code`
+     except `error_code`, `status_code` and `country_code` (`audit_read.is_secret_key`). The
+     test checks that `redact()` leaves this row as written.
+   - A new file status must be given one of the two actions:
+     `test_only_a_file_that_was_checked_and_refused_is_rejected` fails until it is.
+2. **"Companion file uploads" showed stored codes** (`not_json`,
+   `LoanInterestRate: must_be_a_number`). It now uses the Upload screen's wording
+   (`companionErrorLines`, moved to `ingestionFormat.ts` so both screens share it; a code
+   with no wording has its underscores replaced, never shown raw). The rendered check has
+   a screen for it (`tenant-admin-ingestion-companion-uploads`: the panel scrolled to the
+   table, with two rejected uploads in the fixtures), which fails if a stored code shows.
+3. **Duration was measured from the upload, also for a document processed again**
+   (`06-not-a-pdf.pdf`: 55,492 seconds). **One definition now, everywhere** (owner decision,
+   2026-11-25, the one that needs no grant): from the document's latest `queued` event to
+   `completed_at` (`ingestion_read._started`).
+   - That event is written when a document becomes eligible for the pipeline (its batch
+     closed, its files scanned clean) and again by every "Process again", so the latest
+     one is where the current attempt began.
+   - **A first attempt's duration therefore leaves out the upload, the scan and the time
+     its batch stayed open.** Durations of documents already in the history get shorter by
+     that much.
+   - A document that was never queued (held at its scan, quarantined, failed before the
+     pipeline) is timed from `received_at`.
+   - The tenant view, the master view, both CSV exports and both Duration sorts use it.
+     The master view reads the events through `platform.ingestion_events_v`, which
+     `platform_reader` could already read: no migration, no grant.
+   - `test_every_view_and_both_csv_exports_show_the_same_duration` reads the number in
+     seven places (the tenant table, panel and CSV; the master table and CSV, for both
+     master roles) and fails, naming them, if any two differ.
+   - The tenant panel's label says which attempt ("Duration (attempt 2)").
+
+Portal (owner, 2026-11-25, before the deploy):
+
+- **The File name column of the tenant's ingestion history** has a minimum width (200 px),
+  shows each name on one line, and cuts a long one with an ellipsis; the full name is the
+  cell's tooltip and the panel's title. With the selection checkboxes added, names had
+  wrapped into many short lines at 1280 px. The rendered check now has `checkFileNames`
+  (both tenant ingestion screens, both widths): one line, at least 180 px, the tooltip is
+  the full name, the fixtures' long name is cut and a short one is whole.
+- **To make the room, the Companion file column is hidden by default** at every width (it
+  is in the row's panel, and Preferences shows it), as Size and Duration already are on
+  narrower windows. The page's content stops at about 1280 px however wide the window is,
+  so a wide window has only about 270 px more than a 1280 px one, and it also shows Size
+  and Duration. A browser that already saved its column preferences keeps them.
+- No new screen, so `SCREENS` has no new entry; the document panel's fixture gained the
+  companion values and uploads (long values, to check they wrap).
+
+For later stages:
+
+- Add each new step to `PIPELINE_STEPS`, `progress.WORKER_STEPS` (worker steps), the
+  portal's `STEP_TEXT` and `RESULT_TEXT`, and give it a Pass state. `companion` is there.
+- A step that asks "did I already run?" must ask about its own attempt's events.
+- Derived rows carry an attempt and are read through the document's pointer; nothing is
+  deleted.
+- The worker's session policy still named the companion key for writing after part 2,
+  though the task no longer wrote it. **Done in stage 2** (decision 9, 2026-11-27): the key
+  left the policy (`policies.worker_document_keys`).

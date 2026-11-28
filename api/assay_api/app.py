@@ -9,7 +9,19 @@ from fastapi import FastAPI
 
 from assay_api.auth import TokenVerifier
 from assay_api.database import Databases
-from assay_api.routes import admin, audit, auth_events, health, me, models, users
+from assay_api.routes import (
+    admin,
+    audit,
+    auth_events,
+    batches,
+    document_actions,
+    documents,
+    health,
+    ingestion,
+    me,
+    models,
+    users,
+)
 from assay_api.services import (
     CognitoAdmin,
     LambdaCognitoAdmin,
@@ -17,6 +29,7 @@ from assay_api.services import (
     StepFunctionsProvisioning,
 )
 from assay_api.settings import Settings
+from assay_api.storage import IngestQueue, SqsIngestQueue, Storage, TssStorage
 
 API_PREFIX = "/api"
 
@@ -27,6 +40,9 @@ def create_app(
     databases: Databases,
     cognito: CognitoAdmin,
     provisioning: Provisioning,
+    # Build step 6. Left out only by tests that never reach a batch or document route.
+    storage: Storage | None = None,
+    ingest: IngestQueue | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -46,6 +62,8 @@ def create_app(
     app.state.databases = databases
     app.state.cognito = cognito
     app.state.provisioning = provisioning
+    app.state.storage = storage
+    app.state.ingest = ingest
     for router in (
         health.router,
         me.router,
@@ -54,6 +72,10 @@ def create_app(
         admin.router,
         audit.router,
         models.router,
+        batches.router,
+        documents.router,
+        document_actions.router,
+        ingestion.router,
     ):
         app.include_router(router, prefix=API_PREFIX)
     return app
@@ -67,4 +89,6 @@ def app_from_env() -> FastAPI:
         databases=Databases.for_target(settings.db),
         cognito=LambdaCognitoAdmin(settings.cognito_admin_function, region=region),
         provisioning=StepFunctionsProvisioning(settings.provisioning_state_machine, region=region),
+        storage=TssStorage(settings.tss_endpoint_url, region=region),
+        ingest=SqsIngestQueue(settings.ingest_queue_url, region=region),
     )

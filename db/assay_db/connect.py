@@ -95,6 +95,11 @@ def iam_token(target: DbTarget, user: str) -> str:
     )
 
 
+def iam_connection(target: DbTarget, user: str, application_name: str) -> psycopg.Connection:
+    """One connection as `user`, with a fresh IAM token."""
+    return _connect(target, user, iam_token(target, user), application_name)
+
+
 def iam_engine(
     target: DbTarget,
     user: str,
@@ -109,7 +114,7 @@ def iam_engine(
     """
 
     def creator() -> psycopg.Connection:
-        return _connect(target, user, iam_token(target, user), application_name)
+        return iam_connection(target, user, application_name)
 
     if pool_size == 0:
         return create_engine("postgresql+psycopg://", creator=creator, poolclass=NullPool)

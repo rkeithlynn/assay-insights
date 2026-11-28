@@ -31,6 +31,7 @@ import { type AuditEvent, type AuditPage, call, errorFrom } from "../api/client"
 import { messageFor } from "../errors";
 import { useSession } from "../session";
 import { useLoad } from "../useLoad";
+import { formatShortTime } from "./ingestionFormat";
 
 const PAGE_SIZE = 50;
 const DEFAULT_RANGE: DateRangePickerProps.RelativeOption = {
@@ -51,9 +52,11 @@ const CATEGORIES: SelectProps.Option[] = [
   { value: "user", label: "User changes" },
   { value: "tenant", label: "Tenant changes" },
   { value: "audit", label: "Audit exports" },
+  { value: "security", label: "Security notices" },
+  { value: "document", label: "Document changes" },
 ];
 
-type Category = "auth" | "user" | "tenant" | "audit";
+type Category = "auth" | "user" | "tenant" | "audit" | "security" | "document";
 type Sort = "at" | "-at" | "tenant" | "-tenant" | "actor" | "-actor" | "action" | "-action" | "category" | "-category";
 
 // The table fits the screen at 1280 px and wider (rendered check: portal/e2e/layout.e2e.ts):
@@ -256,7 +259,13 @@ export function Audit() {
       id: "at",
       header: "Time",
       sortingField: "at",
-      cell: (e) => <span style={ONE_LINE}>{new Date(e.at).toLocaleString()}</span>,
+      // No year when it is this year's (the event's panel shows the full time): Audit history
+      // fits at 1280 px beside the build step 6 navigation (218 px wide).
+      cell: (e) => (
+        <span style={ONE_LINE} title={new Date(e.at).toLocaleString()}>
+          {formatShortTime(e.at, { seconds: true })}
+        </span>
+      ),
       isRowHeader: true,
     },
     { id: "tenant", header: "Tenant", sortingField: "tenant", cell: (e) => e.tenant_name },
