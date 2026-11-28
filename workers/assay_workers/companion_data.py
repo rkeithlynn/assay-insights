@@ -4,7 +4,10 @@ Plain code, never the model. Used in two places, with the same function:
 
 - the pipeline's `companion` step, after the worker task, for every attempt of a document;
 - the scan step, when a companion file attached or replaced after ingestion scans clean and
-  valid (owner decision A4). No worker task runs and no AI service is called.
+  valid (owner decision A4). No worker task runs and no AI service is called. The event it
+  writes is marked as written outside an attempt's run (`batches.OUTSIDE_ATTEMPT`), so it
+  does not make the document look under way: "Process again" is accepted straight after a
+  replacement (owner, 2026-11-27).
 
 `apply` runs inside the caller's transaction, as `app_tenant` in one tenant:
 
@@ -269,10 +272,22 @@ def _audit_replacement(
 
 
 def apply(
-    conn: Connection, storage: TenantStorage, *, tenant_id: uuid.UUID, document_id: uuid.UUID
+    conn: Connection,
+    storage: TenantStorage,
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+    in_attempt: bool,
 ) -> Applied:
-    """Store the document's companion values as a new version. See the module docstring."""
+    """Store the document's companion values as a new version. See the module docstring.
+
+    `in_attempt` says who is calling, and has no default: the pipeline's companion step, as a
+    step of the document's current attempt (true), or the scan step, for a file attached or
+    replaced after ingestion, when no attempt need be running (false). The event written
+    then carries `batches.OUTSIDE_ATTEMPT`, and is not the attempt's activity.
+    """
     fields = {"tenant_id": str(tenant_id), "document_id": str(document_id)}
+    mark: dict[str, Any] = {} if in_attempt else {batches.OUTSIDE_ATTEMPT: True}
     document = conn.execute(
         text(
             "SELECT companion_attempt, companion_file_id FROM assay.documents "
@@ -283,7 +298,12 @@ def apply(
     file = _candidate(conn, document_id)
     if file is None:
         batches.document_event(
-            conn, tenant_id=tenant_id, document_id=document_id, step=STEP, status=NONE
+            conn,
+            tenant_id=tenant_id,
+            document_id=document_id,
+            step=STEP,
+            status=NONE,
+            detail=mark or None,
         )
         log.info("no companion file", extra=fields)
         return Applied(NONE)
@@ -300,7 +320,7 @@ def apply(
             document_id=document_id,
             step=STEP,
             status=INVALID,
-            detail={"error": "companion_invalid", "problems": len(exc.details())},
+            detail={"error": "companion_invalid", "problems": len(exc.details())} | mark,
         )
         log.warning("the companion file no longer validates; values kept", extra=fields)
         return Applied(INVALID)
@@ -345,7 +365,8 @@ def apply(
             "signers": len(values.signers),
             "labels": len(values.labels),
             "replaced": replacement,
-        },
+        }
+        | mark,
     )
     log.info(
         "companion values stored",

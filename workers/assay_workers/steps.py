@@ -480,7 +480,10 @@ def companion(event: dict[str, Any], deps: Deps) -> dict[str, Any]:
             log.info("companion step already done", extra=fields | {"outcome": previous})
             return {"outcome": str(previous)}
         storage = deps.storage.pipeline(tenant_id, SERVICE, f"companion-{document_id.hex[:12]}")
-        applied = companion_data.apply(conn, storage, tenant_id=tenant_id, document_id=document_id)
+        # The attempt's own last step: its event is the attempt's activity.
+        applied = companion_data.apply(
+            conn, storage, tenant_id=tenant_id, document_id=document_id, in_attempt=True
+        )
     return {"outcome": applied.outcome}
 
 

@@ -704,8 +704,17 @@ def requeue_candidates(conn: Connection, now: dt.datetime) -> list[uuid.UUID]:
 # attempt has ended without a final status: every document until the last stage is built.
 REPROCESSABLE = ("failed", "ready", "needs_review", "processing")
 # A `processing` document is under way while it has a live worker grant, or anything
-# happened to its current attempt this recently.
+# happened to its current attempt this recently. Until stage 4 a document that passed its
+# steps stays `processing`, so its status cannot say whether an attempt runs. Stage 4 sets
+# the final status inside the worker task and replaces this rule (owner, 2026-11-27).
 RUNNING_GRACE = dt.timedelta(minutes=5)
+# Every event is stamped with its document's current attempt, also one written when no
+# attempt runs. Such an event carries this key (true) in its detail and is not the attempt's
+# activity. Today that is the scan step's event for a companion file attached or replaced
+# after ingestion: the replacement is complete in the transaction that writes it, and it must
+# not hold "Process again" for five minutes (owner, 2026-11-27). The pipeline's own companion
+# step, which ends every attempt, writes its event without the key and still counts.
+OUTSIDE_ATTEMPT = "outside_attempt"
 # A companion file may be attached or replaced once the document has been through the
 # pipeline's checks (owner decision A4).
 COMPANION_REPLACEABLE = ("ready", "needs_review", "processing")
@@ -718,10 +727,13 @@ def _under_way(conn: Connection, document_id: uuid.UUID, now: dt.datetime) -> bo
             "               AND g.ended_at IS NULL AND g.expires_at > now()) AS granted, "
             "       (SELECT max(e.at) FROM assay.document_events e "
             "         WHERE e.tenant_id = d.tenant_id AND e.document_id = d.id "
-            "           AND e.attempt = d.attempt AND e.step <> 'viewed') AS last_event "
+            "           AND e.attempt = d.attempt AND e.step <> 'viewed' "
+            # Only the JSON value true takes an event out; anything else still counts.
+            "           AND (e.detail -> :outside) IS DISTINCT FROM 'true'::jsonb) "
+            "       AS last_event "
             "FROM assay.documents d WHERE d.id = :id"
         ),
-        {"id": document_id},
+        {"id": document_id, "outside": OUTSIDE_ATTEMPT},
     ).one()
     recent = row.last_event is not None and row.last_event > now - RUNNING_GRACE
     return bool(row.granted) or recent

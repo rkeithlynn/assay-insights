@@ -414,8 +414,14 @@ def handle(event: dict[str, Any], deps: Deps) -> str:
                 # says how it ended (reason codes only; the file's content is never repeated).
                 ended, reason = outcome.status, outcome.error_code or outcome.status
                 if outcome.status == "clean":
+                    # Not a step of an attempt: its event must not make the document
+                    # look under way (`batches.OUTSIDE_ATTEMPT`).
                     applied = companion_data.apply(
-                        conn, storage, tenant_id=tenant_id, document_id=file.document_id
+                        conn,
+                        storage,
+                        tenant_id=tenant_id,
+                        document_id=file.document_id,
+                        in_attempt=False,
                     )
                     # Accepted here and refused there cannot happen with one set of rules;
                     # if it ever does, the trail still says the file was refused.

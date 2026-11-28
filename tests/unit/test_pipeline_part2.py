@@ -237,6 +237,163 @@ def test_process_again_is_refused_while_an_attempt_is_under_way(
         batches.reprocess(conn, tenant_id=w.db.tenants["b"], document_id=doc_id, now=now() + LATER)
 
 
+# --- A companion replacement is not the attempt's activity (owner, 2026-11-27) -------------------
+
+
+def settle(w: World, doc_id: uuid.UUID) -> None:
+    """The attempt ended long ago: its events are an hour old and it has no live grant."""
+    w.db.execute(
+        "UPDATE assay.document_events SET at = at - interval '1 hour' WHERE document_id = %s",
+        doc_id,
+    )
+    w.db.execute(
+        "UPDATE assay.worker_grants SET ended_at = now() WHERE document_id = %s "
+        "AND ended_at IS NULL",
+        doc_id,
+    )
+
+
+def replace_companion(w: World, b: Batch, doc_id: uuid.UUID, name: str, **values: Any) -> None:
+    """A companion file attached or replaced after ingestion, through its scan."""
+    replacement(w, b, doc_id, "a-admin", name, companion_body(b.tenant_id, **values))
+    assert scanned(w, b, name, put(w, b, name)) == "clean"
+
+
+def last_companion_event(w: World, doc_id: uuid.UUID) -> tuple[Any, ...]:
+    row = w.db.row(
+        "SELECT status, attempt, detail FROM assay.document_events "
+        "WHERE document_id = %s AND step = 'companion' ORDER BY at DESC LIMIT 1",
+        doc_id,
+    )
+    assert row is not None
+    return row
+
+
+def test_a_replacement_applied_by_the_scan_step_does_not_hold_the_document(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """What happened on 2026-11-27: a replacement took effect at 19:50:55, and "Process again"
+    was refused until 19:55:55 with nothing running. The replacement's event is stamped with
+    the current attempt, as every event is, and counted as that attempt's activity. It is
+    now marked as written outside an attempt's run, and does not count."""
+    tenant = w.db.tenants["a"]
+    files = [("held.pdf", minimal_pdf(text="held")), ("held.json", companion_body(tenant, **FULL))]
+    doc_id, b = processed(w, "a", files, tmp_path, engines)
+    settle(w, doc_id)
+
+    replace_companion(w, b, doc_id, "held.json", ApplicationId="APP-HELD", LoanTerm=120)
+    status, attempt, detail = last_companion_event(w, doc_id)
+    # The event is the replacement's, a moment old, stamped with the current attempt, marked.
+    assert (status, attempt) == ("stored", 1)
+    assert detail["replaced"] is True and detail[batches.OUTSIDE_ATTEMPT] is True
+    assert companion_rows(w, doc_id)["version"] == 2
+
+    # At once, with no wait: accepted.
+    assert reprocess(w, tenant, doc_id, now()) == 2
+    assert w.db.row("SELECT attempt, status FROM assay.documents WHERE id = %s", doc_id) == (
+        2,
+        "processing",
+    )
+
+
+def test_the_mark_is_what_frees_the_document_and_only_the_value_true(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """The same event without its mark holds the document, as before the fix; so does one
+    whose mark is anything but true. Nothing but that key, with that value, is left out."""
+    tenant = w.db.tenants["a"]
+    files = [("mark.pdf", minimal_pdf(text="mark")), ("mark.json", companion_body(tenant, **FULL))]
+    doc_id, b = processed(w, "a", files, tmp_path, engines)
+    settle(w, doc_id)
+    replace_companion(w, b, doc_id, "mark.json", ApplicationId="APP-MARK")
+
+    def set_mark(value: str | None) -> None:
+        change = (
+            "detail - 'outside_attempt'"
+            if value is None
+            else (f"jsonb_set(detail, '{{outside_attempt}}', '{value}'::jsonb)")
+        )
+        w.db.execute(
+            f"UPDATE assay.document_events SET detail = {change} "  # nosec B608
+            "WHERE document_id = %s AND step = 'companion' AND at > now() - interval '5 minutes'",
+            doc_id,
+        )
+
+    for not_true in (None, "false", '"true"', "1", "null"):
+        set_mark(not_true)
+        with pytest.raises(batches.BatchError, match="attempt_running"):
+            reprocess(w, tenant, doc_id, now())
+    set_mark("true")
+    assert reprocess(w, tenant, doc_id, now()) == 2
+
+
+def test_the_pipelines_own_companion_step_still_holds_the_document(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """The companion step ends every attempt. Its event is the attempt's activity: it carries
+    no mark, also when the file it stores is a replacement that had not been applied."""
+    tenant = w.db.tenants["a"]
+    files = [("own.pdf", minimal_pdf(text="own")), ("own.json", companion_body(tenant, **FULL))]
+    doc_id, _ = processed(w, "a", files, tmp_path, engines)
+    status, attempt, detail = last_companion_event(w, doc_id)
+    assert (status, attempt) == ("stored", 1)
+    assert batches.OUTSIDE_ATTEMPT not in detail
+    with pytest.raises(batches.BatchError, match="attempt_running"):
+        reprocess(w, tenant, doc_id, now())
+    # A document with no companion file: the step's `none` event holds it just the same.
+    bare, _ = processed(w, "a", [("own-bare.pdf", minimal_pdf(text="own-bare"))], tmp_path, engines)
+    status, _, detail = last_companion_event(w, bare)
+    assert status == "none" and not (detail or {}).get(batches.OUTSIDE_ATTEMPT)
+    with pytest.raises(batches.BatchError, match="attempt_running"):
+        reprocess(w, tenant, bare, now())
+
+
+def test_a_replacement_applied_while_an_attempt_runs_does_not_free_it(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    """A marked event takes nothing away: an attempt that really is running is still held by
+    its own events, and by its live grant however old those are."""
+    tenant = w.db.tenants["a"]
+    files = [("live.pdf", minimal_pdf(text="live")), ("live.json", companion_body(tenant, **FULL))]
+    doc_id, b = processed(w, "a", files, tmp_path, engines)
+    settle(w, doc_id)
+
+    # Attempt 2 has just been queued: its own `queued` event is a moment old.
+    assert reprocess(w, tenant, doc_id, now()) == 2
+    replace_companion(w, b, doc_id, "live.json", ApplicationId="APP-LIVE-1")
+    assert last_companion_event(w, doc_id)[2][batches.OUTSIDE_ATTEMPT] is True
+    with pytest.raises(batches.BatchError, match="attempt_running"):
+        reprocess(w, tenant, doc_id, now())
+
+    # Its task holds a grant, and every event of the attempt is an hour old but the
+    # replacement's: the grant alone holds it.
+    assert step(w, "fingerprint", tenant, doc_id, attempt=2) == {"outcome": "continue"}
+    claimed(w, tenant, doc_id)
+    w.db.execute(
+        "UPDATE assay.document_events SET at = at - interval '1 hour' WHERE document_id = %s",
+        doc_id,
+    )
+    replace_companion(w, b, doc_id, "live.json", ApplicationId="APP-LIVE-2")
+    with pytest.raises(batches.BatchError, match="attempt_running"):
+        reprocess(w, tenant, doc_id, now())
+    assert w.db.row("SELECT attempt FROM assay.documents WHERE id = %s", doc_id) == (2,)
+
+    # Once the grant has ended, the replacement's event does not hold it.
+    step(w, "release", tenant, doc_id, attempt=2)
+    assert reprocess(w, tenant, doc_id, now()) == 3
+
+
+def test_a_file_attached_to_a_document_that_had_none_does_not_hold_it_either(
+    w: World, tmp_path: Path, engines: list[Any]
+) -> None:
+    tenant = w.db.tenants["a"]
+    doc_id, b = processed(w, "a", [("att.pdf", minimal_pdf(text="att"))], tmp_path, engines)
+    settle(w, doc_id)
+    replace_companion(w, b, doc_id, "att.json", **FULL)
+    assert last_companion_event(w, doc_id)[2][batches.OUTSIDE_ATTEMPT] is True
+    assert reprocess(w, tenant, doc_id, now()) == 2
+
+
 def test_a_failed_document_that_became_someone_elses_original_ends_a_duplicate(
     w: World, tmp_path: Path, engines: list[Any]
 ) -> None:

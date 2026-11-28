@@ -453,3 +453,34 @@ def test_both_views_build_their_duration_from_one_definition() -> None:
     assert tenant in ingestion_read.TENANT_SELECT and master in ingestion_read.MASTER_SELECT
     assert tenant in ingestion_read.TENANT_SORTS["duration"]
     assert master in ingestion_read.MASTER_SORTS["duration"]
+
+
+# --- Last in this module: it starts a new attempt of the shared document ------------------------
+
+
+def test_process_again_is_accepted_straight_after_a_companion_replacement(
+    w: World, ready_doc: dict[str, Any]
+) -> None:
+    """Owner, 2026-11-27. A replacement that has taken effect is complete: nothing is running,
+    and "Process again" is accepted at once. (It was refused for five minutes, because the
+    replacement's event counted as the current attempt's activity.)"""
+    document = ready_doc["id"]
+    settle(w, document)
+    attempt = w.req("GET", f"/api/documents/{document}", "a-admin").json()["attempt"]
+    content = body_for(w, ApplicationId="APP-AT-ONCE", LoanTerm=84)
+    registered = w.req(
+        "POST", f"/api/documents/{document}/companion", "a-admin", json=companion_file(w, content)
+    )
+    assert registered.status_code == 201, registered.text
+    assert upload_scan(w, "a", registered.json(), content) == "clean"
+    shown = w.req("GET", f"/api/documents/{document}", "a-admin").json()
+    assert shown["companion"]["application_ref"] == "APP-AT-ONCE"
+    # The replacement's event is there for the tenant to see, a moment old.
+    assert shown["events"][-1]["step"] == "companion"
+
+    response = w.req("POST", f"/api/documents/{document}/reprocess", "a-admin")
+    assert response.status_code == 202, response.text
+    assert response.json() == {"document_id": document, "attempt": attempt + 1}
+    # The new attempt is under way, and is held as any attempt is.
+    again = w.req("POST", f"/api/documents/{document}/reprocess", "a-admin")
+    assert (again.status_code, again.json()["detail"]) == (409, "attempt_running")
