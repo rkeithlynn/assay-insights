@@ -9,6 +9,7 @@ import pytest
 
 from assay_infra.config import build_dns
 from assay_infra.dns import DnsAndCertificate
+from tests.unit.conftest import after_settled
 
 ZONE = "example.test"
 HOSTS = ["example.test", "admin.example.test"]
@@ -23,7 +24,7 @@ def test_certificate_covers_every_host() -> Any:
         assert [domain, *sans] == HOSTS
         assert method == "DNS"
 
-    return pulumi.Output.all(
+    return after_settled(
         component.certificate.domain_name,
         component.certificate.subject_alternative_names,
         component.certificate.validation_method,
@@ -40,7 +41,7 @@ def test_one_validation_record_per_host_in_the_zone() -> Any:
         assert set(zone_ids) == {"Z123"}
         assert sorted(names) == sorted(f"_token.{h}." for h in HOSTS)
 
-    return pulumi.Output.all(
+    return after_settled(
         *[r.zone_id for r in component.validation_records],
         *[r.name for r in component.validation_records],
     ).apply(check)

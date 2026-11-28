@@ -24,7 +24,7 @@ from assay_infra.api import api_task_role
 from assay_infra.auth_events import sqs_endpoint_policy
 from assay_infra.database import Database
 from assay_infra.network import Network, states_endpoint_policy
-from tests.unit.conftest import ACCOUNT_ID, REGION, registered
+from tests.unit.conftest import ACCOUNT_ID, REGION, after_settled, registered
 from tests.unit.test_infra_data import DB, NET
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -87,7 +87,7 @@ QUEUE_POLICY = "aws:sqs/queuePolicy:QueuePolicy"
 
 def _ready(p: pipeline.Pipeline) -> pulumi.Output[list[Any]]:
     # Every resource the tests read, so none is checked before it is registered.
-    return pulumi.Output.all(
+    return after_settled(
         p.state_machine.id,
         p.state_machine_policy.id,
         p.ingest_queue.id,
@@ -227,7 +227,7 @@ def test_only_the_scan_function_is_capped_and_only_when_the_stack_says_so() -> A
         assert retries["maximumEventAgeInSeconds"] == 3600
         assert retries["destinationConfig"]["onFailure"]["destination"]
 
-    return pulumi.Output.all(_ready(capped), _ready(plain)).apply(check)
+    return after_settled(_ready(capped), _ready(plain)).apply(check)
 
 
 def test_the_two_reservations_are_set_together_and_the_tss_covers_the_scan_function() -> None:
@@ -442,7 +442,7 @@ def test_security_notices_have_their_own_topic_and_sender_and_no_address_until_o
         assert subscriptions["sn1-notices-b-email"]["endpoint"] == "security@example.test"
         assert blank.subscription is None and named.subscription is not None
 
-    return pulumi.Output.all(
+    return after_settled(
         blank.topic.arn, blank.policy.id, blank.endpoint_policy.id, named.topic.arn
     ).apply(check)
 
@@ -871,7 +871,7 @@ def test_api_task_role_keeps_its_name_description_and_trust() -> Any:
         trust = json.loads(inputs["assumeRolePolicy"])
         assert trust["Statement"][0]["Principal"] == {"Service": "ecs-tasks.amazonaws.com"}
 
-    return role.id.apply(check)
+    return after_settled(role.id).apply(check)
 
 
 # --- Endpoint policies (pure) -----------------------------------------------------------------

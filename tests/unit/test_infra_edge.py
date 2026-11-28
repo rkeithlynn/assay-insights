@@ -26,6 +26,7 @@ from tests.unit.conftest import (
     CLOUDFRONT_VPC_ORIGIN_SG,
     ELB_ACCOUNT_ID,
     REGION,
+    after_settled,
     registered,
 )
 from tests.unit.test_infra_auth_api import AUTH, AUTH_EVENT_TRIGGER, DNS, FAKE_JWKS
@@ -72,7 +73,7 @@ def _edge(prefix: str) -> Edge:
 
 
 def _ready(edge: Edge) -> pulumi.Output[list[Any]]:
-    return pulumi.Output.all(
+    return after_settled(
         edge.distribution.id,
         edge.load_balancer_ingress.id,
         edge.portal_policy.policy,

@@ -30,7 +30,7 @@ from assay_infra.tss import TenantStorage, TssCaller
 from assay_tss import keys as tss_keys
 from assay_tss import policies
 from assay_tss.provision import program
-from tests.unit.conftest import ACCOUNT_ID, REGION, registered
+from tests.unit.conftest import ACCOUNT_ID, REGION, after_settled, registered
 from tests.unit.test_infra_auth_api import AUTH, DNS, FAKE_JWKS
 from tests.unit.test_infra_data import DB, NET
 
@@ -233,7 +233,7 @@ class Stack:
             )
 
     def ready(self) -> pulumi.Output[list[Any]]:
-        """Resolves once everything the checks read is registered with the mocks."""
+        """These outputs, once every resource of the test is registered with the mocks."""
         outputs: list[pulumi.Output[Any]] = [
             self.storage.stage.id,
             self.storage.function.id,
@@ -251,7 +251,7 @@ class Stack:
         ]
         if self.runner is not None:
             outputs.append(self.runner.function.id)
-        return pulumi.Output.all(*outputs)
+        return after_settled(*outputs)
 
     def topic_arn(self) -> str:
         """The alarm topic's ARN, as the mocks build it."""
@@ -932,7 +932,7 @@ def test_the_stack_switch_decides_how_far_the_scan_role_reaches() -> Any:
             assert by_sid(on, sid)["Resource"] == "arn:aws:s3:::assay-sr1-t-*/inbox/*"
             assert by_sid(off, sid)["Resource"] == "arn:aws:s3:::assay-sr0-t-*/*"
 
-    return pulumi.Output.all(narrowed.ready(), plain.ready()).apply(check)
+    return after_settled(narrowed.ready(), plain.ready()).apply(check)
 
 
 def test_the_dev_stack_limits_the_scan_role_to_the_inbox() -> None:
@@ -1237,7 +1237,7 @@ def test_the_tss_keeps_a_share_of_the_accounts_concurrency_when_the_stack_says_s
         assert _one("aws:lambda/function:Function", "t2r-tss-fn")[key] == 300
         assert _one("aws:lambda/function:Function", "t2u-tss-fn").get(key) is None
 
-    return pulumi.Output.all(reserved.ready(), plain.ready()).apply(check)
+    return after_settled(reserved.ready(), plain.ready()).apply(check)
 
 
 @pulumi.runtime.test
@@ -1791,9 +1791,9 @@ def test_alarm_topic_is_encrypted_and_emails_the_configured_address() -> Any:
         for name, inputs in alarms:
             assert inputs.get("alarmActions") == [stack.topic_arn()], name
 
-    return pulumi.Output.all(
-        stack.ready(), stack.alerts.subscription.id, stack.alerts.topic.arn
-    ).apply(check)
+    return after_settled(stack.ready(), stack.alerts.subscription.id, stack.alerts.topic.arn).apply(
+        check
+    )
 
 
 # --- The worker task's route: its own, and no one else's (build step 6, second half) -----------
@@ -1906,7 +1906,7 @@ def test_policies_that_name_new_roles_wait_for_iam_to_know_them() -> Any:
         [provision_roles] = waits["t9-provision-iam-propagation"]["triggers"]
         assert len(provision_roles) == 1 and "t9-provision-task-role" in provision_roles[0]
 
-    return pulumi.Output.all(
+    return after_settled(
         stack.ready(), stack.storage.iam_ready.id, stack.provisioning.iam_ready.id
     ).apply(check)
 

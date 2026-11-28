@@ -13,7 +13,7 @@ from assay_infra.auth import Auth
 from assay_infra.auth_events import AuthEvents
 from assay_infra.database import Database
 from assay_infra.network import Network, states_endpoint_policy
-from tests.unit.conftest import ACCOUNT_ID, REGION, registered
+from tests.unit.conftest import ACCOUNT_ID, REGION, after_settled, registered
 from tests.unit.test_infra_auth_api import AUTH, DNS, FAKE_JWKS
 from tests.unit.test_infra_data import DB, NET
 
@@ -62,7 +62,7 @@ def _stack(prefix: str) -> AuthEvents:
 
 
 def _ready(events: AuthEvents) -> pulumi.Output[list[Any]]:
-    return pulumi.Output.all(
+    return after_settled(
         events.trigger_function.id,
         events.consumer_function.id,
         events.sqs_endpoint_policy.policy,

@@ -26,7 +26,7 @@ from assay_infra.branding import Asset, asset_problems
 from assay_infra.config import AuthConfig, build_dns, validate_auth
 from assay_infra.database import Database
 from assay_infra.network import Network
-from tests.unit.conftest import ACCOUNT_ID, REGION, registered
+from tests.unit.conftest import ACCOUNT_ID, REGION, after_settled, registered
 from tests.unit.test_infra_data import DB, NET
 
 AUTH_EVENT_TRIGGER = f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:auth-event-trigger"
@@ -97,7 +97,7 @@ def _one(type_token: str, name: str) -> dict[str, Any]:
 
 
 def _after_everything(auth: Auth, api: ApiService) -> pulumi.Output[list[Any]]:
-    return pulumi.Output.all(
+    return after_settled(
         auth.tenant.branding.id,
         auth.platform.branding.id,
         *[g.id for g in auth.tenant.groups + auth.platform.groups],
@@ -187,7 +187,7 @@ def _auth_only(prefix: str, cfg: AuthConfig) -> Auth:
 
 
 def _clients_ready(auth: Auth) -> pulumi.Output[list[Any]]:
-    return pulumi.Output.all(
+    return after_settled(
         auth.tenant.client.id, auth.platform.client.id, auth.tenant.pool.id, auth.platform.pool.id
     )
 
