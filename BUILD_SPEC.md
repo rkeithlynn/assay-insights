@@ -970,7 +970,7 @@ owner accepted.
 6. Every isolation run makes one real Textract call, on a page the probe draws, and records
    it in `ai_usage`. The row carries the configured price of a page, like any other Textract
    call, so `ai_usage` is a true cost record: each isolation run costs one Textract page
-   (built 2026-11-27, not deployed; rows written before the deploy are at no price).
+   (deployed 2026-11-27; rows written before that deploy are at no price).
 7. The scan role's limit to `inbox/` (section 6 above) is deployed and verified in dev: the
    deployed policy ends in `/inbox/*`; on Isolation Test A a clean file was scanned and
    processed and EICAR was quarantined with its security notice; all four plans stayed
@@ -980,7 +980,9 @@ owner accepted.
    (`inbox/{batch_id}/{document_id}`), and no companion file's upload: the task never reads
    a companion file. The grant's row still lists every clean inbox file; the TSS takes the
    PDF's key from it. The worker probe shows the companion upload refused, with S3 naming
-   the read (built 2026-11-27, not deployed).
+   the read (deployed and verified in dev 2026-11-27: the isolation suite passes with 73,
+   28, 102 and 28 checks, and a document whose companion file was replaced can be
+   processed again).
 7. The GuardDuty scan role's object access stops at `inbox/`, behind a stack switch (the
    tenant isolation list above). Tested first on Isolation Test A, with a clean file and
    EICAR.

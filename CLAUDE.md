@@ -36,29 +36,32 @@ change. Where this file and the spec differ, the spec wins.
 | 3. Cognito pools, managed login branding, API skeleton with token verification, `GET /me` | **Complete** (2026-11-23) |
 | 4. Tenant Storage Service, tenant provisioning, `tests/isolation` | **Complete** (2026-11-23) |
 | 5. Portal shell, sign-in, Tenants and Users screens, `scripts/seed.py` | **Complete** (2026-11-24) |
-| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) complete and verified in dev** (2026-11-27). After it, the upload screen's fixes and the scan role's limit to `inbox/`, deployed and verified in dev (2026-11-27). Then the worker's companion-read narrowing and the probe's usage price: **built, not deployed** (2026-11-27). Stages 3 and 4 not started. Next: stage 3, which needs its plan first. See "Start here" below |
+| 6. Batches and upload, malware scan routing, pipeline steps 4 to 10, ingestion history | **First half complete** (2026-11-24). **Second half, stage 1 complete and verified in dev** (2026-11-27): the worker task, attempts and "Process again", step 9, companion attach and replace, the quarantine notice, "Mark as reviewed", refresh-token rotation on both portal clients. **Stage 2 (step 5, text, Textract) complete and verified in dev** (2026-11-27). After it, the upload screen's fixes and the scan role's limit to `inbox/`, deployed and verified in dev (2026-11-27). Then the worker's companion-read narrowing and the probe's usage price, deployed and verified in dev (2026-11-27). Stages 3 and 4 not started. Next: stage 3, which needs its plan first. See "Start here" below |
 | 7–9 | Not started |
 
-## Start here: stage 2 and the scan role's limit are verified in dev; two small changes wait for a deploy; stage 3 needs its plan (state on 2026-11-27)
+## Start here: everything built is deployed and verified in dev; one small fix awaits the owner's decision; stage 3 needs its plan (state on 2026-11-27)
 
 A new session starts from this section and BUILD_SPEC.md section 8. Everything below it is
 the record: read the part a task touches. **Stage 2 (step 5, text) is built, deployed and
-verified in dev, and so are the two changes made after it** (the upload screen's fixes and
-the scan role's limit to `inbox/`). **Two small changes are built and wait for a deploy**:
-the worker's companion-read narrowing and the probe's usage price ("Built, not deployed"
-below). Stage 3 is not started and needs its own plan first: "For stage 3" below is where
-that plan starts.
+verified in dev, and so are the four changes made after it** (the upload screen's fixes,
+the scan role's limit to `inbox/`, the worker's companion-read narrowing and the probe's
+usage price). **Nothing is built and waiting for a deploy.** One thing found on 2026-11-27
+awaits the owner's decision: "Process again" is refused for five minutes after a companion
+replacement (diagnosed; a fix is proposed, not built). Stage 3 is not started and needs its
+own plan first: "For stage 3" below is where that plan starts.
 
 ### Where things stand
 
 - **Branch and pull request.** All work is on `build-step-6`, pushed, in pull request #5
   against `main`. `main` has not been fast-forwarded yet (the owner does that). Stage 3
   continues on `build-step-6`.
-- **Deployed: stack update 42** (2026-11-27 about 22:56 UTC, commit c9b70a1, 38 seconds;
-  owner), with Aurora at migration `0012`. Update 41 (commit 524a0aa) was stage 2. Update 42
-  carried the scan role's policy and the portal build with the upload screen's fixes: its
-  history line reads 1 updated and 363 unchanged, as the preview said (the line does not
-  print a replacement, which is what the portal build was).
+- **Deployed: stack update 43** (2026-11-28 00:34 UTC, which is 2026-11-27 19:34 Eastern;
+  commit 3346624, 1 minute 3 seconds; owner), with Aurora at migration `0012`. It carried
+  the worker's companion-read narrowing and the probe's usage price: 8 updated, 8 replaced,
+  349 unchanged ("The worker's companion read and the probe's usage price" below says why
+  the preview's 9 and 9 became 8 and 8). Before it: update 41 (commit 524a0aa) was stage 2,
+  and update 42 (2026-11-27 22:55 UTC, commit c9b70a1) the scan role's policy and the portal
+  build with the upload screen's fixes.
 - **Verified in dev by the owner (2026-11-27).**
   - Stage 2. The isolation suite passes: 73 in the isolation Lambda, 28 in the provisioning
     role's probe, 101 in the worker probe, 28 Cognito checks. The Text line is right for the
@@ -70,6 +73,11 @@ that plan starts.
     processed, and EICAR was quarantined with its security notice; all four plans `ACTIVE`;
     the isolation suite again 73, 28, 101 and 28; `check_deployment.py` clean. **One check
     is still due: the plans' status again on 2026-11-28** ("Open items").
+  - The worker's companion-read narrowing and the probe's usage price, after update 43: the
+    isolation suite passes 73, 28, **102** and 28, and the new check reads
+    `denied:s3:GetObject`; "Process again" works for a document whose companion file was
+    replaced, which it could not before (attempt 2 of `04-with-companion.pdf`, every step
+    passed), and for a plain one (`01-normal.pdf`).
 - **Tested (2026-11-27), the code that is deployed** (commit e70eaea). The whole suite with
   the test PostgreSQL and the image tests required (`ASSAY_REQUIRE_DB_TESTS=1`,
   `ASSAY_REQUIRE_IMAGE_TESTS=1`): 1,796 passed, none failed, none skipped (1,792 at stage 2,
@@ -77,20 +85,23 @@ that plan starts.
   tests pass, and the rendered check passes, 58 of 58 (the 48 layout checks and the 10 new
   upload checks). CI passed on commits e70eaea, c9b70a1 and 20d0fb9 (`python`, `portal`,
   `portal-render`).
-- **Built, not deployed** (2026-11-27; the owner approved both that day). One `pulumi up`
-  carries both; neither has a migration, a grant or a permission change. **They deploy with
-  stage 3's first deploy, or alone before it: the owner decides** ("Built, not deployed: the
-  worker's companion read and the probe's usage price" below has the preview, the checks
-  after the deploy, and the two reasons to deploy them alone).
+- **The two changes of update 43** (2026-11-27; the owner approved both that day; neither
+  has a migration, a grant or a permission change):
   1. **The worker's credentials reach its PDF's upload and no companion upload** (commit
-     054d6f1). The worker probe gains one check, so its count becomes **102**.
+     054d6f1). The worker probe gained one check: its count is **102**.
   2. **The probe's Textract usage row carries the configured price of a page** (commit
      41fa401).
-- **Tested (2026-11-27), with both in.** The whole suite, with the test PostgreSQL and the
-  image tests required: 1,832 passed, none failed, none skipped (1,796 before; the new
-  ones are the tests of these two changes). Ruff, the format check and mypy pass. The
-  portal is unchanged since e70eaea, so its checks were left to CI. **CI passed on commit
-  41fa401** (`python`, `portal`, `portal-render`).
+- **Tested (2026-11-27), the code that is deployed now** (commit 41fa401; every commit
+  since is documentation only). The whole suite, with the test PostgreSQL and the image
+  tests required: 1,832 passed, none failed, none skipped (1,796 before; the new ones are
+  the tests of these two changes). Ruff, the format check and mypy pass. The portal is
+  unchanged since e70eaea, so its checks were left to CI. CI passed on commits 41fa401 and
+  3346624 (`python`, `portal`, `portal-render`).
+- **Found, not fixed: "Process again" is refused for five minutes after a companion
+  replacement takes effect**, with "This document is being processed now", though nothing
+  is running. Diagnosed from the logs on 2026-11-27; a fix is proposed and **the owner has
+  not decided** ("Process again after a companion replacement" below). Change nothing there
+  without the owner's word.
 - **Rule 6** (checked 2026-11-27, before stage 2 was built): the AI services opt-out policy
   in effect says `optOut` by default with no exception (last updated 2026-11-24 04:37:58
   UTC), and Bedrock has no invocation logging configuration in us-east-1. The check is the
@@ -289,9 +300,9 @@ kept beside each figure.
     worker task's role through the Textract endpoint. The page is one the probe draws, never
     a tenant's. Each call wrote its `ai_usage` row for the probe's fixture document in
     Isolation Test A, at no price (the probe did not know the price), and AWS bills the
-    page all the same. **Every isolation run costs one Textract page.** Built on
-    2026-11-27, not deployed yet: the row carries the configured price ("Built, not
-    deployed" below).
+    page all the same. **Every isolation run costs one Textract page.** Since update 43
+    (2026-11-28 00:34 UTC) the row carries the configured price ("The worker's companion
+    read and the probe's usage price" below).
   - The 8 user errors are the probes' deliberate refusals, four in each run.
 - **Retries: none that reached Textract.** The task tries a call again only after throttling,
   a server error or no answer, and Textract counted no throttling and no server error. A
@@ -512,9 +523,9 @@ Staging and Production, where the role's and the policy's names will differ:
 4. A file that was put on hold is not scanned again: discard its batch and upload it anew.
 
 **The worker's read of its document's companion upload: dropped. Approved by the owner as
-written here and built on 2026-11-27 (commit 054d6f1); not deployed.** What was built, and
-the checks after the deploy, are under "Built, not deployed" below. The proposal, as it
-was approved:
+written here, built on 2026-11-27 (commit 054d6f1), deployed and verified in dev the same
+day.** What was built, and how it was checked, are under "The worker's companion read and
+the probe's usage price" below. The proposal, as it was approved:
 
 - The task never reads that object. It reads the PDF, and the companion's `batch_files` row
   to say whether the document has one. The `companion` step, a Lambda with its own PIPELINE
@@ -530,10 +541,52 @@ was approved:
   no tenant stack run. The alternative, changing `pipeline.worker_grant` to list only the
   PDF, needs a migration for the same effect.
 
-### Built, not deployed: the worker's companion read and the probe's usage price (2026-11-27)
+### The worker's companion read and the probe's usage price (deployed and verified in dev 2026-11-27)
 
 Both approved by the owner on 2026-11-27 and built that day, each as its own commit.
-Neither is in AWS yet.
+Deployed as stack update 43 and verified the same evening.
+
+**Verified in dev after update 43** (owner; times Eastern, 2026-11-27):
+
+| Check | Result |
+| --- | --- |
+| The isolation suite | 73, 28, **102** and 28 |
+| The new check | "storage: reading its own document's companion upload" reads `denied:s3:GetObject` |
+| The three-keys defect | Fixed. Infinity Loans, `04-with-companion.pdf` in batch "Batch 1 and 4": a replacement rejected (19:47), a corrected one accepted (19:50), then "Process again" ran attempt 2 from 20:00:59 to 20:01:58 with every step passed |
+| "Process again", a plain document | `01-normal.pdf` in "batch doc 1": attempt 2 from 19:57:20 to 19:58:31, all passed |
+
+- **Read again from the logs** (read-only, 2026-11-28 UTC, which is the same evening):
+  - The probe: "probe finished", 102 checks, none failed (00:38:56 UTC). The new check's own
+    line: expected `denied:s3:GetObject`, outcome `denied:s3:GetObject` (00:38:31). So S3
+    names the read itself to a worker session on Fargate, as it does to READ and UPLOAD
+    sessions.
+  - The fixture's inbox object: GuardDuty scanned it (`NO_THREATS_FOUND`) and the scan
+    function logged "a later version is never used" at INFO (00:38:10). The three scan
+    alarms never left `OK`.
+  - The 04 document's attempt 2: execution `…-2` started 01:01:00, inspected 3 pages, text
+    read (3 from the text layer), "companion values stored" as version 3, grant released
+    01:01:58. Its row listed three inbox keys, and the worker got its credentials.
+- **Not read directly:** the price on the probe's new `ai_usage` row (no read path reaches
+  the table). The check "database: a usage row for its own Textract call" passed, the task
+  would not have run without a usable price, and the unit tests show the row.
+
+**The deploy made 8 updates and 8 replacements; the preview said 9 and 9.** The API's task
+definition was not replaced, and so the API service was not updated.
+
+- The preview was right about the API image's build (it ran again at 00:34:57 UTC): the
+  image's tag is a hash of its sources, and those include the whole `tss/assay_tss` tree
+  (`api.IMAGE_TREES`), where `policies.py` and `service.py` had changed.
+- But `api/Dockerfile` copies only five files of that package (`__init__`, `client`, `keys`,
+  `models`, `naming`), and none of them changed. Every layer came out as before, so the
+  build produced **the same image digest** (`sha256:f7b0dfd5…`; ECR now shows two tags on
+  that one image, pushed at 20:06 UTC). The task definition names the image by digest, so it
+  did not change: still revision 16, and the service's last rollout is still update 41's.
+- A preview cannot know this: the digest is an output of the build, unknown until it runs,
+  so everything that depends on it shows as changing. **Nothing went wrong, and the API was
+  spared a restart.** The other five images did change, with everything that depends on
+  them.
+- Not done (the owner may want it): hashing only those five files for the API image's tag,
+  so that a preview no longer shows the API changing for a TSS-only change.
 
 **1. The worker's credentials reach its PDF's upload and no companion upload** (commit
 054d6f1; `tss/assay_tss/policies.py`, `service.py`).
@@ -557,14 +610,14 @@ Neither is in AWS yet.
   upload key, so GuardDuty scans it.** Its row is committed before the object is written
   and already has a result, so the scan function logs "a later version is never used" at
   INFO and changes nothing: no alarm (tested for every scan result).
-- **Found on the way: a defect in what is deployed today.** A replaced companion file and
-  its replacement both stay `clean` with the document's ID, so such a document's row lists
-  three keys. The TSS refused a row of more than two, so **a document whose companion file
-  was replaced can get no worker credentials: "Process again" would fail for it** at the
-  task's first read. Shown by a test against PostgreSQL and by the old policy's own test
-  (three upload keys raised); not seen in AWS, and no failure of this kind was reported.
-  The new code serves the row whatever its length. Until it is deployed the defect is live
-  in dev.
+- **Found on the way: a defect in what was deployed before update 43.** A replaced
+  companion file and its replacement both stay `clean` with the document's ID, so such a
+  document's row lists three keys. The TSS refused a row of more than two, so a document
+  whose companion file was replaced could get no worker credentials: "Process again" would
+  have failed for it at the task's first read. Shown by a test against PostgreSQL and by
+  the old policy's own test (three upload keys raised); never seen failing in AWS, because
+  nobody tried that case before the fix. The new code serves the row whatever its length,
+  and the owner's check after update 43 shows it working.
 
 **2. The probe's Textract usage row carries the configured price** (commit 41fa401;
 `workers/assay_workers/worker/probe.py`, `__main__.py`).
@@ -575,7 +628,7 @@ Neither is in AWS yet.
 - The task's entry point reads the text step's settings for a probe run too and hands the
   probe the price. A probe task without a usable price does not run. The price is still
   read in `__main__.py` only and written in no worker module (tested).
-- **Rows already written stay at no price.** Every isolation run before this deploys wrote
+- **Rows already written stay at no price.** Every isolation run before update 43 wrote
   its row with `unit_price` 0 and `cost` 0 (at least three on 2026-11-27, on the probe's
   fixture document in Isolation Test A). Nothing can change them: `app_worker` has no
   UPDATE on `ai_usage`, and nothing is deleted. The usage and cost view, when it is built,
@@ -591,13 +644,11 @@ Neither is in AWS yet.
   provisioning state machines (each definition names a replaced task definition).
 - No role, policy, endpoint, queue, topic, alarm or database change. No migration. No
   `update_tenants.py` run.
-- **The preview shows no reason to deploy them alone.** Two reasons outside it, for the
-  owner to weigh: the defect above is live until this is deployed; and the new check's
-  expected answer has not been seen from a worker session on Fargate (below), which is
-  easier to read in a deploy that changes nothing else than beside stage 3's new checks.
+- The owner deployed them alone, before stage 3 (update 43), and the deploy changed one
+  pair of resources fewer than this preview: see "8 updates and 8 replacements" above.
 
 **After the deploy** (owner; PowerShell, one line each; deploy when no document is in
-progress):
+progress). Done on 2026-11-27; kept as the order for another stack:
 
 1. `pulumi up --cwd infra --stack pilartech/assay-platform/dev`. Anything beyond the
    preview above: stop and ask.
@@ -608,7 +659,8 @@ progress):
    `aws cloudwatch describe-alarms --alarm-name-prefix assay-dev-pipeline-scan --profile pilar-dev --region us-east-1 --query "MetricAlarms[].[AlarmName,StateValue]" --output text`
 4. In a browser, as a tenant admin: a document with a companion file, replace the companion
    file, wait until it has taken effect, then "Process again". It must pass Inspection and
-   Text. (This is the case that fails on what is deployed today.)
+   Text. (This is the case that failed before update 43.) **Wait five minutes after the
+   replacement takes effect**, or "Process again" is refused: see the next section.
 5. `uv run scripts/check_deployment.py`.
 
 **What a failure of the new check means.**
@@ -618,6 +670,69 @@ progress):
 | `allowed` | The worker can read the companion upload: the old TSS image is still serving. Stop |
 | `denied:s3:ListBucket` | The fixture's object is not there (the isolation Lambda could not write it). Nothing is shown either way |
 | `denied:no_reason` | S3 refused, in words the check does not know. Seen so far only for READ and UPLOAD sessions from the isolation Lambda (2026-11-24). The read was still refused; record S3's message before changing the check |
+
+### "Process again" after a companion replacement: refused for five minutes (diagnosed 2026-11-27; a fix is proposed, not built)
+
+Found by the owner on 2026-11-27 and diagnosed from the logs, read-only. **Nothing was
+changed. The owner decides on the fix.**
+
+**What happened** (Infinity Loans, `04-with-companion.pdf`, document `1e6adb9b-…`; the
+API's log and the pipeline's logs; UTC, with Eastern in brackets):
+
+| Time | What |
+| --- | --- |
+| 20:38:35 (15:38:35) | Attempt 1's last event: the companion step stored version 1. Its grant was released a second before. Nothing ran for the document after this |
+| 00:47:36 (19:47:36) | A replacement companion registered (201). 00:47:44: the scan function refused it (`companion_replace_rejected`, `companion_invalid`). No document event |
+| 00:50:52.8 (19:50:52) | The corrected replacement registered (201) |
+| 00:50:55 (19:50:55) | The scan function: "companion values stored", version 2. In the same transaction it wrote a `companion`/`stored` document event, stamped with attempt 1 |
+| 00:51:58.325 (19:51:58) | "Process again": **409** |
+| 00:53:24.497 (19:53:24) | "Process again": **409** |
+| 00:55:55 (19:55:55) | The hold ends: five minutes after the event, by the clock alone |
+| 01:00:59.971 (20:00:59) | "Process again": 202, attempt 2. It would have been accepted from 19:55:55 on; nobody asked in between |
+
+- **The reason for both refusals: `attempt_running`.** The API's log has the status (409)
+  and not the code. The code is known from the message the owner saw, which the portal
+  shows for that code only, and from the code path below.
+- **What held the document.** `batches._under_way`: a `processing` document counts as under
+  way while it has a live worker grant, or while any event of its current attempt is less
+  than five minutes old (`RUNNING_GRACE`; `viewed` events excepted). `document_event`
+  stamps every event with the document's current attempt. So the replacement's `stored`
+  event, written by the scan function at 00:50:55, counted as the attempt's activity. No
+  grant was live, and attempt 1 had ended four hours before.
+- **How it ended.** Nothing ended it but time: at 00:55:55 the event was five minutes old.
+  No row changed and nothing ran.
+- **Is it by design?** The rule is (part 2 of stage 1: `processing` whose attempt has
+  ended, "no live worker grant and nothing recorded for the current attempt in the last 5
+  minutes"), and it is needed until stage 4, because a document that passed its steps
+  stays `processing` and its status cannot say whether an attempt runs. **That it catches a
+  companion replacement is a side effect nobody decided.** The replacement was complete at
+  00:50:55, in one transaction: nothing was still finishing, so the message was wrong, and
+  "the companion replacement is still finishing" would be wrong too.
+- **The rejected replacement held nothing:** a refused file writes an audit row and no
+  document event.
+
+**Proposed** (owner's decision; no migration, no grant, no permission):
+
+1. **A replacement's event does not count as the attempt's activity.** The scan function
+   marks the event it writes for a replacement as written outside an attempt's run (one
+   more key in the event's detail), and `_under_way` leaves such events out. The pipeline's
+   own companion step, at the end of an attempt, writes its event as before and still
+   counts. "Process again" is then accepted straight after a replacement, unless an attempt
+   really is running (its grant and its own events still hold it).
+2. **The message, for the cases that remain.** After an attempt's own last step the
+   document is still refused for up to five minutes, with every step shown as passed.
+   Proposed wording: "This document is being processed, or was a few minutes ago. Try again
+   shortly." Stage 4 removes that tail: the final status is set inside the task, and
+   `processing` then means running.
+3. **Shortening the five minutes: possible, not proposed now.** Nothing's correctness rests
+   on it: a superseded attempt writes nothing, and a document waiting for a worker slot
+   writes no event at all, so the rule already does not cover a long wait. What it guards
+   is a second start in the gaps between a live attempt's events with no live grant: the
+   queue, the starter, about 75 seconds of Lambda retries, the 30 and 60 second waits. Two
+   minutes would cover those. Stage 4 changes the rule anyway.
+- No existing test changes: "something happened to it a moment ago" stays refused (that
+  event is the pipeline's own). New tests: a replacement applied by the scan function does
+  not hold the document; one applied while an attempt runs does not free it.
 
 ### For stage 3 (steps 6 to 8: split, signer details, field extraction)
 
@@ -675,8 +790,9 @@ and 8, and "The worker"), section 7 (the tables), section 7b (models) and sectio
 | Bedrock permissions | None: the worker task's role has no Bedrock action, and neither has the isolation Lambda's |
 | `pyHanko` | Not in `uv.lock`. Its native dependencies had Python 3.14 Linux x86-64 wheels on 2026-11-23; check again when it is added. A lock change rebuilds all eight images and needs `uv run scripts/image_packages.py --write` |
 | The fields object | `derived/fields/{doc}.json` (`keys.fields_key`) is already in the worker's session policy, read and write. Nothing writes it yet |
-| The worker's inbox access | One object: the PDF's upload (built 2026-11-27, not deployed). A step that needs a companion file's content reads the stored values, not the inbox |
-| Not deployed | The companion-read narrowing and the probe's usage price ("Built, not deployed" above). Stage 3's first deploy carries them unless the owner deploys them alone first; either way the worker probe's count starts from 102 |
+| The worker's inbox access | One object: the PDF's upload (deployed 2026-11-27, update 43). A step that needs a companion file's content reads the stored values, not the inbox |
+| The isolation suite's counts | 73, 28, 102 and 28 (2026-11-27, after update 43). Stage 3's new checks add to these |
+| Awaiting the owner | The fix for "Process again" after a companion replacement (proposed above, not built). If approved it can ride with stage 3's first deploy |
 | The text to read | `derived/text/{doc}.json` at `documents.text_version_id`: per page `text` (the source), and for some `ocr` pages `text_layer` (`is_source: false`) |
 | The steps panel | `laterStepsPending` is keyed on the text step's result. It stays until stage 4, and must then be keyed on stage 3's last step |
 | Statuses | A document that passes every step stays `processing` until stage 4. "Mark as reviewed" and its route exist, and no document can be `needs_review` yet |
@@ -771,8 +887,10 @@ Each is recorded in full further down; this is the index.
 | What the file picker hands the page | Neither the server nor a test can see it. The screen now says how many files it was handed and how many it added | "Upload: files that went missing" |
 | The 30 seconds after the Text step | Fargate stopping the task, not our code. Stage 4 moves the final status into the task | "For stage 4" |
 | The policy simulator, several resources | With more than one `--resource-arns` it gives one decision for all of them together. Simulate each resource alone | "The scan role's reach" |
-| One Textract page per isolation run | **Each isolation run costs one Textract page.** The worker probe's positive control is a real, billed call on a synthetic page, with its own `ai_usage` row, at the configured price once the change of 2026-11-27 is deployed (at no price before) | "The 1,000-page run", "Built, not deployed" |
-| A grant row longer than expected | A replaced companion file stays `clean`, so a document's row can list three inbox keys or more. A fixed maximum refused the whole row; the TSS now picks the one key it needs | "Built, not deployed" |
+| One Textract page per isolation run | **Each isolation run costs one Textract page.** The worker probe's positive control is a real, billed call on a synthetic page, with its own `ai_usage` row, at the configured price since update 43 (at no price before) | "The 1,000-page run", "The worker's companion read and the probe's usage price" |
+| A grant row longer than expected | A replaced companion file stays `clean`, so a document's row can list three inbox keys or more. A fixed maximum refused the whole row; the TSS now picks the one key it needs | "The worker's companion read and the probe's usage price" |
+| A preview counts an image's dependents | An image's digest is unknown until it is built, so a preview shows its task definition or function as changing. If the files the Dockerfile copies did not change, the build gives the same digest and nothing downstream changes (the API, update 43: 8 and 8 for a preview of 9 and 9) | The same section |
+| Every event counts as the attempt's activity | `document_event` stamps the current attempt, and "under way" looks at any event of it in the last five minutes: a companion replacement held "Process again" for five minutes with nothing running | "Process again after a companion replacement" |
 | "The latest row" by ID | IDs are random UUIDs: `ORDER BY id DESC LIMIT 1` is not the row written last. A test finds a run's own row as the one that was not there before | `tests/unit/test_worker_probe.py`, `usage_ids` |
 
 ### Open items and known gaps
@@ -788,10 +906,10 @@ Decisions the owner has still to make, or things to do:
   keep the status reason, and see "Going back" there.
 - **The upload fixes are deployed** (stack update 42). Not reported yet: the line after an
   addition, looked at in a browser ("6 files chosen: 6 added.").
-- **Deploy the worker's companion-read narrowing and the probe's usage price** (built
-  2026-11-27, commits 054d6f1 and 41fa401; "Built, not deployed" above has the preview and
-  the checks). With stage 3's first deploy, or alone before it: the owner's decision. Until
-  then a document whose companion file was replaced cannot be processed again.
+- **Decide on the fix for "Process again" after a companion replacement** (diagnosed
+  2026-11-27; "Process again after a companion replacement" above): the replacement's event
+  no longer counting as the attempt's activity, the message's wording, and whether to
+  shorten the five minutes. Until then: wait five minutes after a replacement takes effect.
 - **When the usage and cost view is built: verify that `11-scanned-1000-pages.pdf`
   (Infinity Loans, 2026-11-27) shows exactly 1,000 Textract rows** (owner, 2026-11-27). No
   read path reaches `ai_usage` today, and none is to be added for this. The evidence so far
@@ -846,12 +964,9 @@ Known gaps: things not proven, or proven only in part:
 - **Cognito's `amr` claim**: whether it shows MFA has still not been checked.
 - **The scan role's limit to `inbox/`**: GuardDuty's later checks of a plan's role, and
   whether object tags are still written, have not been seen ("The scan role's reach").
-- **The worker probe's companion-upload check has not run in AWS** (built 2026-11-27, not
-  deployed). Not seen: S3 naming `s3:GetObject` to a worker session on Fargate (seen for
-  READ and UPLOAD sessions from the isolation Lambda), and the scan function ignoring
-  GuardDuty's result for the fixture's inbox object (unit-tested only).
-- **"Process again" after a companion replacement has never been tried in AWS.** By the
-  code it fails on what is deployed today, and works once the narrowing is deployed.
+- **The price on the probe's `ai_usage` rows since update 43** has not been read: no read
+  path reaches the table. The usage and cost view will show it, beside the earlier rows at
+  no price.
 - **The break-glass log** is empty because the role has never been assumed.
 
 Step 1 was verified on 2026-11-23:
