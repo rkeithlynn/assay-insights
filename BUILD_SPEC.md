@@ -983,6 +983,19 @@ owner accepted.
    the read (deployed and verified in dev 2026-11-27: the isolation suite passes with 73,
    28, 102 and 28 checks, and a document whose companion file was replaced can be
    processed again).
+9. "Process again" is refused while an attempt is under way: a live worker grant, or any
+   event of the current attempt in the last five minutes. An event written for a companion
+   file attached or replaced after ingestion is marked as written outside an attempt's run
+   and does not count, so "Process again" is accepted straight after a replacement; the
+   pipeline's own companion step still counts. The refusal reads "This document is being
+   processed, or was a few minutes ago. Try again shortly." The five minutes stay until
+   stage 4, which sets the final status inside the task and replaces the rule (built
+   2026-11-27; deploys with stage 3's first deploy).
+10. An image's tag is a hash of its sources, and may hash more than its Dockerfile copies
+    (the API's hashes the whole `tss/assay_tss` tree and copies five files of it). That
+    stays. A preview can therefore show an image's task definition or function as changing
+    when the build then gives the same image, and the deploy changes fewer resources than
+    the preview said.
 7. The GuardDuty scan role's object access stops at `inbox/`, behind a stack switch (the
    tenant isolation list above). Tested first on Isolation Test A, with a clean file and
    EICAR.
